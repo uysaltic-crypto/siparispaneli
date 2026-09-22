@@ -203,7 +203,11 @@ async function loadPlatforms() {
 
   document.getElementById('importButtons').innerHTML = state.platforms
     .filter(p => p.configured)
-    .map(p => `<button class="ghost small" onclick="triggerImport('${p.id}')">${p.name} İçe Aktar</button>`).join(' ');
+    .map(p => `<button class="ghost small" onclick="triggerImport('${p.id}')">${p.name} İçe Aktar</button>`).join(' ')
+    + ' '
+    + state.platforms
+      .filter(p => p.configured && p.pullable)
+      .map(p => `<button class="ghost small" onclick="triggerPull('${p.id}')">${p.name} Siteden Çek${p.stockPullVerified ? '' : ' (deneysel)'}</button>`).join(' ');
 
   const unverified = state.platforms.filter(p => p.configured && !p.verified);
   document.getElementById('unverifiedArea').innerHTML = unverified.length
@@ -373,6 +377,27 @@ async function pushProduct(barcode) {
 function triggerImport(platform) {
   importPlatform = platform;
   document.getElementById('importFile').click();
+}
+
+async function triggerPull(platform) {
+  const pm = platformMeta(platform);
+  toast(`${pm.name}: stok listesi siteden çekiliyor…`);
+  try {
+    const resp = await fetch('/api/products/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform })
+    });
+    const result = await resp.json();
+    if (!resp.ok || !result.ok) {
+      toast(`${pm.name} hata: ${result.error || 'bilinmeyen hata'}`);
+      return;
+    }
+    toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi).`);
+    loadProducts();
+  } catch (e) {
+    toast(`${pm.name} bağlantı hatası: ${e.message}`);
+  }
 }
 
 function handleImportFile(e) {
