@@ -156,6 +156,50 @@ function normalizeHbPackage(pkg) {
   };
 }
 
+// Mevcut stok/ürün listesini Hepsiburada'dan çekme (best-effort — resmi dokümandan
+// tam doğrulanamadı, uç nokta yapısı push tarafıyla aynı host/desen üzerinden tahmin edildi).
+async function fetchStockHepsiburada() {
+  if (!hbConfigured()) return { platform: "hb", error: "Hepsiburada API bilgileri .env dosyasında eksik.", rows: [] };
+  const { HB_MERCHANT_ID, HB_USERNAME, HB_PASSWORD, HB_ENV } = process.env;
+  const host = HB_ENV === "test" ? "listing-external-sit.hepsiburada.com" : "listing-external.hepsiburada.com";
+  const url = `https://${host}/listings/merchantid/${HB_MERCHANT_ID}`;
+  const rows = [];
+  try {
+    let offset = 0;
+    const limit = 200;
+    for (let page = 0; page < 25; page++) {
+      const resp = await axios.get(url, {
+        auth: { username: HB_USERNAME, password: HB_PASSWORD },
+        params: { limit, offset },
+        headers: { "User-Agent": `${HB_MERCHANT_ID} - SelfIntegration`, Accept: "application/json" },
+        timeout: 20000,
+      });
+      const items = resp.data?.listings || resp.data?.Listings || resp.data?.items || (Array.isArray(resp.data) ? resp.data : []);
+      if (!items.length) break;
+      items.forEach((it) => {
+        const barcode = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "").trim();
+        if (!barcode) return;
+        rows.push({
+          barcode,
+          stock: Number(it.AvailableStock ?? it.availableStock ?? 0),
+          name: it.ProductName || it.productName || "",
+        });
+      });
+      if (items.length < limit) break;
+      offset += limit;
+    }
+    return { platform: "hb", error: null, rows };
+  } catch (err) {
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? "Hepsiburada kimlik doğrulama hatası — kullanıcı adı/şifreyi kontrol et."
+        : err.response?.data
+        ? `Hepsiburada hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Hepsiburada bağlantı hatası: ${err.message}`;
+    return { platform: "hb", error: msg, rows: [] };
+  }
+}
+
 async function pushStockToHepsiburada(barcode, quantity) {
   if (!hbConfigured()) return { ok: false, message: "Hepsiburada API bilgisi eksik." };
   const { HB_MERCHANT_ID, HB_USERNAME, HB_PASSWORD, HB_ENV } = process.env;
@@ -231,6 +275,50 @@ function normalizeTyPackage(pkg) {
     date: pkg.orderDate || null,
     lines,
   };
+}
+
+// Mevcut stok/ürün listesini Trendyol'dan çekme — resmi dokümandan doğrulandı
+// (Ürün Filtreleme – Onaylı Ürün V2 Stok ve Fiyat).
+async function fetchStockTrendyol() {
+  if (!tyConfigured()) return { platform: "ty", error: "Trendyol API bilgileri .env dosyasında eksik.", rows: [] };
+  const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+  const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
+  const url = `https://${host}/integration/product/sellers/${TY_SELLER_ID}/products/approved/inventory-and-price`;
+  const rows = [];
+  try {
+    let page = 0;
+    let nextPageToken = null;
+    for (let i = 0; i < 25; i++) {
+      const params = nextPageToken ? { size: 100, nextPageToken } : { size: 100, page };
+      const resp = await axios.get(url, {
+        auth: { username: TY_API_KEY, password: TY_API_SECRET },
+        params,
+        headers: { "User-Agent": `${TY_SELLER_ID} - SelfIntegration`, Accept: "application/json" },
+        timeout: 20000,
+      });
+      const content = resp.data?.content || [];
+      content.forEach((item) => {
+        (item.variants || []).forEach((v) => {
+          const barcode = String(v.barcode || v.stockCode || "").trim();
+          if (!barcode) return;
+          rows.push({ barcode, stock: Number(v.quantity || 0), name: item.productMainId || "" });
+        });
+      });
+      nextPageToken = resp.data?.nextPageToken || null;
+      const totalPages = resp.data?.totalPages ?? 1;
+      page++;
+      if (!content.length || (!nextPageToken && page >= totalPages)) break;
+    }
+    return { platform: "ty", error: null, rows };
+  } catch (err) {
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? "Trendyol kimlik doğrulama hatası — API key/secret veya seller ID'yi kontrol et."
+        : err.response?.data
+        ? `Trendyol hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Trendyol bağlantı hatası: ${err.message}`;
+    return { platform: "ty", error: msg, rows: [] };
+  }
 }
 
 async function pushStockToTrendyol(barcode, quantity) {
@@ -405,15 +493,23 @@ async function pushStockToCiceksepeti(barcode, quantity) {
    PLATFORM KAYDI — yeni bir pazaryeri eklemek için buraya bir satır
 ================================================================== */
 const PLATFORMS = [
-  { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, verified: true },
-  { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, verified: true },
-  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, verified: true },
-  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, verified: false },
+  { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
+  { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
+  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: null, stockPullVerified: false, verified: true },
+  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: null, stockPullVerified: false, verified: false },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
   res.json({
-    platforms: PLATFORMS.map((p) => ({ id: p.id, name: p.name, color: p.color, configured: p.configured(), verified: p.verified })),
+    platforms: PLATFORMS.map((p) => ({
+      id: p.id,
+      name: p.name,
+      color: p.color,
+      configured: p.configured(),
+      verified: p.verified,
+      pullable: !!p.fetchStock,
+      stockPullVerified: p.stockPullVerified,
+    })),
   });
 });
 
@@ -532,12 +628,9 @@ app.delete("/api/products/:barcode", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// Excel/CSV içe aktarma: dosya tarayıcıda (SheetJS ile) okunur, satırlar burada birleştirilir.
-app.post("/api/products/import", requireAuth, (req, res) => {
-  const { platform, rows } = req.body || {};
-  if (!PLATFORMS.some((p) => p.id === platform) || !Array.isArray(rows)) {
-    return res.status(400).json({ ok: false, error: "Geçersiz istek." });
-  }
+// Ortak birleştirme mantığı: hem Excel/CSV içe aktarma hem de "Siteden Çek" (API)
+// aynı satır listesini (barcode, stock, name) bu fonksiyonla ürün kataloğuna işler.
+function mergeStockRows(platform, rows) {
   let updated = 0,
     created = 0;
   rows.forEach((r) => {
@@ -547,11 +640,39 @@ app.post("/api/products/import", requireAuth, (req, res) => {
     const existed = !!products[barcode];
     const p = ensureProduct(barcode, r.name);
     p.stocks[platform] = stock;
+    // Ürün daha önce hiç görülmemişse (merkezi stok hiç ayarlanmamışsa) bu platformun
+    // stok değeri merkezi stoğun ilk değeri olarak da kullanılır.
+    if (!existed) p.centralStock = stock;
     if (r.name && (!p.name || p.name === "İsimsiz ürün")) p.name = r.name;
     existed ? updated++ : created++;
   });
   persistProducts();
-  res.json({ ok: true, updated, created });
+  return { updated, created };
+}
+
+// Excel/CSV içe aktarma: dosya tarayıcıda (SheetJS ile) okunur, satırlar burada birleştirilir.
+app.post("/api/products/import", requireAuth, (req, res) => {
+  const { platform, rows } = req.body || {};
+  if (!PLATFORMS.some((p) => p.id === platform) || !Array.isArray(rows)) {
+    return res.status(400).json({ ok: false, error: "Geçersiz istek." });
+  }
+  const result = mergeStockRows(platform, rows);
+  res.json({ ok: true, ...result });
+});
+
+// Siteden çekme: ilgili platformun API'sinden mevcut stok/ürün listesini alıp
+// aynı birleştirme mantığıyla kataloğa işler. Sadece fetchStock tanımlı platformlarda çalışır.
+app.post("/api/products/pull", requireAuth, async (req, res) => {
+  const { platform } = req.body || {};
+  const pl = PLATFORMS.find((p) => p.id === platform);
+  if (!pl) return res.status(400).json({ ok: false, error: "Geçersiz platform." });
+  if (!pl.fetchStock) return res.status(400).json({ ok: false, error: `${pl.name} için siteden çekme henüz desteklenmiyor.` });
+  if (!pl.configured()) return res.status(400).json({ ok: false, error: `${pl.name} API bilgileri .env dosyasında eksik.` });
+
+  const result = await pl.fetchStock();
+  if (result.error) return res.status(502).json({ ok: false, error: result.error });
+  const merged = mergeStockRows(platform, result.rows);
+  res.json({ ok: true, ...merged, total: result.rows.length });
 });
 
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder
