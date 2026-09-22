@@ -47,7 +47,7 @@ function persistPushLog() {
 
 function ensureProduct(barcode, name) {
   if (!products[barcode]) {
-    products[barcode] = { name: name || "İsimsiz ürün", stocks: {}, centralStock: 0 };
+    products[barcode] = { name: name || "İsimsiz ürün", stocks: {}, centralStock: 0, image: null };
   }
   if (!products[barcode].stocks) products[barcode].stocks = {};
   return products[barcode];
@@ -278,12 +278,19 @@ function normalizeTyPackage(pkg) {
 }
 
 // Mevcut stok/ürün listesini Trendyol'dan çekme — resmi dokümandan doğrulandı
-// (Ürün Filtreleme – Onaylı Ürün V2 Stok ve Fiyat).
+// (Ürün Filtreleme - Onaylı Ürün v2). Bu uç nokta stokla birlikte ürün başlığını
+// ve görsel URL'sini de döndürdüğü için isim/resim eksikliği burada çözülüyor.
+function resolveTyImage(url) {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  return `https://cdn.dsmcdn.com${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
 async function fetchStockTrendyol() {
   if (!tyConfigured()) return { platform: "ty", error: "Trendyol API bilgileri .env dosyasında eksik.", rows: [] };
   const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
   const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
-  const url = `https://${host}/integration/product/sellers/${TY_SELLER_ID}/products/approved/inventory-and-price`;
+  const url = `https://${host}/integration/product/sellers/${TY_SELLER_ID}/products/approved`;
   const rows = [];
   try {
     let page = 0;
@@ -298,10 +305,12 @@ async function fetchStockTrendyol() {
       });
       const content = resp.data?.content || [];
       content.forEach((item) => {
+        const name = item.title || item.productMainId || "";
+        const image = resolveTyImage(item.images?.[0]?.url);
         (item.variants || []).forEach((v) => {
           const barcode = String(v.barcode || v.stockCode || "").trim();
           if (!barcode) return;
-          rows.push({ barcode, stock: Number(v.quantity || 0), name: item.productMainId || "" });
+          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image });
         });
       });
       nextPageToken = resp.data?.nextPageToken || null;
@@ -603,7 +612,7 @@ app.post("/api/refresh", requireAuth, async (req, res) => {
    API — Stok / ürün yönetimi
 ------------------------------------------------------------------ */
 app.get("/api/products", requireAuth, (req, res) => {
-  res.json({ products: Object.entries(products).map(([barcode, p]) => ({ barcode, name: p.name, stocks: p.stocks || {}, centralStock: p.centralStock })) });
+  res.json({ products: Object.entries(products).map(([barcode, p]) => ({ barcode, name: p.name, stocks: p.stocks || {}, centralStock: p.centralStock, image: p.image || null })) });
 });
 
 app.post("/api/products", requireAuth, (req, res) => {
@@ -644,6 +653,7 @@ function mergeStockRows(platform, rows) {
     // stok değeri merkezi stoğun ilk değeri olarak da kullanılır.
     if (!existed) p.centralStock = stock;
     if (r.name && (!p.name || p.name === "İsimsiz ürün")) p.name = r.name;
+    if (r.image) p.image = r.image;
     existed ? updated++ : created++;
   });
   persistProducts();
