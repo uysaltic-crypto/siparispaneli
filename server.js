@@ -54,16 +54,22 @@ function ensureProduct(code, name) {
   if (!products[code]) {
     products[code] = {
       name: name || "İsimsiz ürün",
+      category: "",
       stocks: {},
       centralStock: 0,
       image: null,
       skus: {},
+      prices: {}, // { platformId: number } — Prapazar'daki gibi her platformun kendi satış fiyatı
+      listingStatus: {}, // { platformId: 'satista' | 'pasif' }
       pricing: { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
       competitors: [], // [{ url, label, lastPrice, lastCheckedAt, lastError, sellerName }]
     };
   }
   if (!products[code].stocks) products[code].stocks = {};
   if (!products[code].skus) products[code].skus = {};
+  if (!products[code].prices) products[code].prices = {};
+  if (!products[code].listingStatus) products[code].listingStatus = {};
+  if (products[code].category === undefined) products[code].category = "";
   if (!products[code].pricing) products[code].pricing = { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
   if (!products[code].competitors) products[code].competitors = [];
   return products[code];
@@ -496,7 +502,10 @@ async function repriceProduct(code) {
       const sku = skuForPlatform(code, "ty");
       const r = await pushPriceToTrendyol(sku, target, qty);
       pushResult = { ok: r.ok, message: r.message, newPrice: target };
-      if (r.ok) p.pricing.myPrice = target;
+      if (r.ok) {
+        p.pricing.myPrice = target;
+        p.prices.ty = target;
+      }
       pushLog.push({
         time: new Date().toISOString(),
         barcode: code,
@@ -800,8 +809,11 @@ app.get("/api/products", requireAuth, (req, res) => {
       code,
       barcode: code, // geriye dönük uyumluluk için aynı alan iki isimle de dönüyor
       name: p.name,
+      category: p.category || "",
       stocks: p.stocks || {},
       skus: p.skus || {},
+      prices: p.prices || {},
+      listingStatus: p.listingStatus || {},
       centralStock: p.centralStock,
       image: p.image || null,
       pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
@@ -824,15 +836,27 @@ app.get("/api/products/match-status", requireAuth, (req, res) => {
 });
 
 app.post("/api/products", requireAuth, (req, res) => {
-  const { code, barcode, name, centralStock, stocks, skus } = req.body || {};
+  const { code, barcode, name, category, centralStock, stocks, skus, prices, listingStatus } = req.body || {};
   const productCode = String(code || barcode || "").trim();
   if (!productCode) return res.status(400).json({ ok: false, error: "Ürün kodu gerekli." });
   const p = ensureProduct(productCode, name);
   if (name?.trim()) p.name = name.trim();
+  if (category !== undefined) p.category = String(category || "").trim();
   if (centralStock !== undefined && centralStock !== "") p.centralStock = Number(centralStock);
   if (stocks && typeof stocks === "object") {
     Object.entries(stocks).forEach(([platformId, val]) => {
       if (val !== undefined && val !== "") p.stocks[platformId] = Number(val);
+    });
+  }
+  if (prices && typeof prices === "object") {
+    Object.entries(prices).forEach(([platformId, val]) => {
+      if (val === "" || val === null) delete p.prices[platformId];
+      else if (val !== undefined) p.prices[platformId] = Number(val);
+    });
+  }
+  if (listingStatus && typeof listingStatus === "object") {
+    Object.entries(listingStatus).forEach(([platformId, val]) => {
+      p.listingStatus[platformId] = val === "pasif" ? "pasif" : "satista";
     });
   }
   const conflicts = [];
