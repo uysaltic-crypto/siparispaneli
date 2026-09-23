@@ -39,6 +39,25 @@
   .badge.ok { color:var(--ok); background:#34D39918; }
   .badge.fail { color:var(--danger); background:#F8717118; }
   .badge.unverified { color:var(--warn); background:#FBBF2418; }
+
+  /* Ürün kartı (Prapazar tarzı) */
+  .pcard { border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:12px; background:var(--surface); cursor:grab; transition:border-color .12s, background .12s, opacity .12s; }
+  .pcard.dragging { opacity:.4; }
+  .pcard.drag-over { border-color:var(--ok); background:#34D39912; }
+  .pcard-drag-handle { color:var(--muted); font-size:13px; cursor:grab; padding:2px 4px; flex-shrink:0; }
+  .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
+  .pcard-title { font-weight:700; }
+  .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
+  .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
+  .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
+  .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
+  .pchip-dot { width:8px; height:8px; border-radius:50%; }
+  .pchip input[type=number] { width:70px; }
+  .pchip .status-btn { font-size:10px; padding:2px 8px; border-radius:100px; border:none; cursor:pointer; }
+  .status-btn.satista { background:#34D39918; color:var(--ok); }
+  .status-btn.pasif { background:#F8717118; color:var(--danger); }
   .muted { color:var(--muted); font-size:11px; }
   .amount { font-family:monospace; font-weight:600; }
   #loginScreen { display:flex; align-items:center; justify-content:center; height:100vh; }
@@ -125,22 +144,21 @@
         <span id="importButtons"></span>
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(event)">
       </div>
+      <p class="muted" style="margin:-6px 0 10px;">İki ürünü birleştirmek için birini diğerinin üzerine sürükleyip bırak.</p>
 
       <div class="addform" id="addForm" style="display:none;">
-        <div><label>Barkod/SKU</label><input type="text" id="newBarcode"></div>
+        <div><label>Ürün Kodu</label><input type="text" id="newBarcode"></div>
         <div><label>Ürün Adı</label><input type="text" id="newName"></div>
-        <div id="addFormPlatformFields"></div>
+        <div><label>Kategori</label><input type="text" id="newCategory" placeholder="Ana Kategori -> Alt Kategori"></div>
         <div><label>Merkezi Stok</label><input type="number" id="newCentral"></div>
+        <div id="addFormPlatformFields" style="grid-column:1/-1; display:flex; flex-wrap:wrap; gap:10px;"></div>
         <div style="grid-column:1/-1; display:flex; justify-content:flex-end; gap:8px;">
           <button class="ghost small" onclick="toggleAddForm()">Vazgeç</button>
           <button class="small" onclick="addProduct()">Kaydet</button>
         </div>
       </div>
 
-      <table>
-        <thead><tr id="stockHeadRow"></tr></thead>
-        <tbody id="stockRows"></tbody>
-      </table>
+      <div id="stockCards"></div>
       <div id="stockEmpty" class="empty" style="display:none;">Henüz ürün yok. Excel yükle ya da elle ekle.</div>
     </div>
 
@@ -317,16 +335,13 @@ async function loadPlatforms() {
     ? `<div class="warnbox">${unverified.map(p => p.name).join(', ')} entegrasyonunun uç nokta/alan adları resmi dokümandan tam doğrulanamadı — ilk denemede bir hata çıkarsa Senkron Günlüğü'ndeki mesajı ilet, birlikte düzeltelim.</div>`
     : '';
 
-  // Stok tablosu başlıkları
+  // Stok kartlarında hangi platformların gösterileceği (tablo değil, kart tasarımı kullanılıyor)
   const activePlatforms = state.platforms.filter(p => p.configured);
-  document.getElementById('stockHeadRow').innerHTML =
-    '<th>Ürün</th>' +
-    activePlatforms.map(p => `<th style="color:${p.color}">${p.name}</th>`).join('') +
-    '<th>Merkezi</th><th></th><th></th>';
 
-  document.getElementById('addFormPlatformFields').outerHTML = activePlatforms.map(p =>
-    `<div><label>${p.name}</label><input type="number" id="new_${p.id}"></div>`
-  ).join('') + '<div id="addFormPlatformFieldsEnd" style="display:none"></div>';
+  document.getElementById('addFormPlatformFields').innerHTML = activePlatforms.map(p =>
+    `<div><label>${p.name} Stok</label><input type="number" id="new_${p.id}"></div>
+     <div><label>${p.name} Fiyat</label><input type="number" step="0.01" id="newprice_${p.id}"></div>`
+  ).join('');
 }
 
 async function refresh(force) {
@@ -405,32 +420,123 @@ async function loadProducts() {
 function renderStock() {
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
   let list = state.products;
-  if (q) list = list.filter(p => p.barcode.toLocaleLowerCase('tr').includes(q) || (p.name||'').toLocaleLowerCase('tr').includes(q));
+  if (q) list = list.filter(p => p.barcode.toLocaleLowerCase('tr').includes(q) || (p.name||'').toLocaleLowerCase('tr').includes(q) || (p.category||'').toLocaleLowerCase('tr').includes(q));
 
   const activePlatforms = state.platforms.filter(p => p.configured);
-  const rows = document.getElementById('stockRows');
-  rows.innerHTML = '';
+  const wrap = document.getElementById('stockCards');
+  wrap.innerHTML = '';
   document.getElementById('stockEmpty').style.display = list.length ? 'none' : 'block';
 
   list.forEach(p => {
     const c = Number(p.centralStock) || 0;
-    const cells = activePlatforms.map(pl => {
-      const val = p.stocks?.[pl.id] ?? 0;
-      const ok = Number(val) === c;
-      return `<td><input class="stockcell ${ok ? '' : 'mismatch'}" type="number" value="${val}" onchange="updateStock('${p.barcode}','${pl.id}',this.value)"></td>`;
-    }).join('');
     const thumb = p.image
-      ? `<img src="${p.image}" alt="" style="width:36px;height:36px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:8px;">`
-      : '';
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${thumb}<b>${p.name}</b><div class="muted" style="font-family:monospace;">${p.barcode}</div></td>
-      ${cells}
-      <td><input class="stockcell" type="number" value="${c}" onchange="updateCentral('${p.barcode}',this.value)"></td>
-      <td><button class="ghost small" onclick="pushProduct('${p.barcode}')">Gönder</button></td>
-      <td><button class="ghost small" onclick="deleteProduct('${p.barcode}')">Sil</button></td>`;
-    rows.appendChild(tr);
+      ? `<img class="pcard-thumb" src="${p.image}" alt="">`
+      : `<div class="pcard-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`;
+
+    const chips = activePlatforms.map(pl => {
+      const stockVal = p.stocks?.[pl.id] ?? 0;
+      const mismatch = Number(stockVal) !== c;
+      const priceVal = p.prices?.[pl.id] ?? '';
+      const status = p.listingStatus?.[pl.id] || 'satista';
+      return `
+        <div class="pchip">
+          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span>${pl.name}
+            <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
+            <span class="muted">₺</span>
+            <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; font-size:11px; margin-top:4px;">
+            <span class="muted">Adet</span>
+            <input class="stockcell ${mismatch ? 'mismatch' : ''}" type="number" value="${stockVal}" onchange="updateStock('${p.code}','${pl.id}',this.value)">
+          </div>
+        </div>`;
+    }).join('');
+
+    const card = document.createElement('div');
+    card.className = 'pcard';
+    card.draggable = true;
+    card.dataset.code = p.code;
+    card.innerHTML = `
+      <div class="pcard-head">
+        <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
+        ${thumb}
+        <div>
+          <div class="pcard-title">${p.name}</div>
+          ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
+          <div class="pcard-meta">${p.code}</div>
+        </div>
+        <div class="pcard-central">
+          <div style="text-align:right;">
+            <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
+            <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
+          </div>
+          <button class="ghost small" onclick="pushProduct('${p.code}')">Gönder</button>
+          <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
+        </div>
+      </div>
+      <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
+    `;
+    attachDragHandlers(card);
+    wrap.appendChild(card);
   });
+}
+
+/* --- Ürün kartlarını sürükleyerek birleştirme --- */
+let dragSourceCode = null;
+
+function attachDragHandlers(card) {
+  card.addEventListener('dragstart', (e) => {
+    dragSourceCode = card.dataset.code;
+    card.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', card.dataset.code);
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+    document.querySelectorAll('.pcard.drag-over').forEach(el => el.classList.remove('drag-over'));
+    dragSourceCode = null;
+  });
+  card.addEventListener('dragover', (e) => {
+    if (!dragSourceCode || dragSourceCode === card.dataset.code) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    card.classList.add('drag-over');
+  });
+  card.addEventListener('dragleave', () => {
+    card.classList.remove('drag-over');
+  });
+  card.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    card.classList.remove('drag-over');
+    const fromCode = dragSourceCode;
+    const toCode = card.dataset.code;
+    if (!fromCode || fromCode === toCode) return;
+    const fromP = state.products.find(p => p.code === fromCode);
+    const toP = state.products.find(p => p.code === toCode);
+    const fromName = fromP ? fromP.name : fromCode;
+    const toName = toP ? toP.name : toCode;
+    const ok = confirm(`"${fromName}" ürününü "${toName}" ile birleştirmek istiyor musun?\n\nSKU'lar ve platform stokları "${toName}" altında birleşecek, "${fromName}" silinecek. Bu işlem geri alınamaz.`);
+    if (!ok) return;
+    await mergeProducts(fromCode, toCode);
+  });
+}
+
+async function mergeProducts(fromCode, toCode) {
+  toast('Ürünler birleştiriliyor…');
+  try {
+    const resp = await fetch('/api/products/merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: fromCode, to: toCode })
+    });
+    const data = await resp.json();
+    if (!data.ok) { toast(data.error || 'Birleştirilemedi.'); return; }
+    toast('Ürünler birleştirildi.');
+    await loadProducts();
+  } catch (e) {
+    toast('Birleştirme hatası: ' + e.message);
+  }
 }
 
 function toggleAddForm() {
@@ -441,17 +547,29 @@ function toggleAddForm() {
 async function addProduct() {
   const barcode = document.getElementById('newBarcode').value.trim();
   if (!barcode) { toast('Barkod/SKU girmelisin.'); return; }
-  const stocks = {};
+  const stocks = {}, prices = {};
   state.platforms.filter(p => p.configured).forEach(p => {
-    const el = document.getElementById('new_' + p.id);
-    if (el) stocks[p.id] = el.value;
+    const stockEl = document.getElementById('new_' + p.id);
+    if (stockEl) stocks[p.id] = stockEl.value;
+    const priceEl = document.getElementById('newprice_' + p.id);
+    if (priceEl) prices[p.id] = priceEl.value;
   });
-  const body = { barcode, name: document.getElementById('newName').value, centralStock: document.getElementById('newCentral').value, stocks };
+  const body = {
+    barcode,
+    name: document.getElementById('newName').value,
+    category: document.getElementById('newCategory').value,
+    centralStock: document.getElementById('newCentral').value,
+    stocks, prices
+  };
   await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
   document.getElementById('newBarcode').value = '';
   document.getElementById('newName').value = '';
+  document.getElementById('newCategory').value = '';
   document.getElementById('newCentral').value = '';
-  state.platforms.filter(p => p.configured).forEach(p => { const el = document.getElementById('new_' + p.id); if (el) el.value=''; });
+  state.platforms.filter(p => p.configured).forEach(p => {
+    const stockEl = document.getElementById('new_' + p.id); if (stockEl) stockEl.value = '';
+    const priceEl = document.getElementById('newprice_' + p.id); if (priceEl) priceEl.value = '';
+  });
   toggleAddForm();
   await loadProducts();
   toast('Ürün kaydedildi.');
@@ -459,6 +577,17 @@ async function addProduct() {
 
 async function updateStock(barcode, platformId, value) {
   await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, stocks: { [platformId]: value } }) });
+  await loadProducts();
+}
+
+async function updatePrice(barcode, platformId, value) {
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, prices: { [platformId]: value } }) });
+  await loadProducts();
+}
+
+async function toggleStatus(barcode, platformId, currentStatus) {
+  const next = currentStatus === 'pasif' ? 'satista' : 'pasif';
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, listingStatus: { [platformId]: next } }) });
   await loadProducts();
 }
 
