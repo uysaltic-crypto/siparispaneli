@@ -93,6 +93,8 @@
       <div class="tabs">
         <div class="tab active" data-tab="orders" onclick="showTab('orders')">Siparişler</div>
         <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
+        <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
+        <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
         <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
       </div>
     </div>
@@ -148,11 +150,38 @@
       <div id="logRows" style="border:1px solid var(--border); border-radius:8px; overflow:hidden;"></div>
       <div id="logEmpty" class="empty" style="display:none;">Henüz bir senkron kaydı yok.</div>
     </div>
+
+    <!-- EŞLEŞTİRME -->
+    <div class="panel" id="panel-match">
+      <p class="muted" style="margin-bottom:10px;">Barkodu aynı olan ürünler otomatik eşleşir. Burada, henüz bir platforma özel SKU'su tanımlanmamış Ana Ürünleri görüp onaylayabilir ya da farklı bir SKU girebilirsin.</p>
+      <div id="matchTabs" class="tabs" style="margin-bottom:14px;"></div>
+      <table>
+        <thead><tr><th>Ana Ürün</th><th>Varsayılan SKU (ürün koduyla aynı)</th><th>Bu platform için SKU</th><th></th></tr></thead>
+        <tbody id="matchRows"></tbody>
+      </table>
+      <div id="matchEmpty" class="empty" style="display:none;">Bu platform için eşleştirilmemiş ürün yok — hepsi eşleşti.</div>
+    </div>
+
+    <!-- REKABET -->
+    <div class="panel" id="panel-compete">
+      <p class="muted" style="margin-bottom:10px;">
+        Rakip ürün linkleri resmi bir API değil, herkese açık ürün sayfası okunarak takip edilir — sayfa tasarımı değişirse ayıklama geçici olarak bozulabilir.
+        Rakip fiyatları günde birkaç kez otomatik kontrol edilir; "Şimdi Kontrol Et" ile elle de tetikleyebilirsin.
+      </p>
+      <div class="toolbar">
+        <button class="ghost small" onclick="repriceAllNow()">Tüm Ürünleri Şimdi Kontrol Et</button>
+      </div>
+      <table>
+        <thead><tr><th>Ürün</th><th>Benim Fiyatım (TY)</th><th>En Düşük Rakip</th><th>Min / Maks</th><th>Otomatik</th><th>Rakip Linkleri</th><th></th></tr></thead>
+        <tbody id="competeRows"></tbody>
+      </table>
+      <div id="competeEmpty" class="empty" style="display:none;">Henüz ürün yok. Önce Stok sekmesinden ürün ekle.</div>
+    </div>
   </div>
 </div>
 
 <script>
-let state = { orders: [], products: [], log: [], platforms: [] };
+let state = { orders: [], products: [], log: [], platforms: [], matchStatus: {} };
 let importPlatform = null;
 
 async function checkAuth() {
@@ -190,6 +219,80 @@ function startPolling() {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  if (name === 'match') loadMatchStatus();
+  if (name === 'compete') renderCompete();
+}
+
+let matchActivePlatform = null;
+
+async function loadMatchStatus() {
+  const r = await fetch('/api/products/match-status');
+  if (r.status === 401) return;
+  const data = await r.json();
+  state.matchStatus = data.status || {};
+  const platformIds = Object.keys(state.matchStatus);
+  if (!matchActivePlatform || !platformIds.includes(matchActivePlatform)) matchActivePlatform = platformIds[0];
+
+  document.getElementById('matchTabs').innerHTML = platformIds.map(id => {
+    const pm = platformMeta(id);
+    const count = state.matchStatus[id].length;
+    return `<div class="tab ${id === matchActivePlatform ? 'active' : ''}" onclick="setMatchPlatform('${id}')" style="cursor:pointer;">${pm.name} ${count ? `<span class="badge">${count}</span>` : '✓'}</div>`;
+  }).join('');
+
+  renderMatchRows();
+}
+
+function setMatchPlatform(id) {
+  matchActivePlatform = id;
+  loadMatchStatus();
+}
+
+function renderMatchRows() {
+  const rows = (state.matchStatus[matchActivePlatform] || []);
+  const tbody = document.getElementById('matchRows');
+  document.getElementById('matchEmpty').style.display = rows.length ? 'none' : 'block';
+  tbody.innerHTML = '';
+  rows.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><b>${item.name}</b><div class="muted" style="font-family:monospace;">${item.code}</div></td>
+      <td class="muted" style="font-family:monospace;">${item.defaultSku}</td>
+      <td><input type="text" placeholder="${item.defaultSku}" id="matchsku_${item.code}" style="width:160px;"></td>
+      <td style="white-space:nowrap;">
+        <button class="ghost small" onclick="confirmMatch('${item.code}', true)">Varsayılanı Onayla</button>
+        <button class="small" onclick="confirmMatch('${item.code}', false)">Kaydet</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function confirmMatch(code, useDefault) {
+  const platform = matchActivePlatform;
+  const sku = useDefault ? code : (document.getElementById('matchsku_' + code).value.trim() || code);
+  const resp = await fetch('/api/products', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, skus: { [platform]: sku } })
+  });
+  const data = await resp.json();
+  const conflict = (data.conflicts || [])[0];
+  if (conflict) {
+    const yes = confirm(`Bu SKU zaten "${conflict.name}" adlı üründe kayıtlı.\nİki ürünü birleştirip tek Ana Ürün yapmak ister misin?`);
+    if (yes) {
+      await fetch('/api/products/merge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: conflict.code, to: code })
+      });
+      toast('Ürünler birleştirildi.');
+    } else {
+      toast('Vazgeçildi, bu SKU atanmadı.');
+      return;
+    }
+  } else {
+    toast('Eşleştirildi.');
+  }
+  await loadMatchStatus();
+  await loadProducts();
 }
 
 async function loadPlatforms() {
@@ -296,6 +399,7 @@ async function loadProducts() {
   const data = await r.json();
   state.products = data.products || [];
   renderStock();
+  renderCompete();
 }
 
 function renderStock() {
@@ -375,6 +479,79 @@ async function pushProduct(barcode) {
   const summary = Object.entries(data.results || {}).map(([id, res]) => `${platformMeta(id).name} ${res.ok ? '✓' : '✗'}`).join(' ');
   toast(summary || 'Tamamlandı');
   await loadProducts(); await loadLog();
+}
+
+function renderCompete() {
+  const tbody = document.getElementById('competeRows');
+  document.getElementById('competeEmpty').style.display = state.products.length ? 'none' : 'block';
+  tbody.innerHTML = '';
+  state.products.forEach(p => {
+    const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
+    const competitors = p.competitors || [];
+    const lowest = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
+    const lowestVal = lowest.length ? Math.min(...lowest) : null;
+    const badge = lowestVal != null
+      ? (pricing.myPrice != null && pricing.myPrice <= lowestVal
+          ? `<span class="badge ok">${lowestVal.toFixed(2)} ₺ (en ucuz sensin)</span>`
+          : `<span class="badge fail">${lowestVal.toFixed(2)} ₺</span>`)
+      : '<span class="muted">veri yok</span>';
+    const linkList = competitors.map(c => {
+      const status = c.lastError ? `<span style="color:var(--danger)">hata: ${c.lastError}</span>` : (c.lastPrice ? `${c.lastPrice.toFixed(2)} ₺` : 'kontrol bekliyor');
+      return `<div class="muted" style="font-size:11px; word-break:break-all;">${c.url}<br>${status}</div>`;
+    }).join('<hr style="border-color:var(--border); margin:4px 0;">');
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><b>${p.name}</b><div class="muted" style="font-family:monospace;">${p.code}</div></td>
+      <td>${pricing.myPrice != null ? pricing.myPrice.toFixed(2) + ' ₺' : '-'}</td>
+      <td>${badge}</td>
+      <td>
+        <input type="number" step="0.01" placeholder="Min" id="min_${p.code}" value="${pricing.minPrice ?? ''}" style="width:70px;">
+        <input type="number" step="0.01" placeholder="Maks" id="max_${p.code}" value="${pricing.maxPrice ?? ''}" style="width:70px;">
+      </td>
+      <td><input type="checkbox" id="auto_${p.code}" ${pricing.autoReprice ? 'checked' : ''}></td>
+      <td style="min-width:220px;">
+        <textarea id="urls_${p.code}" rows="2" style="width:100%; font-size:11px;" placeholder="Her satıra bir rakip ürün linki">${competitors.map(c => c.url).join('\n')}</textarea>
+        <div>${linkList}</div>
+      </td>
+      <td style="white-space:nowrap;">
+        <button class="ghost small" onclick="saveCompete('${p.code}')">Kaydet</button>
+        <button class="small" onclick="repriceNow('${p.code}')">Şimdi Kontrol Et</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function saveCompete(code) {
+  const minPrice = document.getElementById('min_' + code).value;
+  const maxPrice = document.getElementById('max_' + code).value;
+  const autoReprice = document.getElementById('auto_' + code).checked;
+  const competitorUrls = document.getElementById('urls_' + code).value.split('\n').map(s => s.trim()).filter(Boolean);
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/pricing`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minPrice, maxPrice, autoReprice, competitorUrls })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); return; }
+  toast('Kaydedildi.');
+  await loadProducts();
+}
+
+async function repriceNow(code) {
+  toast('Rakip fiyatları kontrol ediliyor…');
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/reprice-check`, { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Kontrol başarısız.'); return; }
+  toast(data.pushResult ? `Yeni fiyat gönderildi: ${data.pushResult.newPrice} ₺` : 'Kontrol tamamlandı, fiyat değişmedi.');
+  await loadProducts();
+}
+
+async function repriceAllNow() {
+  toast('Tüm ürünler kontrol ediliyor… bu biraz sürebilir.');
+  const resp = await fetch('/api/reprice-all', { method: 'POST' });
+  const data = await resp.json();
+  toast(`${data.checked || 0} ürün kontrol edildi.`);
+  await loadProducts();
 }
 
 function triggerImport(platform) {
