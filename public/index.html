@@ -49,6 +49,11 @@
   .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
   .pcard-title { font-weight:700; }
   .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
+  .pcard-code-row { display:flex; align-items:center; gap:6px; margin-top:1px; }
+  .pcard-code-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; font-family:monospace; font-size:11px; color:var(--muted); width:150px; }
+  .pcard-code-input:hover { border-color:var(--border); }
+  .pcard-code-input:focus { border-color:var(--border); background:var(--surface2); color:var(--text); outline:none; }
+  select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
   .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
   .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
@@ -114,6 +119,7 @@
         <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
         <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
+        <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
         <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
       </div>
     </div>
@@ -140,6 +146,15 @@
     <div class="panel" id="panel-stock">
       <div class="toolbar">
         <div class="search"><input type="text" id="stockSearch" placeholder="Barkod veya ürün adı ara..." oninput="renderStock()"></div>
+        <select id="stockSort" onchange="renderStock()">
+          <option value="name-asc">Ada göre A-Z</option>
+          <option value="name-desc">Ada göre Z-A</option>
+          <option value="code-asc">Ana ürün koduna göre A-Z</option>
+          <option value="code-desc">Ana ürün koduna göre Z-A</option>
+          <option value="stock-desc">Merkezi stok: çoktan aza</option>
+          <option value="stock-asc">Merkezi stok: azdan çoğa</option>
+          <option value="category-asc">Kategoriye göre</option>
+        </select>
         <button class="ghost small" onclick="toggleAddForm()">+ Ürün</button>
         <span id="importButtons"></span>
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(event)">
@@ -160,6 +175,22 @@
 
       <div id="stockCards"></div>
       <div id="stockEmpty" class="empty" style="display:none;">Henüz ürün yok. Excel yükle ya da elle ekle.</div>
+    </div>
+
+    <!-- YEDEKLEME -->
+    <div class="panel" id="panel-backup">
+      <div id="backupConfigWarn"></div>
+      <div class="toolbar" style="justify-content:space-between;">
+        <div>
+          <div class="muted" id="backupStatusLine">—</div>
+        </div>
+        <button class="small" id="backupNowBtn" onclick="runBackupNow()">Şimdi Yedekle</button>
+      </div>
+      <table>
+        <thead><tr><th>Dosya</th><th>Oluşturulma</th><th>Boyut</th><th></th></tr></thead>
+        <tbody id="backupRows"></tbody>
+      </table>
+      <div id="backupEmpty" class="empty" style="display:none;">Henüz Drive'da yedek yok.</div>
     </div>
 
     <!-- SENKRON GÜNLÜĞÜ -->
@@ -239,6 +270,7 @@ function showTab(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'match') loadMatchStatus();
   if (name === 'compete') renderCompete();
+  if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
 }
 
 let matchActivePlatform = null;
@@ -422,6 +454,20 @@ function renderStock() {
   let list = state.products;
   if (q) list = list.filter(p => p.barcode.toLocaleLowerCase('tr').includes(q) || (p.name||'').toLocaleLowerCase('tr').includes(q) || (p.category||'').toLocaleLowerCase('tr').includes(q));
 
+  const sortVal = document.getElementById('stockSort').value;
+  const collator = new Intl.Collator('tr');
+  list = [...list].sort((a, b) => {
+    switch (sortVal) {
+      case 'name-desc': return collator.compare(b.name || '', a.name || '');
+      case 'code-asc': return collator.compare(a.code || '', b.code || '');
+      case 'code-desc': return collator.compare(b.code || '', a.code || '');
+      case 'stock-asc': return (Number(a.centralStock) || 0) - (Number(b.centralStock) || 0);
+      case 'stock-desc': return (Number(b.centralStock) || 0) - (Number(a.centralStock) || 0);
+      case 'category-asc': return collator.compare(a.category || '', b.category || '');
+      default: return collator.compare(a.name || '', b.name || '');
+    }
+  });
+
   const activePlatforms = state.platforms.filter(p => p.configured);
   const wrap = document.getElementById('stockCards');
   wrap.innerHTML = '';
@@ -438,11 +484,13 @@ function renderStock() {
       const mismatch = Number(stockVal) !== c;
       const priceVal = p.prices?.[pl.id] ?? '';
       const status = p.listingStatus?.[pl.id] || 'satista';
+      const platformSku = p.skus?.[pl.id] || p.code;
       return `
         <div class="pchip">
           <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span>${pl.name}
             <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
           </div>
+          <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">Stok kodu: ${platformSku}</div>
           <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
             <span class="muted">₺</span>
             <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
@@ -465,7 +513,10 @@ function renderStock() {
         <div>
           <div class="pcard-title">${p.name}</div>
           ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
-          <div class="pcard-meta">${p.code}</div>
+          <div class="pcard-code-row">
+            <input class="pcard-code-input" type="text" value="${p.code}" spellcheck="false" title="Ana ürün kodu — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProduct('${p.code}', this.value)">
+            ${competeBadgeHtml(p)}
+          </div>
         </div>
         <div class="pcard-central">
           <div style="text-align:right;">
@@ -537,6 +588,33 @@ async function mergeProducts(fromCode, toCode) {
   } catch (e) {
     toast('Birleştirme hatası: ' + e.message);
   }
+}
+
+// Ürün kartında Ana Ürün Kodu'nun yanında gösterilen küçük rekabet özeti.
+// Rekabet sekmesindeki mantıkla aynı: en düşük rakip fiyatı, benim fiyatımdan
+// düşükse/eşitse yeşil "en ucuz", değilse kırmızı rakip fiyatı gösterir.
+function competeBadgeHtml(p) {
+  const competitors = p.competitors || [];
+  if (!competitors.length) return '';
+  const lowestVals = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
+  if (!lowestVals.length) return '<span class="muted" style="font-size:10px;">rakip: kontrol bekliyor</span>';
+  const lowestVal = Math.min(...lowestVals);
+  const myPrice = p.pricing?.myPrice;
+  const ok = myPrice != null && myPrice <= lowestVal;
+  return `<span class="badge ${ok ? 'ok' : 'fail'}" title="En düşük rakip fiyatı">${ok ? 'en ucuz sensin' : 'rakip'}: ${lowestVal.toFixed(2)} ₺</span>`;
+}
+
+async function renameProduct(oldCode, newCodeRaw) {
+  const newCode = (newCodeRaw || '').trim();
+  if (!newCode || newCode === oldCode) { renderStock(); return; }
+  const resp = await fetch(`/api/products/${encodeURIComponent(oldCode)}/rename`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newCode })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ana ürün kodu değiştirilemedi.'); renderStock(); return; }
+  toast('Ana ürün kodu güncellendi.');
+  await loadProducts();
 }
 
 function toggleAddForm() {
@@ -774,6 +852,85 @@ function renderLog() {
       </div>`;
     box.appendChild(div);
   });
+}
+
+/* --- Google Drive yedekleme --- */
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function loadBackupStatus() {
+  const r = await fetch('/api/backup/status');
+  if (r.status === 401) return;
+  const data = await r.json();
+  const warn = document.getElementById('backupConfigWarn');
+  const line = document.getElementById('backupStatusLine');
+  const btn = document.getElementById('backupNowBtn');
+  if (!data.configured) {
+    warn.innerHTML = `<div class="warnbox">Google Drive yedekleme henüz yapılandırılmadı. .env dosyasına GOOGLE_SERVICE_ACCOUNT_KEY_FILE ve GOOGLE_DRIVE_FOLDER_ID eklenmeli.</div>`;
+    line.textContent = 'Yapılandırılmadı.';
+    btn.disabled = true;
+    return;
+  }
+  warn.innerHTML = '';
+  btn.disabled = false;
+  const lb = data.lastBackup || {};
+  let text = `Otomatik yedekleme: ${data.intervalHours} saatte bir. `;
+  text += lb.at ? `Son başarılı yedek: ${fmtDate(new Date(lb.at).getTime())}.` : 'Henüz başarılı bir yedekleme yapılmadı.';
+  if (lb.error) text += ` Son deneme hata verdi: ${lb.error}`;
+  line.textContent = text;
+}
+
+async function loadBackupList() {
+  const r = await fetch('/api/backup/list');
+  if (r.status === 401) return;
+  const data = await r.json();
+  const tbody = document.getElementById('backupRows');
+  tbody.innerHTML = '';
+  if (!data.ok) { document.getElementById('backupEmpty').style.display = 'block'; return; }
+  const files = data.files || [];
+  document.getElementById('backupEmpty').style.display = files.length ? 'none' : 'block';
+  files.forEach(f => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-family:monospace;">${f.name}</td>
+      <td class="muted">${fmtDate(new Date(f.createdTime).getTime())}</td>
+      <td class="muted">${fmtBytes(f.size)}</td>
+      <td><button class="ghost small" onclick="restoreBackup('${f.id}','${f.name}')">Geri Yükle</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function runBackupNow() {
+  const btn = document.getElementById('backupNowBtn');
+  btn.disabled = true; btn.textContent = 'Yedekleniyor...';
+  try {
+    const resp = await fetch('/api/backup/run', { method: 'POST' });
+    const data = await resp.json();
+    toast(data.ok ? 'Yedek Drive\'a kaydedildi.' : (data.error || 'Yedekleme başarısız.'));
+    await loadBackupStatus();
+    await loadBackupList();
+  } finally {
+    btn.disabled = false; btn.textContent = 'Şimdi Yedekle';
+  }
+}
+
+async function restoreBackup(fileId, name) {
+  const ok = confirm(`"${name}" yedeğini geri yüklemek istediğine emin misin?\n\nŞu anki tüm ürün, stok ve senkron günlüğü verisi bu yedekteki verilerle DEĞİŞTİRİLECEK. Bu işlem geri alınamaz.`);
+  if (!ok) return;
+  toast('Geri yükleniyor…');
+  const resp = await fetch('/api/backup/restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileId })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Geri yükleme başarısız.'); return; }
+  toast(`Geri yüklendi (${data.productCount} ürün).`);
+  await loadProducts();
+  await loadLog();
 }
 
 function toast(msg) {
