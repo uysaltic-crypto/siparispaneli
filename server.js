@@ -888,6 +888,26 @@ app.delete("/api/products/:code", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Bir ürünün Ana Ürün Kodu'nu (objede anahtar olarak kullanılan `code`) değiştirir.
+// SKU'lar, stoklar, fiyatlar, rekabet ayarları vs. hepsi yeni koda taşınır.
+// Bir platform için ayrıca SKU tanımlanmamışsa o platformda varsayılan SKU olarak
+// bu kod kullanıldığından (skuForPlatform), kod değişince o varsayılan da değişir —
+// eğer platformda gerçek SKU zaten farklıysa (skus objesinde kayıtlıysa) etkilenmez.
+app.post("/api/products/:code/rename", requireAuth, (req, res) => {
+  const oldCode = req.params.code;
+  const newCode = String(req.body?.newCode || "").trim();
+  const p = products[oldCode];
+  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  if (!newCode) return res.status(400).json({ ok: false, error: "Yeni ürün kodu boş olamaz." });
+  if (newCode === oldCode) return res.json({ ok: true, product: { code: oldCode, ...p } });
+  if (products[newCode]) return res.status(409).json({ ok: false, error: "Bu ürün kodu zaten başka bir üründe kullanılıyor. Birleştirmek için üzerine sürükleyip bırakabilirsin." });
+
+  products[newCode] = p;
+  delete products[oldCode];
+  persistProducts();
+  res.json({ ok: true, product: { code: newCode, ...p } });
+});
+
 // İki ürünü tek üründe birleştirir (sürükle-bırak ile farklı platformlardaki
 // karşılıkları aynı ürün kodu altında toplamak için). `from` ürününün platform
 // SKU'ları ve stokları `to` ürününe aktarılır (to'da zaten varsa to'nunki kalır),
@@ -1039,6 +1059,218 @@ app.post("/api/reprice-all", requireAuth, async (req, res) => {
   res.json(await repriceAll());
 });
 
+/* ==================================================================
+   YEDEKLEME — Google Drive
+   Kurulum:
+   1) Google Cloud Console'da bir proje aç, "Service Account" (hizmet hesabı)
+      oluştur, JSON anahtar dosyasını indir.
+   2) İndirdiğin dosyayı proje köküne koy (örn. service-account.json) ve
+      .env dosyasına şu satırı ekle:
+        GOOGLE_SERVICE_ACCOUNT_KEY_FILE=./service-account.json
+   3) Google Drive'da bir klasör oluştur, klasörü hizmet hesabının
+      e-postasıyla (JSON dosyasındaki "client_email") DÜZENLEYEN olarak
+      paylaş (normal "Paylaş" menüsünden, e-posta adresi olarak).
+   4) Klasörün ID'sini (tarayıcıda adresteki /folders/XXXXX kısmı)
+      .env dosyasına ekle:
+        GOOGLE_DRIVE_FOLDER_ID=XXXXX
+   İsteğe bağlı: BACKUP_INTERVAL_HOURS (varsayılan 24), BACKUP_KEEP_COUNT
+   (Drive'da tutulacak en yeni yedek sayısı, varsayılan 30 — fazlası silinir).
+   Ek npm paketi gerekmez; kimlik doğrulama axios + crypto ile yapılır.
+================================================================== */
+const GOOGLE_KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE || "";
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
+const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS || 24);
+const BACKUP_KEEP_COUNT = Number(process.env.BACKUP_KEEP_COUNT || 30);
+
+let googleCreds; // undefined = henüz denenmedi, false = yüklenemedi, object = hazır
+function loadGoogleCreds() {
+  if (googleCreds !== undefined) return googleCreds;
+  if (!GOOGLE_KEY_FILE) {
+    googleCreds = false;
+    return googleCreds;
+  }
+  try {
+    const raw = fs.readFileSync(path.resolve(__dirname, GOOGLE_KEY_FILE), "utf8");
+    const json = JSON.parse(raw);
+    if (!json.client_email || !json.private_key) throw new Error("client_email/private_key eksik");
+    googleCreds = json;
+  } catch (e) {
+    console.error("Google servis hesabı anahtarı okunamadı:", e.message);
+    googleCreds = false;
+  }
+  return googleCreds;
+}
+
+function driveConfigured() {
+  return !!(loadGoogleCreds() && GOOGLE_DRIVE_FOLDER_ID);
+}
+
+function base64url(buf) {
+  return Buffer.from(buf).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+let driveTokenCache = { token: null, exp: 0 };
+async function getDriveAccessToken() {
+  const creds = loadGoogleCreds();
+  if (!creds) throw new Error("Google servis hesabı yapılandırılmadı.");
+  const now = Math.floor(Date.now() / 1000);
+  if (driveTokenCache.token && driveTokenCache.exp - 60 > now) return driveTokenCache.token;
+
+  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claim = base64url(
+    JSON.stringify({
+      iss: creds.client_email,
+      scope: "https://www.googleapis.com/auth/drive",
+      aud: "https://oauth2.googleapis.com/token",
+      iat: now,
+      exp: now + 3600,
+    })
+  );
+  const unsigned = `${header}.${claim}`;
+  const signature = base64url(crypto.sign("RSA-SHA256", Buffer.from(unsigned), creds.private_key));
+  const jwt = `${unsigned}.${signature}`;
+
+  const resp = await axios.post(
+    "https://oauth2.googleapis.com/token",
+    new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt }).toString(),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000 }
+  );
+  driveTokenCache = { token: resp.data.access_token, exp: now + Number(resp.data.expires_in || 3600) };
+  return driveTokenCache.token;
+}
+
+// Yedek içeriği: ürün kataloğu + işlenmiş sipariş paketleri + gönderim günlüğü
+// tek bir JSON dosyasında toplanır (geri yüklerken bunların hepsi değiştirilir).
+function buildBackupPayload() {
+  return JSON.stringify(
+    {
+      createdAt: new Date().toISOString(),
+      products,
+      processedPackages: Array.from(processedPackages),
+      pushLog,
+    },
+    null,
+    2
+  );
+}
+
+async function uploadBackupToDrive() {
+  const token = await getDriveAccessToken();
+  const content = buildBackupPayload();
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const name = `yedek-${stamp}.json`;
+  const metadata = { name, parents: [GOOGLE_DRIVE_FOLDER_ID], mimeType: "application/json" };
+
+  const boundary = "panelyedek" + crypto.randomBytes(8).toString("hex");
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${content}\r\n` +
+    `--${boundary}--`;
+
+  const resp = await axios.post(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,createdTime,size",
+    body,
+    { headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` }, timeout: 30000 }
+  );
+  await cleanupOldBackups(token);
+  return resp.data;
+}
+
+async function listBackupsFromDrive(token) {
+  const t = token || (await getDriveAccessToken());
+  const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false`);
+  const resp = await axios.get(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=100&fields=files(id,name,createdTime,size)`,
+    { headers: { Authorization: `Bearer ${t}` }, timeout: 15000 }
+  );
+  return resp.data.files || [];
+}
+
+// BACKUP_KEEP_COUNT'tan fazla yedek varsa en eskilerini Drive'dan siler.
+async function cleanupOldBackups(token) {
+  try {
+    const files = await listBackupsFromDrive(token);
+    const excess = files.slice(BACKUP_KEEP_COUNT);
+    for (const f of excess) {
+      await axios
+        .delete(`https://www.googleapis.com/drive/v3/files/${f.id}`, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 })
+        .catch(() => {});
+    }
+  } catch (e) {
+    console.error("Eski yedekler temizlenemedi:", e.message);
+  }
+}
+
+async function restoreBackupFromDrive(fileId) {
+  const token = await getDriveAccessToken();
+  const resp = await axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 30000,
+  });
+  const data = resp.data;
+  if (!data || typeof data !== "object" || !data.products) throw new Error("Yedek dosyası geçersiz görünüyor.");
+  products = data.products || {};
+  processedPackages = new Set(data.processedPackages || []);
+  pushLog = data.pushLog || [];
+  persistProducts();
+  persistProcessed();
+  persistPushLog();
+  return { restoredAt: data.createdAt || null, productCount: Object.keys(products).length };
+}
+
+let lastBackup = { at: null, error: null, name: null };
+
+async function runScheduledBackup() {
+  if (!driveConfigured()) return;
+  try {
+    const file = await uploadBackupToDrive();
+    lastBackup = { at: new Date().toISOString(), error: null, name: file.name };
+    console.log("Google Drive yedeklemesi tamamlandı:", file.name);
+  } catch (e) {
+    const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    lastBackup = { ...lastBackup, error: msg };
+    console.error("Google Drive yedeklemesi başarısız:", msg);
+  }
+}
+
+app.get("/api/backup/status", requireAuth, (req, res) => {
+  res.json({ configured: driveConfigured(), lastBackup, intervalHours: BACKUP_INTERVAL_HOURS });
+});
+
+app.post("/api/backup/run", requireAuth, async (req, res) => {
+  if (!driveConfigured())
+    return res.status(400).json({ ok: false, error: "Google Drive yedekleme yapılandırılmadı (.env: GOOGLE_SERVICE_ACCOUNT_KEY_FILE, GOOGLE_DRIVE_FOLDER_ID)." });
+  try {
+    const file = await uploadBackupToDrive();
+    lastBackup = { at: new Date().toISOString(), error: null, name: file.name };
+    res.json({ ok: true, file });
+  } catch (e) {
+    const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    lastBackup = { ...lastBackup, error: msg };
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+app.get("/api/backup/list", requireAuth, async (req, res) => {
+  if (!driveConfigured()) return res.status(400).json({ ok: false, error: "Google Drive yedekleme yapılandırılmadı." });
+  try {
+    res.json({ ok: true, files: await listBackupsFromDrive() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message });
+  }
+});
+
+app.post("/api/backup/restore", requireAuth, async (req, res) => {
+  if (!driveConfigured()) return res.status(400).json({ ok: false, error: "Google Drive yedekleme yapılandırılmadı." });
+  const { fileId } = req.body || {};
+  if (!fileId) return res.status(400).json({ ok: false, error: "fileId gerekli." });
+  try {
+    res.json({ ok: true, ...(await restoreBackupFromDrive(fileId)) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message });
+  }
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 app.listen(PORT, () => {
@@ -1053,4 +1285,13 @@ app.listen(PORT, () => {
   setInterval(() => {
     repriceAll().catch((e) => console.error("Rekabet kontrolü hatası:", e.message));
   }, Math.max(REPRICE_HOURS, 1) * 60 * 60 * 1000);
+
+  // Google Drive yedeklemesi (varsayılan: günde bir). Yapılandırma eksikse sessizce atlanır.
+  // Kurulumun doğru çalıştığını hemen görebilmek için 2 dakika sonra bir deneme yedeklemesi de yapılır.
+  if (driveConfigured()) {
+    setTimeout(() => runScheduledBackup(), 2 * 60 * 1000);
+  }
+  setInterval(() => {
+    runScheduledBackup();
+  }, Math.max(BACKUP_INTERVAL_HOURS, 1) * 60 * 60 * 1000);
 });
