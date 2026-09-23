@@ -11,6 +11,7 @@ app.use(express.json({ limit: "5mb" }));
 const PORT = process.env.PORT || 3000;
 const PANEL_PASSWORD = process.env.PANEL_PASSWORD || "";
 const REFRESH_MINUTES = Number(process.env.REFRESH_INTERVAL_MINUTES || 15);
+const REPRICE_HOURS = Number(process.env.REPRICE_INTERVAL_HOURS || 4);
 
 /* ------------------------------------------------------------------
    Basit dosya tabanlı kalıcı depo (data/*.json)
@@ -45,12 +46,48 @@ function persistPushLog() {
   saveJSON("push-log.json", pushLog);
 }
 
-function ensureProduct(barcode, name) {
-  if (!products[barcode]) {
-    products[barcode] = { name: name || "İsimsiz ürün", stocks: {}, centralStock: 0, image: null };
+// products artık "ürün kodu" (code) altında toplanır. Her ürün, platform bazında
+// farklı bir barkod/SKU'ya bağlanabilir (skus: { hb: "...", ty: "...", ... }).
+// Bir platform için ayrıca bir SKU tanımlanmamışsa, o platformda ürün kodunun
+// kendisi SKU olarak kullanılır (geriye dönük uyumluluk).
+function ensureProduct(code, name) {
+  if (!products[code]) {
+    products[code] = {
+      name: name || "İsimsiz ürün",
+      stocks: {},
+      centralStock: 0,
+      image: null,
+      skus: {},
+      pricing: { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
+      competitors: [], // [{ url, label, lastPrice, lastCheckedAt, lastError, sellerName }]
+    };
   }
-  if (!products[barcode].stocks) products[barcode].stocks = {};
-  return products[barcode];
+  if (!products[code].stocks) products[code].stocks = {};
+  if (!products[code].skus) products[code].skus = {};
+  if (!products[code].pricing) products[code].pricing = { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
+  if (!products[code].competitors) products[code].competitors = [];
+  return products[code];
+}
+
+function skuForPlatform(code, platform) {
+  const p = products[code];
+  return (p?.skus?.[platform] || code || "").trim();
+}
+
+// platform -> { sku: productCode } eşleşme dizini. Sipariş satırlarındaki barkodu
+// veya içe aktarma/siteden çekme satırlarındaki SKU'yu hangi ürün koduna ait
+// olduğunu bulmak için kullanılır.
+function buildSkuIndex() {
+  const platformIds = PLATFORMS.map((pl) => pl.id);
+  const index = {};
+  platformIds.forEach((id) => (index[id] = new Map()));
+  Object.entries(products).forEach(([code, p]) => {
+    platformIds.forEach((id) => {
+      const sku = (p.skus?.[id] || code || "").trim();
+      if (sku) index[id].set(sku, code);
+    });
+  });
+  return index;
 }
 
 /* ------------------------------------------------------------------
@@ -348,6 +385,147 @@ async function pushStockToTrendyol(barcode, quantity) {
   }
 }
 
+// Fiyat + stok birlikte gönderilir (Trendyol aynı uç noktayı kullanıyor). Otomatik
+// fiyatlandırma motoru tarafından çağrılır.
+async function pushPriceToTrendyol(barcode, salePrice, quantity) {
+  if (!tyConfigured()) return { ok: false, message: "Trendyol API bilgisi eksik." };
+  const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+  const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
+  const url = `https://${host}/integration/inventory/sellers/${TY_SELLER_ID}/products/price-and-inventory`;
+  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  const price = Math.round(Number(salePrice) * 100) / 100;
+  try {
+    const resp = await axios.post(
+      url,
+      { items: [{ barcode, quantity: qty, salePrice: price, listPrice: price }] },
+      { auth: { username: TY_API_KEY, password: TY_API_SECRET }, headers: { "Content-Type": "application/json" }, timeout: 15000 }
+    );
+    return { ok: true, message: "Gönderildi", batchRequestId: resp.data?.batchRequestId || null };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+/* ==================================================================
+   Rekabet takibi — RESMİ BİR API DEĞİL. Rakip ürün sayfası genel
+   (public) HTML'i çekilip fiyat ayıklanır. Bu yüzden "best effort"tur:
+   sayfa tasarımı değişirse ayıklama bozulabilir. Öncelik JSON-LD
+   (schema.org Product/Offer) verisine verilir çünkü bu, görsel
+   tasarım değişse bile genelde aynı kalan yapısal bir veridir.
+================================================================== */
+async function fetchCompetitorPrice(url) {
+  try {
+    const resp = await axios.get(url, {
+      timeout: 15000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      maxRedirects: 5,
+    });
+    const html = String(resp.data);
+
+    // 1) JSON-LD (schema.org Product/Offer) — en güvenilir yol
+    const ldBlocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+    for (const m of ldBlocks) {
+      try {
+        let data = JSON.parse(m[1].trim());
+        const items = Array.isArray(data) ? data : data["@graph"] || [data];
+        for (const item of items) {
+          const offers = item?.offers ? (Array.isArray(item.offers) ? item.offers : [item.offers]) : null;
+          if (offers) {
+            const price = offers.map((o) => Number(o.price || o.lowPrice)).find((n) => !isNaN(n) && n > 0);
+            if (price) return { ok: true, price, sellerName: offers[0]?.seller?.name || null };
+          }
+        }
+      } catch (_) {
+        /* bu blok JSON-LD değilse yoksay, diğerine bak */
+      }
+    }
+
+    // 2) Yedek: meta etiketi (og:price:amount / product:price:amount)
+    const metaMatch = html.match(/<meta[^>]+(?:property|name)=["'](?:og:price:amount|product:price:amount)["'][^>]+content=["']([\d.,]+)["']/i);
+    if (metaMatch) {
+      const price = Number(metaMatch[1].replace(/\./g, "").replace(",", "."));
+      if (price > 0) return { ok: true, price, sellerName: null };
+    }
+
+    return { ok: false, error: "Sayfadan fiyat okunamadı (yapı değişmiş olabilir)." };
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 403 || status === 429) return { ok: false, error: "Site erişimi engelledi (çok sık çekiliyor olabilir)." };
+    return { ok: false, error: err.message };
+  }
+}
+
+function clamp(n, min, max) {
+  let v = n;
+  if (min !== null && min !== undefined && min !== "") v = Math.max(v, Number(min));
+  if (max !== null && max !== undefined && max !== "") v = Math.min(v, Number(max));
+  return Math.round(v * 100) / 100;
+}
+
+// Tek bir ürün için: rakip fiyatlarını tazeler, otomatik fiyatlandırma açıksa
+// yeni fiyatı hesaplayıp Trendyol'a gönderir. results.priceLog'a bir kayıt düşer.
+async function repriceProduct(code) {
+  const p = products[code];
+  if (!p) return { ok: false, error: "Ürün bulunamadı." };
+
+  await Promise.all(
+    (p.competitors || []).map(async (c) => {
+      const r = await fetchCompetitorPrice(c.url);
+      c.lastCheckedAt = new Date().toISOString();
+      if (r.ok) {
+        c.lastPrice = r.price;
+        c.sellerName = r.sellerName || c.sellerName;
+        c.lastError = null;
+      } else {
+        c.lastError = r.error;
+      }
+    })
+  );
+
+  let pushResult = null;
+  const prices = (p.competitors || []).map((c) => c.lastPrice).filter((n) => typeof n === "number" && n > 0);
+  const lowest = prices.length ? Math.min(...prices) : null;
+
+  if (p.pricing.autoReprice && p.pricing.minPrice != null && p.pricing.maxPrice != null && lowest != null) {
+    const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
+    if (target !== p.pricing.myPrice) {
+      const qty = p.stocks?.ty ?? p.centralStock ?? 0;
+      const sku = skuForPlatform(code, "ty");
+      const r = await pushPriceToTrendyol(sku, target, qty);
+      pushResult = { ok: r.ok, message: r.message, newPrice: target };
+      if (r.ok) p.pricing.myPrice = target;
+      pushLog.push({
+        time: new Date().toISOString(),
+        barcode: code,
+        name: p.name,
+        centralStock: p.centralStock,
+        trigger: "otomatik fiyatlandırma",
+        results: { ty: r },
+      });
+      persistPushLog();
+    }
+  }
+
+  persistProducts();
+  return { ok: true, lowest, pushResult, competitors: p.competitors };
+}
+
+async function repriceAll() {
+  const codes = Object.keys(products).filter((c) => (products[c].competitors || []).length > 0);
+  for (const code of codes) {
+    try {
+      await repriceProduct(code);
+    } catch (e) {
+      console.error("Rekabet kontrolü hatası:", code, e.message);
+    }
+  }
+  return { checked: codes.length };
+}
+
+
 /* ==================================================================
    N11 — resmi REST API (developer.n11.com)
 ================================================================== */
@@ -527,8 +705,9 @@ app.get("/api/platforms", requireAuth, (req, res) => {
    otomatik geri yazma
 ------------------------------------------------------------------ */
 async function processNewOrdersAndSync(ordersByPlatform) {
-  const changedBarcodes = new Set();
+  const changedCodes = new Set();
   let newlyProcessed = 0;
+  const skuIndex = buildSkuIndex();
 
   function handleOrder(order) {
     if (!order.packageId && !order.orderNumber) return;
@@ -537,10 +716,14 @@ async function processNewOrdersAndSync(ordersByPlatform) {
 
     (order.lines || []).forEach((line) => {
       if (!line.barcode) return;
-      const p = ensureProduct(line.barcode, line.name);
+      // Bu platformdaki SKU daha önce bir ürün koduna bağlanmışsa onu kullan;
+      // yoksa yeni bir ürün oluştur (kod = bu platformdaki barkod).
+      const code = skuIndex[order.platform]?.get(line.barcode) || line.barcode;
+      const p = ensureProduct(code, line.name);
+      if (!p.skus[order.platform]) p.skus[order.platform] = line.barcode;
       if (line.name && (!p.name || p.name === "İsimsiz ürün")) p.name = line.name;
       p.centralStock = Math.max(0, (Number(p.centralStock) || 0) - (Number(line.quantity) || 1));
-      changedBarcodes.add(line.barcode);
+      changedCodes.add(code);
     });
 
     processedPackages.add(key);
@@ -554,25 +737,25 @@ async function processNewOrdersAndSync(ordersByPlatform) {
     persistProducts();
   }
 
-  for (const barcode of changedBarcodes) {
-    const p = products[barcode];
+  for (const code of changedCodes) {
+    const p = products[code];
     const results = {};
     await Promise.all(
       PLATFORMS.filter((pl) => pl.configured()).map(async (pl) => {
-        const r = await pl.pushStock(barcode, p.centralStock);
+        const r = await pl.pushStock(skuForPlatform(code, pl.id), p.centralStock);
         results[pl.id] = r;
         if (r.ok) p.stocks[pl.id] = p.centralStock;
       })
     );
-    pushLog.push({ time: new Date().toISOString(), barcode, name: p.name, centralStock: p.centralStock, trigger: "sipariş", results });
+    pushLog.push({ time: new Date().toISOString(), barcode: code, name: p.name, centralStock: p.centralStock, trigger: "sipariş", results });
   }
 
-  if (changedBarcodes.size) {
+  if (changedCodes.size) {
     persistProducts();
     persistPushLog();
   }
 
-  return { changedCount: changedBarcodes.size, newOrders: newlyProcessed };
+  return { changedCount: changedCodes.size, newOrders: newlyProcessed };
 }
 
 /* ------------------------------------------------------------------
@@ -612,14 +795,39 @@ app.post("/api/refresh", requireAuth, async (req, res) => {
    API — Stok / ürün yönetimi
 ------------------------------------------------------------------ */
 app.get("/api/products", requireAuth, (req, res) => {
-  res.json({ products: Object.entries(products).map(([barcode, p]) => ({ barcode, name: p.name, stocks: p.stocks || {}, centralStock: p.centralStock, image: p.image || null })) });
+  res.json({
+    products: Object.entries(products).map(([code, p]) => ({
+      code,
+      barcode: code, // geriye dönük uyumluluk için aynı alan iki isimle de dönüyor
+      name: p.name,
+      stocks: p.stocks || {},
+      skus: p.skus || {},
+      centralStock: p.centralStock,
+      image: p.image || null,
+      pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
+      competitors: p.competitors || [],
+    })),
+  });
+});
+
+// Eşleştirme sekmesi için: her yapılandırılmış platformda, hangi ürünlerin o
+// platforma henüz özel bir SKU ile bağlanmadığını (varsayılan olarak ürün koduyla
+// eşleştiğini) listeler — kullanıcı isterse bunu onaylar ya da farklı bir SKU girer.
+app.get("/api/products/match-status", requireAuth, (req, res) => {
+  const status = {};
+  PLATFORMS.filter((pl) => pl.configured()).forEach((pl) => {
+    status[pl.id] = Object.entries(products)
+      .filter(([, p]) => !p.skus?.[pl.id])
+      .map(([code, p]) => ({ code, name: p.name, defaultSku: code }));
+  });
+  res.json({ status });
 });
 
 app.post("/api/products", requireAuth, (req, res) => {
-  const { barcode, name, centralStock, stocks } = req.body || {};
-  const code = String(barcode || "").trim();
-  if (!code) return res.status(400).json({ ok: false, error: "Barkod / SKU gerekli." });
-  const p = ensureProduct(code, name);
+  const { code, barcode, name, centralStock, stocks, skus } = req.body || {};
+  const productCode = String(code || barcode || "").trim();
+  if (!productCode) return res.status(400).json({ ok: false, error: "Ürün kodu gerekli." });
+  const p = ensureProduct(productCode, name);
   if (name?.trim()) p.name = name.trim();
   if (centralStock !== undefined && centralStock !== "") p.centralStock = Number(centralStock);
   if (stocks && typeof stocks === "object") {
@@ -627,27 +835,77 @@ app.post("/api/products", requireAuth, (req, res) => {
       if (val !== undefined && val !== "") p.stocks[platformId] = Number(val);
     });
   }
+  const conflicts = [];
+  if (skus && typeof skus === "object") {
+    const skuIndex = buildSkuIndex();
+    Object.entries(skus).forEach(([platformId, val]) => {
+      const sku = String(val || "").trim();
+      if (!sku) {
+        delete p.skus[platformId];
+        return;
+      }
+      // Bu SKU zaten başka bir üründe kayıtlıysa (eşleştirme çakışması), burada
+      // uygulamıyoruz — kullanıcıya "birleştirilsin mi?" seçeneği sunuluyor.
+      const owner = skuIndex[platformId]?.get(sku);
+      if (owner && owner !== productCode) {
+        conflicts.push({ platform: platformId, sku, code: owner, name: products[owner]?.name || owner });
+        return;
+      }
+      p.skus[platformId] = sku;
+    });
+  }
   persistProducts();
-  res.json({ ok: true, product: { barcode: code, ...p } });
+  res.json({ ok: true, product: { code: productCode, ...p }, conflicts });
 });
 
-app.delete("/api/products/:barcode", requireAuth, (req, res) => {
-  delete products[req.params.barcode];
+app.delete("/api/products/:code", requireAuth, (req, res) => {
+  delete products[req.params.code];
   persistProducts();
   res.json({ ok: true });
 });
 
+// İki ürünü tek üründe birleştirir (sürükle-bırak ile farklı platformlardaki
+// karşılıkları aynı ürün kodu altında toplamak için). `from` ürününün platform
+// SKU'ları ve stokları `to` ürününe aktarılır (to'da zaten varsa to'nunki kalır),
+// merkezi stok en yüksek olan değer korunur, `from` silinir.
+app.post("/api/products/merge", requireAuth, (req, res) => {
+  const { from, to } = req.body || {};
+  const src = products[from];
+  const dst = products[to];
+  if (!src || !dst) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  if (from === to) return res.status(400).json({ ok: false, error: "Aynı ürünü kendisiyle birleştiremezsin." });
+
+  Object.entries(src.skus || {}).forEach(([platformId, sku]) => {
+    if (!dst.skus[platformId]) {
+      dst.skus[platformId] = sku;
+      if (src.stocks?.[platformId] !== undefined) dst.stocks[platformId] = src.stocks[platformId];
+    }
+  });
+  dst.centralStock = Math.max(Number(dst.centralStock) || 0, Number(src.centralStock) || 0);
+  if (!dst.image && src.image) dst.image = src.image;
+  if ((!dst.name || dst.name === "İsimsiz ürün") && src.name) dst.name = src.name;
+
+  delete products[from];
+  persistProducts();
+  res.json({ ok: true, product: { code: to, ...dst } });
+});
+
 // Ortak birleştirme mantığı: hem Excel/CSV içe aktarma hem de "Siteden Çek" (API)
-// aynı satır listesini (barcode, stock, name) bu fonksiyonla ürün kataloğuna işler.
+// aynı satır listesini (r.barcode = o platformdaki SKU, stock, name) bu fonksiyonla
+// ürün kataloğuna işler. SKU daha önce bir ürün koduna bağlıysa o ürün güncellenir;
+// değilse yeni bir ürün oluşturulur (kod = bu platformdaki SKU).
 function mergeStockRows(platform, rows) {
+  const skuIndex = buildSkuIndex()[platform];
   let updated = 0,
     created = 0;
   rows.forEach((r) => {
-    const barcode = String(r.barcode || "").trim();
-    if (!barcode) return;
+    const sku = String(r.barcode || "").trim();
+    if (!sku) return;
     const stock = Number(r.stock) || 0;
-    const existed = !!products[barcode];
-    const p = ensureProduct(barcode, r.name);
+    const code = skuIndex.get(sku) || sku;
+    const existed = !!products[code];
+    const p = ensureProduct(code, r.name);
+    if (!p.skus[platform]) p.skus[platform] = sku;
     p.stocks[platform] = stock;
     // Ürün daha önce hiç görülmemişse (merkezi stok hiç ayarlanmamışsa) bu platformun
     // stok değeri merkezi stoğun ilk değeri olarak da kullanılır.
@@ -685,23 +943,24 @@ app.post("/api/products/pull", requireAuth, async (req, res) => {
   res.json({ ok: true, ...merged, total: result.rows.length });
 });
 
-// Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder
-app.post("/api/products/:barcode/push", requireAuth, async (req, res) => {
-  const barcode = req.params.barcode;
-  const p = products[barcode];
+// Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
+// Her platforma, o platform için tanımlı SKU ile gönderilir (skuForPlatform).
+app.post("/api/products/:code/push", requireAuth, async (req, res) => {
+  const code = req.params.code;
+  const p = products[code];
   if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
 
   const results = {};
   await Promise.all(
     PLATFORMS.filter((pl) => pl.configured()).map(async (pl) => {
-      const r = await pl.pushStock(barcode, p.centralStock);
+      const r = await pl.pushStock(skuForPlatform(code, pl.id), p.centralStock);
       results[pl.id] = r;
       if (r.ok) p.stocks[pl.id] = p.centralStock;
     })
   );
   persistProducts();
 
-  const entry = { time: new Date().toISOString(), barcode, name: p.name, centralStock: p.centralStock, trigger: "manuel", results };
+  const entry = { time: new Date().toISOString(), barcode: code, name: p.name, centralStock: p.centralStock, trigger: "manuel", results };
   pushLog.push(entry);
   persistPushLog();
 
@@ -712,6 +971,50 @@ app.get("/api/push-log", requireAuth, (req, res) => {
   res.json({ log: pushLog.slice(-60).reverse() });
 });
 
+/* ------------------------------------------------------------------
+   API — Rekabet takibi / otomatik fiyatlandırma
+------------------------------------------------------------------ */
+
+// Bir ürünün rekabet ayarlarını (min/max fiyat, otomatik fiyatlandırma açık/kapalı,
+// rakip link listesi) günceller. Rakip listesi tamamen gönderilenle değiştirilir.
+app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
+  const p = products[req.params.code];
+  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  const { minPrice, maxPrice, autoReprice, undercut, competitorUrls } = req.body || {};
+
+  if (minPrice !== undefined) p.pricing.minPrice = minPrice === "" || minPrice === null ? null : Number(minPrice);
+  if (maxPrice !== undefined) p.pricing.maxPrice = maxPrice === "" || maxPrice === null ? null : Number(maxPrice);
+  if (autoReprice !== undefined) p.pricing.autoReprice = !!autoReprice;
+  if (undercut !== undefined && undercut !== "") p.pricing.undercut = Number(undercut);
+
+  if (p.pricing.minPrice != null && p.pricing.maxPrice != null && p.pricing.minPrice > p.pricing.maxPrice) {
+    return res.status(400).json({ ok: false, error: "En düşük fiyat, en yüksek fiyattan büyük olamaz." });
+  }
+
+  if (Array.isArray(competitorUrls)) {
+    const existing = new Map((p.competitors || []).map((c) => [c.url, c]));
+    p.competitors = competitorUrls
+      .map((u) => String(u || "").trim())
+      .filter(Boolean)
+      .map((url) => existing.get(url) || { url, label: "", lastPrice: null, lastCheckedAt: null, lastError: null, sellerName: null });
+  }
+
+  persistProducts();
+  res.json({ ok: true, product: { code: req.params.code, ...p } });
+});
+
+// Tek bir ürün için hemen kontrol et (rakip fiyatlarını çek + gerekiyorsa fiyatı güncelle)
+app.post("/api/products/:code/reprice-check", requireAuth, async (req, res) => {
+  const result = await repriceProduct(req.params.code);
+  if (!result.ok) return res.status(404).json(result);
+  res.json(result);
+});
+
+// Tüm rakip linki tanımlı ürünleri kontrol et
+app.post("/api/reprice-all", requireAuth, async (req, res) => {
+  res.json(await repriceAll());
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 app.listen(PORT, () => {
@@ -720,4 +1023,10 @@ app.listen(PORT, () => {
   setInterval(() => {
     refreshAll().catch((e) => console.error("Otomatik yenileme hatası:", e.message));
   }, Math.max(REFRESH_MINUTES, 5) * 60 * 1000);
+
+  // Rekabet kontrolü siparişlerden çok daha seyrek çalışır (varsayılan: 4 saatte bir)
+  // — hem rakip siteyi çok sık yormamak hem de engellenme riskini azaltmak için.
+  setInterval(() => {
+    repriceAll().catch((e) => console.error("Rekabet kontrolü hatası:", e.message));
+  }, Math.max(REPRICE_HOURS, 1) * 60 * 60 * 1000);
 });
