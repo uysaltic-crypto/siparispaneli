@@ -1085,6 +1085,23 @@ const BACKUP_KEEP_COUNT = Number(process.env.BACKUP_KEEP_COUNT || 30);
 let googleCreds; // undefined = henüz denenmedi, false = yüklenemedi, object = hazır
 function loadGoogleCreds() {
   if (googleCreds !== undefined) return googleCreds;
+
+  // Render gibi dosya sistemi kalıcı olmayan barındırmalarda, JSON anahtarının
+  // TAMAMI tek bir ortam değişkeni olarak da verilebilir: GOOGLE_SERVICE_ACCOUNT_KEY_JSON
+  const rawJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_JSON || "";
+  if (rawJson.trim()) {
+    try {
+      const json = JSON.parse(rawJson);
+      if (!json.client_email || !json.private_key) throw new Error("client_email/private_key eksik");
+      googleCreds = json;
+      return googleCreds;
+    } catch (e) {
+      console.error("GOOGLE_SERVICE_ACCOUNT_KEY_JSON çözümlenemedi:", e.message);
+      googleCreds = false;
+      return googleCreds;
+    }
+  }
+
   if (!GOOGLE_KEY_FILE) {
     googleCreds = false;
     return googleCreds;
