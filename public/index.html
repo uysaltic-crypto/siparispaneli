@@ -184,7 +184,10 @@
         <div>
           <div class="muted" id="backupStatusLine">—</div>
         </div>
-        <button class="small" id="backupNowBtn" onclick="runBackupNow()">Şimdi Yedekle</button>
+        <div style="display:flex; gap:8px;">
+          <button class="ghost small" id="backupConnectBtn" style="display:none;" onclick="connectGoogleDrive()">Google ile Bağlan</button>
+          <button class="small" id="backupNowBtn" onclick="runBackupNow()">Şimdi Yedekle</button>
+        </div>
       </div>
       <table>
         <thead><tr><th>Dosya</th><th>Oluşturulma</th><th>Boyut</th><th></th></tr></thead>
@@ -869,8 +872,17 @@ async function loadBackupStatus() {
   const warn = document.getElementById('backupConfigWarn');
   const line = document.getElementById('backupStatusLine');
   const btn = document.getElementById('backupNowBtn');
+  const connectBtn = document.getElementById('backupConnectBtn');
+
+  // OAuth (kendi Google hesabın) yapılandırılmış ama henüz bağlanılmamışsa bağlan butonunu göster.
+  connectBtn.style.display = (data.oauthAvailable && !data.oauthConnected) ? 'inline-block' : 'none';
+
   if (!data.configured) {
-    warn.innerHTML = `<div class="warnbox">Google Drive yedekleme henüz yapılandırılmadı. .env dosyasına GOOGLE_SERVICE_ACCOUNT_KEY_FILE ve GOOGLE_DRIVE_FOLDER_ID eklenmeli.</div>`;
+    if (data.oauthAvailable && !data.oauthConnected) {
+      warn.innerHTML = `<div class="warnbox">Google OAuth bilgileri girilmiş ama henüz bağlanılmamış. Sağdaki "Google ile Bağlan" butonuyla kendi Google hesabınla bir kez giriş yap.</div>`;
+    } else {
+      warn.innerHTML = `<div class="warnbox">Google Drive yedekleme henüz yapılandırılmadı. .env dosyasına GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI ve GOOGLE_DRIVE_FOLDER_ID eklenmeli.</div>`;
+    }
     line.textContent = 'Yapılandırılmadı.';
     btn.disabled = true;
     return;
@@ -882,6 +894,10 @@ async function loadBackupStatus() {
   text += lb.at ? `Son başarılı yedek: ${fmtDate(new Date(lb.at).getTime())}.` : 'Henüz başarılı bir yedekleme yapılmadı.';
   if (lb.error) text += ` Son deneme hata verdi: ${lb.error}`;
   line.textContent = text;
+}
+
+function connectGoogleDrive() {
+  window.open('/api/backup/oauth/start', '_blank');
 }
 
 async function loadBackupList() {
