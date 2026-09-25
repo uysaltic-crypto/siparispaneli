@@ -1082,6 +1082,125 @@ const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS || 24);
 const BACKUP_KEEP_COUNT = Number(process.env.BACKUP_KEEP_COUNT || 30);
 
+/* --- OAuth ile bağlantı (önerilen yöntem) ---
+   Servis hesaplarının kendi depolama kotası olmadığı için normal (Workspace
+   olmayan) bir Google Drive'a dosya YAZAMAZLAR — klasör paylaşılmış olsa bile
+   Google "Service Accounts do not have storage quota" hatası verir. Bunun
+   çözümü, panelin senin kendi Google hesabınla bir kere yetkilendirilmesi:
+   1) Google Cloud Console > APIs & Services > Credentials > Create Credentials
+      > OAuth client ID > Application type: Web application.
+   2) Authorized redirect URI olarak şunu ekle:
+        <sitenin-adresi>/api/backup/oauth/callback
+      (örn. https://siparispaneli.onrender.com/api/backup/oauth/callback)
+   3) OAuth consent screen ekranını doldurman istenebilir (User Type: External,
+      uygulama adı vs.) — "Testing" durumunda kalabilir, kendi hesabını
+      "Test users" listesine eklemen yeterli.
+   4) Oluşan Client ID ve Client Secret'ı .env'e ekle:
+        GOOGLE_OAUTH_CLIENT_ID=...
+        GOOGLE_OAUTH_CLIENT_SECRET=...
+        GOOGLE_OAUTH_REDIRECT_URI=https://.../api/backup/oauth/callback
+   5) Panelde Yedekleme sekmesinden "Google ile Bağlan" butonuna bas, kendi
+      hesabınla giriş yap. "Google doğrulamadı" uyarısı çıkarsa Advanced >
+      Go to ... (unsafe) ile devam et (kendi uygulaman olduğu için güvenli).
+*/
+const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || "";
+const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+const GOOGLE_OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI || "";
+
+function oauthConfigured() {
+  return !!(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET && GOOGLE_OAUTH_REDIRECT_URI);
+}
+
+let oauthRefreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN || (loadJSON("google-oauth-token.json", {}).refresh_token || "");
+let oauthAccessCache = { token: null, exp: 0 };
+let oauthPendingState = null;
+
+function oauthReady() {
+  return !!(oauthConfigured() && oauthRefreshToken);
+}
+
+app.get("/api/backup/oauth/start", requireAuth, (req, res) => {
+  if (!oauthConfigured()) {
+    return res.status(400).send("GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_OAUTH_REDIRECT_URI .env'de eksik.");
+  }
+  oauthPendingState = crypto.randomBytes(16).toString("hex");
+  const params = new URLSearchParams({
+    client_id: GOOGLE_OAUTH_CLIENT_ID,
+    redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+    response_type: "code",
+    access_type: "offline",
+    prompt: "consent",
+    scope: "https://www.googleapis.com/auth/drive",
+    state: oauthPendingState,
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+});
+
+app.get("/api/backup/oauth/callback", async (req, res) => {
+  const { code, state, error } = req.query;
+  if (error) return res.status(400).send(`Google yetkilendirme hatası: ${error}`);
+  if (!code || !state || state !== oauthPendingState) {
+    return res.status(400).send("Geçersiz veya süresi dolmuş istek. Yedekleme sekmesinden tekrar “Google ile Bağlan” de.");
+  }
+  oauthPendingState = null;
+  try {
+    const resp = await axios.post(
+      "https://oauth2.googleapis.com/token",
+      new URLSearchParams({
+        code,
+        client_id: GOOGLE_OAUTH_CLIENT_ID,
+        client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+        redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+        grant_type: "authorization_code",
+      }).toString(),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000 }
+    );
+    const { refresh_token, access_token, expires_in } = resp.data;
+    if (!refresh_token) {
+      return res
+        .status(400)
+        .send(
+          "Google bir refresh token döndürmedi (muhtemelen bu hesap için izin daha önce verilmişti). " +
+            "myaccount.google.com/permissions adresinden bu uygulamanın erişimini kaldırıp tekrar dene."
+        );
+    }
+    oauthRefreshToken = refresh_token;
+    oauthAccessCache = { token: access_token, exp: Math.floor(Date.now() / 1000) + Number(expires_in || 3600) };
+    saveJSON("google-oauth-token.json", { refresh_token });
+    res.send(`<!doctype html><html><body style="font-family:sans-serif; padding:40px; max-width:640px;">
+      <h2>Google Drive bağlantısı başarılı ✅</h2>
+      <p>Bu sekmeyi kapatabilirsin, panele dönüp "Şimdi Yedekle" ile deneyebilirsin.</p>
+      <p style="color:#888; font-size:13px;">Not: Sunucu yeniden dağıtıldığında (redeploy) bu bağlantının kaybolmaması için,
+      barındırma panelindeki (Render vb.) ortam değişkenlerine şunu da eklemen önerilir:</p>
+      <pre style="background:#f2f2f2; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-all;">GOOGLE_OAUTH_REFRESH_TOKEN=${refresh_token}</pre>
+      </body></html>`);
+  } catch (e) {
+    const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 500) : e.message;
+    res.status(500).send("Token alınamadı: " + msg);
+  }
+});
+
+async function getOAuthAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
+  if (oauthAccessCache.token && oauthAccessCache.exp - 60 > now) return oauthAccessCache.token;
+  if (!oauthReady()) throw new Error("Google Drive bağlantısı henüz kurulmadı (Yedekleme sekmesinden “Google ile Bağlan”).");
+  const resp = await axios.post(
+    "https://oauth2.googleapis.com/token",
+    new URLSearchParams({
+      client_id: GOOGLE_OAUTH_CLIENT_ID,
+      client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+      refresh_token: oauthRefreshToken,
+      grant_type: "refresh_token",
+    }).toString(),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000 }
+  );
+  oauthAccessCache = { token: resp.data.access_token, exp: now + Number(resp.data.expires_in || 3600) };
+  return oauthAccessCache.token;
+}
+
+/* --- Servis hesabı ile bağlantı (yalnızca Google Workspace Paylaşılan Sürücü
+   kullanıyorsan işe yarar — normal kişisel Drive'da kota hatası verir,
+   bu yüzden yukarıdaki OAuth yöntemi önerilir) --- */
 let googleCreds; // undefined = henüz denenmedi, false = yüklenemedi, object = hazır
 function loadGoogleCreds() {
   if (googleCreds !== undefined) return googleCreds;
@@ -1119,7 +1238,7 @@ function loadGoogleCreds() {
 }
 
 function driveConfigured() {
-  return !!(loadGoogleCreds() && GOOGLE_DRIVE_FOLDER_ID);
+  return !!(GOOGLE_DRIVE_FOLDER_ID && (oauthReady() || loadGoogleCreds()));
 }
 
 function base64url(buf) {
@@ -1128,6 +1247,8 @@ function base64url(buf) {
 
 let driveTokenCache = { token: null, exp: 0 };
 async function getDriveAccessToken() {
+  if (oauthReady()) return getOAuthAccessToken();
+
   const creds = loadGoogleCreds();
   if (!creds) throw new Error("Google servis hesabı yapılandırılmadı.");
   const now = Math.floor(Date.now() / 1000);
@@ -1251,7 +1372,13 @@ async function runScheduledBackup() {
 }
 
 app.get("/api/backup/status", requireAuth, (req, res) => {
-  res.json({ configured: driveConfigured(), lastBackup, intervalHours: BACKUP_INTERVAL_HOURS });
+  res.json({
+    configured: driveConfigured(),
+    oauthAvailable: oauthConfigured(),
+    oauthConnected: oauthReady(),
+    lastBackup,
+    intervalHours: BACKUP_INTERVAL_HOURS,
+  });
 });
 
 app.post("/api/backup/run", requireAuth, async (req, res) => {
