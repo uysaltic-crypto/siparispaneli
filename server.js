@@ -636,9 +636,10 @@ async function fetchCiceksepetiOrders() {
     const orders = resp.data?.orders || resp.data?.content || [];
     return { platform: "cs", error: null, orders: orders.map(normalizeCsPackage) };
   } catch (err) {
+    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
     const msg =
       err.response?.status === 401 || err.response?.status === 403
-        ? "Çiçeksepeti kimlik doğrulama hatası — API key'i kontrol et."
+        ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
         : err.response?.data
         ? `Çiçeksepeti hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
         : `Çiçeksepeti bağlantı hatası: ${err.message}`;
