@@ -629,7 +629,7 @@ async function fetchCiceksepetiOrders() {
 
   try {
     const resp = await axios.get(url, {
-      headers: { ApiKey: CS_API_KEY, Accept: "application/json" },
+      headers: { "x-api-key": CS_API_KEY, Accept: "application/json" },
       params: { startDate: startDate.toISOString(), endDate: endDate.toISOString(), page: 1, pageSize: 100 },
       timeout: 20000,
     });
@@ -678,7 +678,7 @@ async function pushStockToCiceksepeti(barcode, quantity) {
     const resp = await axios.post(
       url,
       { items: [{ stockCode: barcode, stockQuantity: qty }] },
-      { headers: { ApiKey: CS_API_KEY, "Content-Type": "application/json" }, timeout: 15000 }
+      { headers: { "x-api-key": CS_API_KEY, "Content-Type": "application/json" }, timeout: 15000 }
     );
     return { ok: true, message: "Gönderildi", batchId: resp.data?.batchId || null };
   } catch (err) {
