@@ -779,6 +779,82 @@ async function pushStockToCiceksepeti(barcode, quantity) {
 }
 
 /* ==================================================================
+   KENDİ SİTEM (nokta-hirdavat-site backend'i)
+   Diğer pazaryerlerinin aksine burada karşı taraf da bizim yazdığımız
+   bir backend, bu yüzden kimlik doğrulama basit bir x-api-key ile yapılıyor.
+================================================================== */
+function siteConfigured() {
+  return !!(process.env.SITE_API_URL && process.env.SITE_API_KEY);
+}
+function siteHeaders() {
+  return { "x-api-key": process.env.SITE_API_KEY };
+}
+
+function normalizeSiteOrder(o) {
+  const lines = (o.lines || []).map((it) => ({
+    barcode: String(it.barcode || "").trim(),
+    quantity: Number(it.quantity || 1),
+    name: it.name || "",
+  }));
+  const productSummary = lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ");
+  return {
+    platform: "site",
+    orderNumber: o.orderNumber || "—",
+    packageId: String(o.orderNumber || ""),
+    customer: o.customer || "Müşteri",
+    city: o.city || "",
+    productSummary: productSummary || "—",
+    amount: Number(o.amount) || 0,
+    status: o.status || "Yeni",
+    date: o.date || null,
+    lines,
+  };
+}
+
+async function fetchSiteOrders() {
+  if (!siteConfigured()) return { platform: "site", error: "Kendi Sitem API bilgileri .env dosyasında eksik.", orders: [] };
+  try {
+    const resp = await axios.get(`${process.env.SITE_API_URL}/api/orders`, { headers: siteHeaders(), timeout: 15000 });
+    const raw = Array.isArray(resp.data) ? resp.data : resp.data?.orders || [];
+    return { platform: "site", error: null, orders: raw.map(normalizeSiteOrder) };
+  } catch (err) {
+    const msg =
+      err.response?.status === 401
+        ? "Kendi Sitem kimlik doğrulama hatası — SITE_API_KEY iki tarafta da aynı mı kontrol et."
+        : err.response?.data
+        ? `Kendi Sitem hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Kendi Sitem bağlantı hatası: ${err.message}`;
+    return { platform: "site", error: msg, orders: [] };
+  }
+}
+
+async function fetchStockSite() {
+  if (!siteConfigured()) return { platform: "site", error: "Kendi Sitem API bilgisi eksik.", rows: [] };
+  try {
+    const resp = await axios.get(`${process.env.SITE_API_URL}/api/stock`, { headers: siteHeaders(), timeout: 15000 });
+    const raw = Array.isArray(resp.data) ? resp.data : resp.data?.rows || [];
+    return {
+      platform: "site",
+      error: null,
+      rows: raw.map((r) => ({ barcode: String(r.barcode || "").trim(), stock: Number(r.stock || 0), name: r.name || "", price: r.price })),
+    };
+  } catch (err) {
+    return { platform: "site", error: `Kendi Sitem stok okuma hatası: ${err.message}`, rows: [] };
+  }
+}
+
+async function pushStockToSite(barcode, quantity) {
+  if (!siteConfigured()) return { ok: false, message: "Kendi Sitem API bilgisi eksik." };
+  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  try {
+    await axios.post(`${process.env.SITE_API_URL}/api/stock`, { barcode, quantity: qty }, { headers: siteHeaders(), timeout: 15000 });
+    return { ok: true, message: "Gönderildi" };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+/* ==================================================================
    PLATFORM KAYDI — yeni bir pazaryeri eklemek için buraya bir satır
 ================================================================== */
 const PLATFORMS = [
@@ -788,6 +864,7 @@ const PLATFORMS = [
   // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
   // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
   { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
+  { id: "site", name: "Kendi Sitem", color: "#FF5A2B", configured: siteConfigured, fetchOrders: fetchSiteOrders, pushStock: pushStockToSite, fetchStock: fetchStockSite, stockPullVerified: true, verified: true },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
