@@ -222,10 +222,12 @@ async function fetchStockHepsiburada() {
       items.forEach((it) => {
         const barcode = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "").trim();
         if (!barcode) return;
+        const price = Number(it.Price ?? it.price ?? it.SalePrice ?? it.salePrice ?? 0) || undefined;
         rows.push({
           barcode,
           stock: Number(it.AvailableStock ?? it.availableStock ?? 0),
           name: it.ProductName || it.productName || "",
+          price,
         });
       });
       if (items.length < limit) break;
@@ -353,7 +355,8 @@ async function fetchStockTrendyol() {
         (item.variants || []).forEach((v) => {
           const barcode = String(v.barcode || v.stockCode || "").trim();
           if (!barcode) return;
-          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image });
+          const price = Number(v.salePrice ?? v.listPrice ?? v.price ?? 0) || undefined;
+          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image, price });
         });
       });
       nextPageToken = resp.data?.nextPageToken || null;
@@ -588,6 +591,44 @@ function normalizeN11Package(pkg) {
   };
 }
 
+// Satıcı Ürün Sorgulama — developer.n11.com/documentation/n11-marketplace-entegrasyonu/satici-urun-sorgulama/
+// GET https://api.n11.com/ms/product-query (appKey/appSecret header, page 0'dan başlar, size max 250)
+async function fetchStockN11() {
+  if (!n11Configured()) return { platform: "n11", error: "N11 API bilgileri .env dosyasında eksik.", rows: [] };
+  const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+  const url = "https://api.n11.com/ms/product-query";
+  const rows = [];
+  try {
+    let page = 0;
+    for (let i = 0; i < 50; i++) {
+      const resp = await axios.get(url, {
+        headers: { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, Accept: "application/json" },
+        params: { page, size: 250 },
+        timeout: 20000,
+      });
+      const content = resp.data?.content || [];
+      content.forEach((it) => {
+        const barcode = String(it.stockCode || "").trim();
+        if (!barcode) return;
+        const price = Number(it.salePrice ?? it.listPrice ?? 0) || undefined;
+        rows.push({ barcode, stock: Number(it.quantity ?? 0), name: it.title || "", price, image: it.imageUrls?.[0] || undefined });
+      });
+      const totalPages = resp.data?.totalPages ?? 1;
+      page++;
+      if (!content.length || page >= totalPages) break;
+    }
+    return { platform: "n11", error: null, rows };
+  } catch (err) {
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? "N11 kimlik doğrulama hatası — appKey/appSecret'i kontrol et."
+        : err.response?.data
+        ? `N11 hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `N11 bağlantı hatası: ${err.message}`;
+    return { platform: "n11", error: msg, rows: [] };
+  }
+}
+
 async function pushStockToN11(barcode, quantity) {
   if (!n11Configured()) return { ok: false, message: "N11 API bilgisi eksik." };
   const { N11_APP_KEY, N11_APP_SECRET } = process.env;
@@ -679,6 +720,48 @@ function normalizeCsPackage(pkg) {
   };
 }
 
+// Ürün Listeleme — ciceksepeti.dev resmi dokümanına göre doğrulandı (25.09.2026):
+// GET /api/v1/Products — Page 1'den başlar, PageSize en fazla 60.
+// Response: { totalCount, products: [{ stockCode, stockQuantity, salesPrice, productName, images: [...] }] }
+async function fetchStockCiceksepeti() {
+  if (!csConfigured()) return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", rows: [] };
+  const url = `https://${csHost()}/api/v1/Products`;
+  const rows = [];
+  try {
+    let page = 1;
+    let totalCount = Infinity;
+    while (rows.length < totalCount && page < 200) {
+      const resp = await axios.get(url, { headers: csHeaders(), params: { Page: page, PageSize: 60 }, timeout: 20000 });
+      const products = resp.data?.products || resp.data?.Products || [];
+      totalCount = Number(resp.data?.totalCount ?? resp.data?.TotalCount ?? products.length);
+      products.forEach((it) => {
+        const barcode = String(it.stockCode || it.StockCode || "").trim();
+        if (!barcode) return;
+        const price = Number(it.salesPrice ?? it.SalesPrice ?? 0) || undefined;
+        rows.push({
+          barcode,
+          stock: Number(it.stockQuantity ?? it.StockQuantity ?? 0),
+          name: it.productName || it.ProductName || "",
+          price,
+          image: it.images?.[0] || it.Images?.[0] || undefined,
+        });
+      });
+      if (!products.length) break;
+      page++;
+    }
+    return { platform: "cs", error: null, rows };
+  } catch (err) {
+    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
+        : err.response?.data
+        ? `Çiçeksepeti hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Çiçeksepeti bağlantı hatası: ${err.message}`;
+    return { platform: "cs", error: msg, rows: [] };
+  }
+}
+
 // NOT: Bu uç nokta (stok/fiyat güncelleme) henüz sipariş listeleme kadar
 // doğrulanmadı — "Ürün Yönetimi" bölümünde farklı bir yol olabilir. İlk
 // denemede hata alırsan Senkron Günlüğü'ndeki mesajı ilet, dokümandan
@@ -701,9 +784,10 @@ async function pushStockToCiceksepeti(barcode, quantity) {
 const PLATFORMS = [
   { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
   { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
-  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: null, stockPullVerified: false, verified: true },
-  // Sipariş çekme (GetOrders) resmi dokümana göre doğrulandı; stok/fiyat gönderme ucu henüz doğrulanmadı.
-  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: null, stockPullVerified: false, verified: true },
+  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: fetchStockN11, stockPullVerified: true, verified: true },
+  // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
+  // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
+  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
@@ -967,6 +1051,8 @@ function mergeStockRows(platform, rows) {
     if (!existed) p.centralStock = stock;
     if (r.name && (!p.name || p.name === "İsimsiz ürün")) p.name = r.name;
     if (r.image) p.image = r.image;
+    const price = Number(r.price);
+    if (price > 0) p.prices[platform] = price;
     existed ? updated++ : created++;
   });
   persistProducts();
