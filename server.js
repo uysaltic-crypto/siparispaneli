@@ -222,12 +222,10 @@ async function fetchStockHepsiburada() {
       items.forEach((it) => {
         const barcode = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "").trim();
         if (!barcode) return;
-        const price = Number(it.Price ?? it.price ?? it.SalePrice ?? it.salePrice ?? 0) || undefined;
         rows.push({
           barcode,
           stock: Number(it.AvailableStock ?? it.availableStock ?? 0),
           name: it.ProductName || it.productName || "",
-          price,
         });
       });
       if (items.length < limit) break;
@@ -355,8 +353,7 @@ async function fetchStockTrendyol() {
         (item.variants || []).forEach((v) => {
           const barcode = String(v.barcode || v.stockCode || "").trim();
           if (!barcode) return;
-          const price = Number(v.salePrice ?? v.listPrice ?? v.price ?? 0) || undefined;
-          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image, price });
+          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image });
         });
       });
       nextPageToken = resp.data?.nextPageToken || null;
@@ -591,44 +588,6 @@ function normalizeN11Package(pkg) {
   };
 }
 
-// Satıcı Ürün Sorgulama — developer.n11.com/documentation/n11-marketplace-entegrasyonu/satici-urun-sorgulama/
-// GET https://api.n11.com/ms/product-query (appKey/appSecret header, page 0'dan başlar, size max 250)
-async function fetchStockN11() {
-  if (!n11Configured()) return { platform: "n11", error: "N11 API bilgileri .env dosyasında eksik.", rows: [] };
-  const { N11_APP_KEY, N11_APP_SECRET } = process.env;
-  const url = "https://api.n11.com/ms/product-query";
-  const rows = [];
-  try {
-    let page = 0;
-    for (let i = 0; i < 50; i++) {
-      const resp = await axios.get(url, {
-        headers: { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, Accept: "application/json" },
-        params: { page, size: 250 },
-        timeout: 20000,
-      });
-      const content = resp.data?.content || [];
-      content.forEach((it) => {
-        const barcode = String(it.stockCode || "").trim();
-        if (!barcode) return;
-        const price = Number(it.salePrice ?? it.listPrice ?? 0) || undefined;
-        rows.push({ barcode, stock: Number(it.quantity ?? 0), name: it.title || "", price, image: it.imageUrls?.[0] || undefined });
-      });
-      const totalPages = resp.data?.totalPages ?? 1;
-      page++;
-      if (!content.length || page >= totalPages) break;
-    }
-    return { platform: "n11", error: null, rows };
-  } catch (err) {
-    const msg =
-      err.response?.status === 401 || err.response?.status === 403
-        ? "N11 kimlik doğrulama hatası — appKey/appSecret'i kontrol et."
-        : err.response?.data
-        ? `N11 hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
-        : `N11 bağlantı hatası: ${err.message}`;
-    return { platform: "n11", error: msg, rows: [] };
-  }
-}
-
 async function pushStockToN11(barcode, quantity) {
   if (!n11Configured()) return { ok: false, message: "N11 API bilgisi eksik." };
   const { N11_APP_KEY, N11_APP_SECRET } = process.env;
@@ -650,48 +609,36 @@ async function pushStockToN11(barcode, quantity) {
 }
 
 /* ==================================================================
-   ÇİÇEKSEPETİ — ciceksepeti.dev resmi dokümanına göre doğrulandı (25.09.2026):
-   - Base URL: prod https://apis.ciceksepeti.com/api/v1/ , test https://sandbox-apis.ciceksepeti.com/api/v1/
-   - Sipariş listesi: POST /api/v1/Order/GetOrders  (GET DEĞİL, body ile parametre)
-   - Her istekte iki header zorunlu: x-api-key (API Key) VE user-agent
-     (entegratör kullanılmıyorsa sadece Satıcı ID; entegratörle çalışılıyorsa
-     "Satıcı Id-Entegratör Adı")
-   - Aynı request body ile dakikada 1 istekten fazla atılamıyor (rate limit).
+   ÇİÇEKSEPETİ — resmi API var (ciceksepeti.dev) fakat dokümantasyon
+   sitesi otomatik erişimi engellediği için uç nokta/alan adlarını
+   yalnızca dolaylı kaynaklardan (SDK referansı) doğrulayabildim.
+   BU BÖLÜM DOĞRULANMAYA MUHTAÇ — gerçek denemede hata görürsen
+   "Senkron Günlüğü"ndeki mesajı bana ilet, birlikte düzeltelim.
 ================================================================== */
 function csConfigured() {
-  return !!(process.env.CS_API_KEY && process.env.CS_SUPPLIER_ID);
-}
-
-function csHost() {
-  return process.env.CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
-}
-
-function csHeaders() {
-  const { CS_API_KEY, CS_SUPPLIER_ID, CS_INTEGRATOR_NAME } = process.env;
-  const userAgent = CS_INTEGRATOR_NAME ? `${CS_SUPPLIER_ID}-${CS_INTEGRATOR_NAME}` : String(CS_SUPPLIER_ID);
-  return { "x-api-key": CS_API_KEY, "user-agent": userAgent, "Content-Type": "application/json", Accept: "application/json" };
+  return !!process.env.CS_API_KEY;
 }
 
 async function fetchCiceksepetiOrders() {
-  if (!csConfigured())
-    return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", orders: [] };
-  const url = `https://${csHost()}/api/v1/Order/GetOrders`;
+  if (!csConfigured()) return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik.", orders: [] };
+  const { CS_API_KEY, CS_ENV } = process.env;
+  const host = CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
+  const url = `https://${host}/api/v1/orders`;
   const endDate = new Date();
   const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   try {
-    const resp = await axios.post(
-      url,
-      { startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page: 0 },
-      { headers: csHeaders(), timeout: 20000 }
-    );
-    const orders = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
-    return { platform: "cs", error: null, orders: (Array.isArray(orders) ? orders : []).map(normalizeCsPackage) };
+    const resp = await axios.get(url, {
+      headers: { ApiKey: CS_API_KEY, Accept: "application/json" },
+      params: { startDate: startDate.toISOString(), endDate: endDate.toISOString(), page: 1, pageSize: 100 },
+      timeout: 20000,
+    });
+    const orders = resp.data?.orders || resp.data?.content || [];
+    return { platform: "cs", error: null, orders: orders.map(normalizeCsPackage) };
   } catch (err) {
-    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
     const msg =
       err.response?.status === 401 || err.response?.status === 403
-        ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
+        ? "Çiçeksepeti kimlik doğrulama hatası — API key'i kontrol et."
         : err.response?.data
         ? `Çiçeksepeti hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
         : `Çiçeksepeti bağlantı hatası: ${err.message}`;
@@ -720,135 +667,19 @@ function normalizeCsPackage(pkg) {
   };
 }
 
-// Ürün Listeleme — ciceksepeti.dev resmi dokümanına göre doğrulandı (25.09.2026):
-// GET /api/v1/Products — Page 1'den başlar, PageSize en fazla 60.
-// Response: { totalCount, products: [{ stockCode, stockQuantity, salesPrice, productName, images: [...] }] }
-async function fetchStockCiceksepeti() {
-  if (!csConfigured()) return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", rows: [] };
-  const url = `https://${csHost()}/api/v1/Products`;
-  const rows = [];
-  try {
-    let page = 1;
-    let totalCount = Infinity;
-    while (rows.length < totalCount && page < 200) {
-      const resp = await axios.get(url, { headers: csHeaders(), params: { Page: page, PageSize: 60 }, timeout: 20000 });
-      const products = resp.data?.products || resp.data?.Products || [];
-      totalCount = Number(resp.data?.totalCount ?? resp.data?.TotalCount ?? products.length);
-      products.forEach((it) => {
-        const barcode = String(it.stockCode || it.StockCode || "").trim();
-        if (!barcode) return;
-        const price = Number(it.salesPrice ?? it.SalesPrice ?? 0) || undefined;
-        rows.push({
-          barcode,
-          stock: Number(it.stockQuantity ?? it.StockQuantity ?? 0),
-          name: it.productName || it.ProductName || "",
-          price,
-          image: it.images?.[0] || it.Images?.[0] || undefined,
-        });
-      });
-      if (!products.length) break;
-      page++;
-    }
-    return { platform: "cs", error: null, rows };
-  } catch (err) {
-    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
-    const msg =
-      err.response?.status === 401 || err.response?.status === 403
-        ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
-        : err.response?.data
-        ? `Çiçeksepeti hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
-        : `Çiçeksepeti bağlantı hatası: ${err.message}`;
-    return { platform: "cs", error: msg, rows: [] };
-  }
-}
-
-// NOT: Bu uç nokta (stok/fiyat güncelleme) henüz sipariş listeleme kadar
-// doğrulanmadı — "Ürün Yönetimi" bölümünde farklı bir yol olabilir. İlk
-// denemede hata alırsan Senkron Günlüğü'ndeki mesajı ilet, dokümandan
-// "Stok Güncelleme" bölümünü birlikte kontrol ederiz.
 async function pushStockToCiceksepeti(barcode, quantity) {
   if (!csConfigured()) return { ok: false, message: "Çiçeksepeti API bilgisi eksik." };
-  const url = `https://${csHost()}/api/v1/products/stock-price`;
+  const { CS_API_KEY, CS_ENV } = process.env;
+  const host = CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
+  const url = `https://${host}/api/v1/products/stock-price`;
   const qty = Math.max(0, Math.floor(Number(quantity) || 0));
   try {
-    const resp = await axios.post(url, { items: [{ stockCode: barcode, stockQuantity: qty }] }, { headers: csHeaders(), timeout: 15000 });
+    const resp = await axios.post(
+      url,
+      { items: [{ stockCode: barcode, stockQuantity: qty }] },
+      { headers: { ApiKey: CS_API_KEY, "Content-Type": "application/json" }, timeout: 15000 }
+    );
     return { ok: true, message: "Gönderildi", batchId: resp.data?.batchId || null };
-  } catch (err) {
-    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
-  }
-}
-
-/* ==================================================================
-   KENDİ SİTEM (nokta-hirdavat-site backend'i)
-   Diğer pazaryerlerinin aksine burada karşı taraf da bizim yazdığımız
-   bir backend, bu yüzden kimlik doğrulama basit bir x-api-key ile yapılıyor.
-================================================================== */
-function siteConfigured() {
-  return !!(process.env.SITE_API_URL && process.env.SITE_API_KEY);
-}
-function siteHeaders() {
-  return { "x-api-key": process.env.SITE_API_KEY };
-}
-
-function normalizeSiteOrder(o) {
-  const lines = (o.lines || []).map((it) => ({
-    barcode: String(it.barcode || "").trim(),
-    quantity: Number(it.quantity || 1),
-    name: it.name || "",
-  }));
-  const productSummary = lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ");
-  return {
-    platform: "site",
-    orderNumber: o.orderNumber || "—",
-    packageId: String(o.orderNumber || ""),
-    customer: o.customer || "Müşteri",
-    city: o.city || "",
-    productSummary: productSummary || "—",
-    amount: Number(o.amount) || 0,
-    status: o.status || "Yeni",
-    date: o.date || null,
-    lines,
-  };
-}
-
-async function fetchSiteOrders() {
-  if (!siteConfigured()) return { platform: "site", error: "Kendi Sitem API bilgileri .env dosyasında eksik.", orders: [] };
-  try {
-    const resp = await axios.get(`${process.env.SITE_API_URL}/api/orders`, { headers: siteHeaders(), timeout: 15000 });
-    const raw = Array.isArray(resp.data) ? resp.data : resp.data?.orders || [];
-    return { platform: "site", error: null, orders: raw.map(normalizeSiteOrder) };
-  } catch (err) {
-    const msg =
-      err.response?.status === 401
-        ? "Kendi Sitem kimlik doğrulama hatası — SITE_API_KEY iki tarafta da aynı mı kontrol et."
-        : err.response?.data
-        ? `Kendi Sitem hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
-        : `Kendi Sitem bağlantı hatası: ${err.message}`;
-    return { platform: "site", error: msg, orders: [] };
-  }
-}
-
-async function fetchStockSite() {
-  if (!siteConfigured()) return { platform: "site", error: "Kendi Sitem API bilgisi eksik.", rows: [] };
-  try {
-    const resp = await axios.get(`${process.env.SITE_API_URL}/api/stock`, { headers: siteHeaders(), timeout: 15000 });
-    const raw = Array.isArray(resp.data) ? resp.data : resp.data?.rows || [];
-    return {
-      platform: "site",
-      error: null,
-      rows: raw.map((r) => ({ barcode: String(r.barcode || "").trim(), stock: Number(r.stock || 0), name: r.name || "", price: r.price })),
-    };
-  } catch (err) {
-    return { platform: "site", error: `Kendi Sitem stok okuma hatası: ${err.message}`, rows: [] };
-  }
-}
-
-async function pushStockToSite(barcode, quantity) {
-  if (!siteConfigured()) return { ok: false, message: "Kendi Sitem API bilgisi eksik." };
-  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
-  try {
-    await axios.post(`${process.env.SITE_API_URL}/api/stock`, { barcode, quantity: qty }, { headers: siteHeaders(), timeout: 15000 });
-    return { ok: true, message: "Gönderildi" };
   } catch (err) {
     return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
   }
@@ -860,11 +691,8 @@ async function pushStockToSite(barcode, quantity) {
 const PLATFORMS = [
   { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
   { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
-  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: fetchStockN11, stockPullVerified: true, verified: true },
-  // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
-  // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
-  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
-  { id: "site", name: "Kendi Sitem", color: "#FF5A2B", configured: siteConfigured, fetchOrders: fetchSiteOrders, pushStock: pushStockToSite, fetchStock: fetchStockSite, stockPullVerified: true, verified: true },
+  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: null, stockPullVerified: false, verified: true },
+  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: null, stockPullVerified: false, verified: false },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
@@ -1128,8 +956,6 @@ function mergeStockRows(platform, rows) {
     if (!existed) p.centralStock = stock;
     if (r.name && (!p.name || p.name === "İsimsiz ürün")) p.name = r.name;
     if (r.image) p.image = r.image;
-    const price = Number(r.price);
-    if (price > 0) p.prices[platform] = price;
     existed ? updated++ : created++;
   });
   persistProducts();
