@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ticaret Paneli</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --bg: #0F1115; --surface: #171A21; --surface2: #1B212B; --border: #242832;
+    --text: #E8EAED; --muted: #6B7280; --danger: #F87171; --warn: #FBBF24; --ok: #34D399;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { border-bottom:1px solid var(--border); background:#12151B; position:sticky; top:0; z-index:10; }
+  .wrap { max-width:1180px; margin:0 auto; padding:16px 20px; }
+  .headrow { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  .brand { font-size:11px; color:var(--muted); font-family:monospace; margin-top:2px; }
+  .brand span { margin-right:6px; }
+  button { background:var(--text); color:var(--bg); border:none; border-radius:6px; padding:8px 14px; font-size:12px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--border); }
+  button.small { padding:5px 9px; font-size:11px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .tabs { display:flex; gap:6px; margin-top:12px; }
+  .tab { padding:7px 14px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; color:var(--muted); border:1px solid transparent; }
+  .tab.active { background:var(--surface2); color:var(--text); border-color:var(--border); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px,1fr)); gap:10px; margin:18px 0; }
+  .stat { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+  .stat .label { font-size:10px; color:var(--muted); letter-spacing:.04em; }
+  .stat .value { font-size:22px; font-weight:700; margin-top:4px; }
+  .errbox { background:#F8717114; border:1px solid #F8717155; color:var(--danger); border-radius:8px; padding:10px 12px; font-size:12px; margin-bottom:10px; }
+  .syncbox { background:#34D39914; border:1px solid #34D39955; color:var(--ok); border-radius:8px; padding:10px 12px; font-size:12px; margin-bottom:10px; }
+  .warnbox { background:#FBBF2414; border:1px solid #FBBF2455; color:var(--warn); border-radius:8px; padding:8px 12px; font-size:11px; margin-bottom:10px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); padding:8px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  td { padding:9px 8px; border-bottom:1px solid #1E222B; vertical-align:top; }
+  .badge { display:inline-flex; align-items:center; gap:5px; font-family:monospace; font-size:10px; padding:2px 7px; border-radius:100px; font-weight:700; }
+  .badge.ok { color:var(--ok); background:#34D39918; }
+  .badge.fail { color:var(--danger); background:#F8717118; }
+  .badge.unverified { color:var(--warn); background:#FBBF2418; }
+
+  /* Ürün kartı (Prapazar tarzı) */
+  .pcard { border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:12px; background:var(--surface); cursor:grab; transition:border-color .12s, background .12s, opacity .12s; }
+  .pcard.dragging { opacity:.4; }
+  .pcard.drag-over { border-color:var(--ok); background:#34D39912; }
+  .pcard-drag-handle { color:var(--muted); font-size:13px; cursor:grab; padding:2px 4px; flex-shrink:0; }
+  .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
+  .pcard-title { font-weight:700; }
+  .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
+  .pcard-code-row { display:flex; align-items:center; gap:6px; margin-top:1px; }
+  .pcard-code-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; font-family:monospace; font-size:11px; color:var(--muted); width:150px; }
+  .pcard-code-input:hover { border-color:var(--border); }
+  .pcard-code-input:focus { border-color:var(--border); background:var(--surface2); color:var(--text); outline:none; }
+  select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
+  .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
+  .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
+  .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
+  .pchip-dot { width:8px; height:8px; border-radius:50%; }
+  .pchip input[type=number] { width:70px; }
+  .pchip .status-btn { font-size:10px; padding:2px 8px; border-radius:100px; border:none; cursor:pointer; }
+  .status-btn.satista { background:#34D39918; color:var(--ok); }
+  .status-btn.pasif { background:#F8717118; color:var(--danger); }
+  .muted { color:var(--muted); font-size:11px; }
+  .amount { font-family:monospace; font-weight:600; }
+  #loginScreen { display:flex; align-items:center; justify-content:center; height:100vh; }
+  #loginBox { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:24px; width:280px; }
+  #loginBox input { width:100%; padding:9px 10px; border-radius:6px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:13px; margin:10px 0; }
+  #loginBox p.err { color:var(--danger); font-size:12px; }
+  .empty { text-align:center; color:#4B5563; padding:40px 0; }
+  .fetchedAt { font-size:10px; color:var(--muted); font-family:monospace; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  input[type=text], input[type=number] {
+    background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text);
+  }
+  input.stockcell { width:58px; text-align:center; font-family:monospace; }
+  .search { flex:1; min-width:180px; position:relative; }
+  .search input { width:100%; padding-left:28px; }
+  .search::before { content:"🔎"; position:absolute; left:8px; top:50%; transform:translateY(-50%); font-size:11px; opacity:.5; }
+  .mismatch { border-color:var(--danger) !important; color:var(--danger) !important; }
+  .addform { display:grid; grid-template-columns:repeat(auto-fit, minmax(110px,1fr)); gap:8px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px; }
+  .addform label { font-size:10px; color:var(--muted); text-transform:uppercase; display:block; margin-bottom:4px; }
+  .logrow { padding:9px 10px; border-bottom:1px solid #1E222B; font-size:11px; display:flex; justify-content:space-between; gap:10px; }
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:9px 16px; font-size:12px; z-index:50; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<div id="loginScreen" style="display:none;">
+  <div id="loginBox">
+    <h1 style="margin-bottom:4px;">Ticaret Paneli</h1>
+    <p class="muted">Devam etmek için şifreni gir.</p>
+    <input id="pwInput" type="password" placeholder="Panel şifresi" />
+    <button style="width:100%" onclick="login()">Giriş yap</button>
+    <p class="err" id="loginErr"></p>
+  </div>
+</div>
+
+<div id="app" style="display:none;">
+  <header>
+    <div class="wrap">
+      <div class="headrow">
+        <div>
+          <h1>Ticaret Paneli</h1>
+          <div class="brand" id="brandLine"></div>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="fetchedAt" id="fetchedAt"></span>
+          <button class="ghost" id="refreshBtn" onclick="refresh(true)">Yenile</button>
+        </div>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-tab="orders" onclick="showTab('orders')">Siparişler</div>
+        <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
+        <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
+        <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
+        <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
+        <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div id="errArea"></div>
+    <div id="syncArea"></div>
+    <div id="unverifiedArea"></div>
+
+    <!-- SİPARİŞLER -->
+    <div class="panel active" id="panel-orders">
+      <div class="stats" id="orderStats"></div>
+      <table>
+        <thead><tr>
+          <th>Platform</th><th>Sipariş No</th><th>Müşteri / Şehir</th><th>Ürünler</th><th>Tutar</th><th>Durum</th><th>Tarih</th>
+        </tr></thead>
+        <tbody id="orderRows"></tbody>
+      </table>
+      <div id="ordersEmpty" class="empty" style="display:none;">Henüz sipariş bulunamadı.</div>
+    </div>
+
+    <!-- STOK -->
+    <div class="panel" id="panel-stock">
+      <div class="toolbar">
+        <div class="search"><input type="text" id="stockSearch" placeholder="Barkod veya ürün adı ara..." oninput="renderStock()"></div>
+        <select id="stockSort" onchange="renderStock()">
+          <option value="name-asc">Ada göre A-Z</option>
+          <option value="name-desc">Ada göre Z-A</option>
+          <option value="code-asc">Ana ürün koduna göre A-Z</option>
+          <option value="code-desc">Ana ürün koduna göre Z-A</option>
+          <option value="stock-desc">Merkezi stok: çoktan aza</option>
+          <option value="stock-asc">Merkezi stok: azdan çoğa</option>
+          <option value="category-asc">Kategoriye göre</option>
+        </select>
+        <button class="ghost small" onclick="toggleAddForm()">+ Ürün</button>
+        <span id="importButtons"></span>
+        <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(event)">
+      </div>
+      <p class="muted" style="margin:-6px 0 10px;">İki ürünü birleştirmek için birini diğerinin üzerine sürükleyip bırak.</p>
+
+      <div class="addform" id="addForm" style="display:none;">
+        <div><label>Ürün Kodu</label><input type="text" id="newBarcode"></div>
+        <div><label>Ürün Adı</label><input type="text" id="newName"></div>
+        <div><label>Kategori</label><input type="text" id="newCategory" placeholder="Ana Kategori -> Alt Kategori"></div>
+        <div><label>Merkezi Stok</label><input type="number" id="newCentral"></div>
+        <div id="addFormPlatformFields" style="grid-column:1/-1; display:flex; flex-wrap:wrap; gap:10px;"></div>
+        <div style="grid-column:1/-1; display:flex; justify-content:flex-end; gap:8px;">
+          <button class="ghost small" onclick="toggleAddForm()">Vazgeç</button>
+          <button class="small" onclick="addProduct()">Kaydet</button>
+        </div>
+      </div>
+
+      <div id="stockCards"></div>
+      <div id="stockEmpty" class="empty" style="display:none;">Henüz ürün yok. Excel yükle ya da elle ekle.</div>
+    </div>
+
+    <!-- YEDEKLEME -->
+    <div class="panel" id="panel-backup">
+      <div id="backupConfigWarn"></div>
+      <div class="toolbar" style="justify-content:space-between;">
+        <div>
+          <div class="muted" id="backupStatusLine">—</div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="ghost small" id="backupConnectBtn" style="display:none;" onclick="connectGoogleDrive()">Google ile Bağlan</button>
+          <button class="small" id="backupNowBtn" onclick="runBackupNow()">Şimdi Yedekle</button>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Dosya</th><th>Oluşturulma</th><th>Boyut</th><th></th></tr></thead>
+        <tbody id="backupRows"></tbody>
+      </table>
+      <div id="backupEmpty" class="empty" style="display:none;">Henüz Drive'da yedek yok.</div>
+    </div>
+
+    <!-- SENKRON GÜNLÜĞÜ -->
+    <div class="panel" id="panel-log">
+      <p class="muted" style="margin-bottom:10px;">Sipariş geldiğinde ya da elle "Gönder" dediğinde her platforma yapılan stok güncelleme denemeleri burada listelenir.</p>
+      <div id="logRows" style="border:1px solid var(--border); border-radius:8px; overflow:hidden;"></div>
+      <div id="logEmpty" class="empty" style="display:none;">Henüz bir senkron kaydı yok.</div>
+    </div>
+
+    <!-- EŞLEŞTİRME -->
+    <div class="panel" id="panel-match">
+      <p class="muted" style="margin-bottom:10px;">Barkodu aynı olan ürünler otomatik eşleşir. Burada, henüz bir platforma özel SKU'su tanımlanmamış Ana Ürünleri görüp onaylayabilir ya da farklı bir SKU girebilirsin.</p>
+      <div id="matchTabs" class="tabs" style="margin-bottom:14px;"></div>
+      <table>
+        <thead><tr><th>Ana Ürün</th><th>Varsayılan SKU (ürün koduyla aynı)</th><th>Bu platform için SKU</th><th></th></tr></thead>
+        <tbody id="matchRows"></tbody>
+      </table>
+      <div id="matchEmpty" class="empty" style="display:none;">Bu platform için eşleştirilmemiş ürün yok — hepsi eşleşti.</div>
+    </div>
+
+    <!-- REKABET -->
+    <div class="panel" id="panel-compete">
+      <p class="muted" style="margin-bottom:10px;">
+        Rakip ürün linkleri resmi bir API değil, herkese açık ürün sayfası okunarak takip edilir — sayfa tasarımı değişirse ayıklama geçici olarak bozulabilir.
+        Rakip fiyatları günde birkaç kez otomatik kontrol edilir; "Şimdi Kontrol Et" ile elle de tetikleyebilirsin.
+      </p>
+      <div class="toolbar">
+        <button class="ghost small" onclick="repriceAllNow()">Tüm Ürünleri Şimdi Kontrol Et</button>
+      </div>
+      <table>
+        <thead><tr><th>Ürün</th><th>Benim Fiyatım (TY)</th><th>En Düşük Rakip</th><th>Min / Maks</th><th>Otomatik</th><th>Rakip Linkleri</th><th></th></tr></thead>
+        <tbody id="competeRows"></tbody>
+      </table>
+      <div id="competeEmpty" class="empty" style="display:none;">Henüz ürün yok. Önce Stok sekmesinden ürün ekle.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let state = { orders: [], products: [], log: [], platforms: [], matchStatus: {} };
+let importPlatform = null;
+
+async function checkAuth() {
+  const r = await fetch('/api/orders');
+  if (r.status === 401) { document.getElementById('loginScreen').style.display = 'flex'; return; }
+  document.getElementById('app').style.display = 'block';
+  await loadPlatforms();
+  renderOrders(await r.json());
+  await loadProducts();
+  await loadLog();
+  startPolling();
+}
+
+async function login() {
+  const password = document.getElementById('pwInput').value;
+  const r = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password}) });
+  const data = await r.json();
+  if (data.ok) {
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    await loadPlatforms();
+    await refresh(false); await loadProducts(); await loadLog();
+    startPolling();
+  } else {
+    document.getElementById('loginErr').textContent = data.error || 'Giriş başarısız.';
+  }
+}
+
+let polling = null;
+function startPolling() {
+  if (polling) return;
+  polling = setInterval(async () => { await refresh(false); await loadProducts(); await loadLog(); }, 30000);
+}
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  if (name === 'match') loadMatchStatus();
+  if (name === 'compete') renderCompete();
+  if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
+}
+
+let matchActivePlatform = null;
+
+async function loadMatchStatus() {
+  const r = await fetch('/api/products/match-status');
+  if (r.status === 401) return;
+  const data = await r.json();
+  state.matchStatus = data.status || {};
+  const platformIds = Object.keys(state.matchStatus);
+  if (!matchActivePlatform || !platformIds.includes(matchActivePlatform)) matchActivePlatform = platformIds[0];
+
+  document.getElementById('matchTabs').innerHTML = platformIds.map(id => {
+    const pm = platformMeta(id);
+    const count = state.matchStatus[id].length;
+    return `<div class="tab ${id === matchActivePlatform ? 'active' : ''}" onclick="setMatchPlatform('${id}')" style="cursor:pointer;">${pm.name} ${count ? `<span class="badge">${count}</span>` : '✓'}</div>`;
+  }).join('');
+
+  renderMatchRows();
+}
+
+function setMatchPlatform(id) {
+  matchActivePlatform = id;
+  loadMatchStatus();
+}
+
+function renderMatchRows() {
+  const rows = (state.matchStatus[matchActivePlatform] || []);
+  const tbody = document.getElementById('matchRows');
+  document.getElementById('matchEmpty').style.display = rows.length ? 'none' : 'block';
+  tbody.innerHTML = '';
+  rows.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><b>${item.name}</b><div class="muted" style="font-family:monospace;">${item.code}</div></td>
+      <td class="muted" style="font-family:monospace;">${item.defaultSku}</td>
+      <td><input type="text" placeholder="${item.defaultSku}" id="matchsku_${item.code}" style="width:160px;"></td>
+      <td style="white-space:nowrap;">
+        <button class="ghost small" onclick="confirmMatch('${item.code}', true)">Varsayılanı Onayla</button>
+        <button class="small" onclick="confirmMatch('${item.code}', false)">Kaydet</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function confirmMatch(code, useDefault) {
+  const platform = matchActivePlatform;
+  const sku = useDefault ? code : (document.getElementById('matchsku_' + code).value.trim() || code);
+  const resp = await fetch('/api/products', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, skus: { [platform]: sku } })
+  });
+  const data = await resp.json();
+  const conflict = (data.conflicts || [])[0];
+  if (conflict) {
+    const yes = confirm(`Bu SKU zaten "${conflict.name}" adlı üründe kayıtlı.\nİki ürünü birleştirip tek Ana Ürün yapmak ister misin?`);
+    if (yes) {
+      await fetch('/api/products/merge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: conflict.code, to: code })
+      });
+      toast('Ürünler birleştirildi.');
+    } else {
+      toast('Vazgeçildi, bu SKU atanmadı.');
+      return;
+    }
+  } else {
+    toast('Eşleştirildi.');
+  }
+  await loadMatchStatus();
+  await loadProducts();
+}
+
+async function loadPlatforms() {
+  const r = await fetch('/api/platforms');
+  if (r.status === 401) return;
+  const data = await r.json();
+  state.platforms = data.platforms || [];
+
+  document.getElementById('brandLine').innerHTML = state.platforms
+    .map(p => `<span style="color:${p.color}">${p.name}${p.configured ? '' : ' (yapılandırılmadı)'}</span>`).join(' × ');
+
+  document.getElementById('importButtons').innerHTML = state.platforms
+    .filter(p => p.configured)
+    .map(p => `<button class="ghost small" onclick="triggerImport('${p.id}')">${p.name} İçe Aktar</button>`).join(' ')
+    + ' '
+    + state.platforms
+      .filter(p => p.configured && p.pullable)
+      .map(p => `<button class="ghost small" onclick="triggerPull('${p.id}')">${p.name} Siteden Çek${p.stockPullVerified ? '' : ' (deneysel)'}</button>`).join(' ');
+
+  const unverified = state.platforms.filter(p => p.configured && !p.verified);
+  document.getElementById('unverifiedArea').innerHTML = unverified.length
+    ? `<div class="warnbox">${unverified.map(p => p.name).join(', ')} entegrasyonunun uç nokta/alan adları resmi dokümandan tam doğrulanamadı — ilk denemede bir hata çıkarsa Senkron Günlüğü'ndeki mesajı ilet, birlikte düzeltelim.</div>`
+    : '';
+
+  // Stok kartlarında hangi platformların gösterileceği (tablo değil, kart tasarımı kullanılıyor)
+  const activePlatforms = state.platforms.filter(p => p.configured);
+
+  document.getElementById('addFormPlatformFields').innerHTML = activePlatforms.map(p =>
+    `<div><label>${p.name} Stok</label><input type="number" id="new_${p.id}"></div>
+     <div><label>${p.name} Fiyat</label><input type="number" step="0.01" id="newprice_${p.id}"></div>`
+  ).join('');
+}
+
+async function refresh(force) {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true; btn.textContent = 'Yükleniyor...';
+  try {
+    const r = await fetch('/api/orders' + (force ? '?force=1' : ''));
+    if (r.status === 401) { location.reload(); return; }
+    renderOrders(await r.json());
+    if (force) { await loadProducts(); await loadLog(); }
+  } finally {
+    btn.disabled = false; btn.textContent = 'Yenile';
+  }
+}
+
+function fmtDate(ts) {
+  if (!ts) return '—';
+  return new Date(Number(ts)).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+}
+
+function platformMeta(id) {
+  return state.platforms.find(p => p.id === id) || { name: id.toUpperCase(), color: '#999' };
+}
+
+function renderOrders(data) {
+  const orders = data.orders || [];
+  const activePlatforms = state.platforms.filter(p => p.configured);
+  document.getElementById('orderStats').innerHTML =
+    `<div class="stat"><div class="label">TOPLAM (7 gün)</div><div class="value">${orders.length}</div></div>` +
+    activePlatforms.map(p => `<div class="stat"><div class="label">${p.name.toUpperCase()}</div><div class="value" style="color:${p.color}">${orders.filter(o=>o.platform===p.id).length}</div></div>`).join('');
+
+  document.getElementById('fetchedAt').textContent = data.fetchedAt ? 'Son güncelleme: ' + new Date(data.fetchedAt).toLocaleTimeString('tr-TR') : '';
+
+  const errArea = document.getElementById('errArea');
+  errArea.innerHTML = '';
+  (data.errors || []).forEach(e => {
+    const div = document.createElement('div'); div.className = 'errbox'; div.textContent = e; errArea.appendChild(div);
+  });
+
+  const syncArea = document.getElementById('syncArea');
+  syncArea.innerHTML = '';
+  if (data.sync && data.sync.changedCount > 0) {
+    const div = document.createElement('div');
+    div.className = 'syncbox';
+    div.textContent = `Bu döngüde ${data.sync.newOrders} yeni sipariş işlendi, ${data.sync.changedCount} ürünün stoğu tüm platformlara otomatik gönderildi.`;
+    syncArea.appendChild(div);
+  }
+
+  const rows = document.getElementById('orderRows');
+  rows.innerHTML = '';
+  document.getElementById('ordersEmpty').style.display = orders.length ? 'none' : 'block';
+  orders.forEach(o => {
+    const pm = platformMeta(o.platform);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><span class="badge" style="color:${pm.color}; background:${pm.color}18;">${pm.name}</span></td>
+      <td>${o.orderNumber}</td>
+      <td>${o.customer}<div class="muted">${o.city || ''}</div></td>
+      <td>${o.productSummary}</td>
+      <td class="amount">${o.amount ? o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : '—'}</td>
+      <td>${o.status}</td>
+      <td class="muted">${fmtDate(o.date)}</td>`;
+    rows.appendChild(tr);
+  });
+}
+
+async function loadProducts() {
+  const r = await fetch('/api/products');
+  if (r.status === 401) return;
+  const data = await r.json();
+  state.products = data.products || [];
+  renderStock();
+  renderCompete();
+}
+
+function renderStock() {
+  const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
+  let list = state.products;
+  if (q) list = list.filter(p => p.barcode.toLocaleLowerCase('tr').includes(q) || (p.name||'').toLocaleLowerCase('tr').includes(q) || (p.category||'').toLocaleLowerCase('tr').includes(q));
+
+  const sortVal = document.getElementById('stockSort').value;
+  const collator = new Intl.Collator('tr');
+  list = [...list].sort((a, b) => {
+    switch (sortVal) {
+      case 'name-desc': return collator.compare(b.name || '', a.name || '');
+      case 'code-asc': return collator.compare(a.code || '', b.code || '');
+      case 'code-desc': return collator.compare(b.code || '', a.code || '');
+      case 'stock-asc': return (Number(a.centralStock) || 0) - (Number(b.centralStock) || 0);
+      case 'stock-desc': return (Number(b.centralStock) || 0) - (Number(a.centralStock) || 0);
+      case 'category-asc': return collator.compare(a.category || '', b.category || '');
+      default: return collator.compare(a.name || '', b.name || '');
+    }
+  });
+
+  const activePlatforms = state.platforms.filter(p => p.configured);
+  const wrap = document.getElementById('stockCards');
+  wrap.innerHTML = '';
+  document.getElementById('stockEmpty').style.display = list.length ? 'none' : 'block';
+
+  list.forEach(p => {
+    const c = Number(p.centralStock) || 0;
+    const thumb = p.image
+      ? `<img class="pcard-thumb" src="${p.image}" alt="">`
+      : `<div class="pcard-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`;
+
+    const chips = activePlatforms.map(pl => {
+      const stockVal = p.stocks?.[pl.id] ?? 0;
+      const mismatch = Number(stockVal) !== c;
+      const priceVal = p.prices?.[pl.id] ?? '';
+      const status = p.listingStatus?.[pl.id] || 'satista';
+      const platformSku = p.skus?.[pl.id] || p.code;
+      return `
+        <div class="pchip">
+          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span>${pl.name}
+            <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
+          </div>
+          <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">Stok kodu: ${platformSku}</div>
+          <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
+            <span class="muted">₺</span>
+            <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; font-size:11px; margin-top:4px;">
+            <span class="muted">Adet</span>
+            <input class="stockcell ${mismatch ? 'mismatch' : ''}" type="number" value="${stockVal}" onchange="updateStock('${p.code}','${pl.id}',this.value)">
+          </div>
+        </div>`;
+    }).join('');
+
+    const card = document.createElement('div');
+    card.className = 'pcard';
+    card.draggable = true;
+    card.dataset.code = p.code;
+    card.innerHTML = `
+      <div class="pcard-head">
+        <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
+        ${thumb}
+        <div>
+          <div class="pcard-title">${p.name}</div>
+          ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
+          <div class="pcard-code-row">
+            <input class="pcard-code-input" type="text" value="${p.code}" spellcheck="false" title="Ana ürün kodu — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProduct('${p.code}', this.value)">
+            ${competeBadgeHtml(p)}
+          </div>
+        </div>
+        <div class="pcard-central">
+          <div style="text-align:right;">
+            <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
+            <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
+          </div>
+          <button class="ghost small" onclick="pushProduct('${p.code}')">Gönder</button>
+          <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
+        </div>
+      </div>
+      <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
+    `;
+    attachDragHandlers(card);
+    wrap.appendChild(card);
+  });
+}
+
+/* --- Ürün kartlarını sürükleyerek birleştirme --- */
+let dragSourceCode = null;
+
+function attachDragHandlers(card) {
+  card.addEventListener('dragstart', (e) => {
+    dragSourceCode = card.dataset.code;
+    card.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', card.dataset.code);
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+    document.querySelectorAll('.pcard.drag-over').forEach(el => el.classList.remove('drag-over'));
+    dragSourceCode = null;
+  });
+  card.addEventListener('dragover', (e) => {
+    if (!dragSourceCode || dragSourceCode === card.dataset.code) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    card.classList.add('drag-over');
+  });
+  card.addEventListener('dragleave', () => {
+    card.classList.remove('drag-over');
+  });
+  card.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    card.classList.remove('drag-over');
+    const fromCode = dragSourceCode;
+    const toCode = card.dataset.code;
+    if (!fromCode || fromCode === toCode) return;
+    const fromP = state.products.find(p => p.code === fromCode);
+    const toP = state.products.find(p => p.code === toCode);
+    const fromName = fromP ? fromP.name : fromCode;
+    const toName = toP ? toP.name : toCode;
+    const ok = confirm(`"${fromName}" ürününü "${toName}" ile birleştirmek istiyor musun?\n\nSKU'lar ve platform stokları "${toName}" altında birleşecek, "${fromName}" silinecek. Bu işlem geri alınamaz.`);
+    if (!ok) return;
+    await mergeProducts(fromCode, toCode);
+  });
+}
+
+async function mergeProducts(fromCode, toCode) {
+  toast('Ürünler birleştiriliyor…');
+  try {
+    const resp = await fetch('/api/products/merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: fromCode, to: toCode })
+    });
+    const data = await resp.json();
+    if (!data.ok) { toast(data.error || 'Birleştirilemedi.'); return; }
+    toast('Ürünler birleştirildi.');
+    await loadProducts();
+  } catch (e) {
+    toast('Birleştirme hatası: ' + e.message);
+  }
+}
+
+// Ürün kartında Ana Ürün Kodu'nun yanında gösterilen küçük rekabet özeti.
+// Rekabet sekmesindeki mantıkla aynı: en düşük rakip fiyatı, benim fiyatımdan
+// düşükse/eşitse yeşil "en ucuz", değilse kırmızı rakip fiyatı gösterir.
+function competeBadgeHtml(p) {
+  const competitors = p.competitors || [];
+  if (!competitors.length) return '';
+  const lowestVals = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
+  if (!lowestVals.length) return '<span class="muted" style="font-size:10px;">rakip: kontrol bekliyor</span>';
+  const lowestVal = Math.min(...lowestVals);
+  const myPrice = p.pricing?.myPrice;
+  const ok = myPrice != null && myPrice <= lowestVal;
+  return `<span class="badge ${ok ? 'ok' : 'fail'}" title="En düşük rakip fiyatı">${ok ? 'en ucuz sensin' : 'rakip'}: ${lowestVal.toFixed(2)} ₺</span>`;
+}
+
+async function renameProduct(oldCode, newCodeRaw) {
+  const newCode = (newCodeRaw || '').trim();
+  if (!newCode || newCode === oldCode) { renderStock(); return; }
+  const resp = await fetch(`/api/products/${encodeURIComponent(oldCode)}/rename`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newCode })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ana ürün kodu değiştirilemedi.'); renderStock(); return; }
+  toast('Ana ürün kodu güncellendi.');
+  await loadProducts();
+}
+
+function toggleAddForm() {
+  const f = document.getElementById('addForm');
+  f.style.display = f.style.display === 'none' ? 'grid' : 'none';
+}
+
+async function addProduct() {
+  const barcode = document.getElementById('newBarcode').value.trim();
+  if (!barcode) { toast('Barkod/SKU girmelisin.'); return; }
+  const stocks = {}, prices = {};
+  state.platforms.filter(p => p.configured).forEach(p => {
+    const stockEl = document.getElementById('new_' + p.id);
+    if (stockEl) stocks[p.id] = stockEl.value;
+    const priceEl = document.getElementById('newprice_' + p.id);
+    if (priceEl) prices[p.id] = priceEl.value;
+  });
+  const body = {
+    barcode,
+    name: document.getElementById('newName').value,
+    category: document.getElementById('newCategory').value,
+    centralStock: document.getElementById('newCentral').value,
+    stocks, prices
+  };
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  document.getElementById('newBarcode').value = '';
+  document.getElementById('newName').value = '';
+  document.getElementById('newCategory').value = '';
+  document.getElementById('newCentral').value = '';
+  state.platforms.filter(p => p.configured).forEach(p => {
+    const stockEl = document.getElementById('new_' + p.id); if (stockEl) stockEl.value = '';
+    const priceEl = document.getElementById('newprice_' + p.id); if (priceEl) priceEl.value = '';
+  });
+  toggleAddForm();
+  await loadProducts();
+  toast('Ürün kaydedildi.');
+}
+
+async function updateStock(barcode, platformId, value) {
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, stocks: { [platformId]: value } }) });
+  await loadProducts();
+}
+
+async function updatePrice(barcode, platformId, value) {
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, prices: { [platformId]: value } }) });
+  await loadProducts();
+}
+
+async function toggleStatus(barcode, platformId, currentStatus) {
+  const next = currentStatus === 'pasif' ? 'satista' : 'pasif';
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, listingStatus: { [platformId]: next } }) });
+  await loadProducts();
+}
+
+async function updateCentral(barcode, value) {
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, centralStock: value }) });
+  await loadProducts();
+}
+
+async function deleteProduct(barcode) {
+  await fetch('/api/products/' + encodeURIComponent(barcode), { method:'DELETE' });
+  await loadProducts();
+}
+
+async function pushProduct(barcode) {
+  toast('Gönderiliyor...');
+  const r = await fetch(`/api/products/${encodeURIComponent(barcode)}/push`, { method:'POST' });
+  const data = await r.json();
+  const summary = Object.entries(data.results || {}).map(([id, res]) => `${platformMeta(id).name} ${res.ok ? '✓' : '✗'}`).join(' ');
+  toast(summary || 'Tamamlandı');
+  await loadProducts(); await loadLog();
+}
+
+function renderCompete() {
+  const tbody = document.getElementById('competeRows');
+  document.getElementById('competeEmpty').style.display = state.products.length ? 'none' : 'block';
+  tbody.innerHTML = '';
+  state.products.forEach(p => {
+    const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
+    const competitors = p.competitors || [];
+    const lowest = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
+    const lowestVal = lowest.length ? Math.min(...lowest) : null;
+    const badge = lowestVal != null
+      ? (pricing.myPrice != null && pricing.myPrice <= lowestVal
+          ? `<span class="badge ok">${lowestVal.toFixed(2)} ₺ (en ucuz sensin)</span>`
+          : `<span class="badge fail">${lowestVal.toFixed(2)} ₺</span>`)
+      : '<span class="muted">veri yok</span>';
+    const linkList = competitors.map(c => {
+      const status = c.lastError ? `<span style="color:var(--danger)">hata: ${c.lastError}</span>` : (c.lastPrice ? `${c.lastPrice.toFixed(2)} ₺` : 'kontrol bekliyor');
+      return `<div class="muted" style="font-size:11px; word-break:break-all;">${c.url}<br>${status}</div>`;
+    }).join('<hr style="border-color:var(--border); margin:4px 0;">');
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><b>${p.name}</b><div class="muted" style="font-family:monospace;">${p.code}</div></td>
+      <td>${pricing.myPrice != null ? pricing.myPrice.toFixed(2) + ' ₺' : '-'}</td>
+      <td>${badge}</td>
+      <td>
+        <input type="number" step="0.01" placeholder="Min" id="min_${p.code}" value="${pricing.minPrice ?? ''}" style="width:70px;">
+        <input type="number" step="0.01" placeholder="Maks" id="max_${p.code}" value="${pricing.maxPrice ?? ''}" style="width:70px;">
+      </td>
+      <td><input type="checkbox" id="auto_${p.code}" ${pricing.autoReprice ? 'checked' : ''}></td>
+      <td style="min-width:220px;">
+        <textarea id="urls_${p.code}" rows="2" style="width:100%; font-size:11px;" placeholder="Her satıra bir rakip ürün linki">${competitors.map(c => c.url).join('\n')}</textarea>
+        <div>${linkList}</div>
+      </td>
+      <td style="white-space:nowrap;">
+        <button class="ghost small" onclick="saveCompete('${p.code}')">Kaydet</button>
+        <button class="small" onclick="repriceNow('${p.code}')">Şimdi Kontrol Et</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function saveCompete(code) {
+  const minPrice = document.getElementById('min_' + code).value;
+  const maxPrice = document.getElementById('max_' + code).value;
+  const autoReprice = document.getElementById('auto_' + code).checked;
+  const competitorUrls = document.getElementById('urls_' + code).value.split('\n').map(s => s.trim()).filter(Boolean);
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/pricing`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minPrice, maxPrice, autoReprice, competitorUrls })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); return; }
+  toast('Kaydedildi.');
+  await loadProducts();
+}
+
+async function repriceNow(code) {
+  toast('Rakip fiyatları kontrol ediliyor…');
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/reprice-check`, { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Kontrol başarısız.'); return; }
+  toast(data.pushResult ? `Yeni fiyat gönderildi: ${data.pushResult.newPrice} ₺` : 'Kontrol tamamlandı, fiyat değişmedi.');
+  await loadProducts();
+}
+
+async function repriceAllNow() {
+  toast('Tüm ürünler kontrol ediliyor… bu biraz sürebilir.');
+  const resp = await fetch('/api/reprice-all', { method: 'POST' });
+  const data = await resp.json();
+  toast(`${data.checked || 0} ürün kontrol edildi.`);
+  await loadProducts();
+}
+
+function triggerImport(platform) {
+  importPlatform = platform;
+  document.getElementById('importFile').click();
+}
+
+async function triggerPull(platform) {
+  const pm = platformMeta(platform);
+  toast(`${pm.name}: stok listesi siteden çekiliyor…`);
+  try {
+    const resp = await fetch('/api/products/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform })
+    });
+    const result = await resp.json();
+    if (!resp.ok || !result.ok) {
+      toast(`${pm.name} hata: ${result.error || 'bilinmeyen hata'}`);
+      return;
+    }
+    toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi).`);
+    loadProducts();
+  } catch (e) {
+    toast(`${pm.name} bağlantı hatası: ${e.message}`);
+  }
+}
+
+function handleImportFile(e) {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async (evt) => {
+    const wb = XLSX.read(evt.target.result, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    if (!rows.length) { toast('Dosyada veri bulunamadı.'); return; }
+    const headers = rows[0].map(String);
+    const guess = (keywords) => headers.findIndex(h => keywords.some(k => h.toLocaleLowerCase('tr').includes(k)));
+    const barcodeCol = guess(['barkod','sku','stok kod','ürün kod','urun kod']);
+    const stockCol = guess(['stok adedi','stok miktar','miktar','adet','stok']);
+    const nameCol = guess(['ürün adı','urun adi','başlık','baslik','ad']);
+    const dataRows = rows.slice(1).filter(r => r.some(c => String(c).trim() !== ''));
+    const parsed = dataRows.map(r => ({
+      barcode: String(r[barcodeCol >= 0 ? barcodeCol : 0] ?? '').trim(),
+      stock: Number(String(r[stockCol >= 0 ? stockCol : 1]).replace(/[^\d.-]/g,'')) || 0,
+      name: nameCol >= 0 ? String(r[nameCol] ?? '').trim() : '',
+    }));
+    const resp = await fetch('/api/products/import', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ platform: importPlatform, rows: parsed })
+    });
+    const result = await resp.json();
+    toast(`${platformMeta(importPlatform).name}: ${result.updated} güncellendi, ${result.created} yeni eklendi.`);
+    await loadProducts();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+async function loadLog() {
+  const r = await fetch('/api/push-log');
+  if (r.status === 401) return;
+  const data = await r.json();
+  state.log = data.log || [];
+  renderLog();
+}
+
+function renderLog() {
+  const box = document.getElementById('logRows');
+  box.innerHTML = '';
+  document.getElementById('logEmpty').style.display = state.log.length ? 'none' : 'block';
+  state.log.forEach(entry => {
+    const badges = Object.entries(entry.results || {}).map(([id, res]) => {
+      const pm = platformMeta(id);
+      return `<span class="badge ${res.ok ? 'ok' : 'fail'}">${pm.name} ${res.ok ? '✓' : '✗'}</span>`;
+    }).join(' ');
+    const failMsgs = Object.entries(entry.results || {}).filter(([,res]) => !res.ok).map(([id,res]) => `${platformMeta(id).name}: ${res.message}`).join(' | ');
+    const div = document.createElement('div');
+    div.className = 'logrow';
+    div.innerHTML = `
+      <div>
+        <b>${entry.name || entry.barcode}</b>
+        <span class="muted" style="font-family:monospace;"> ${entry.barcode}</span>
+        <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
+        ${failMsgs ? `<div class="muted" style="color:var(--danger)">${failMsgs}</div>` : ''}
+      </div>
+      <div style="text-align:right;">
+        <div>${badges}</div>
+        <div class="muted">${fmtDate(new Date(entry.time).getTime())}</div>
+      </div>`;
+    box.appendChild(div);
+  });
+}
+
+/* --- Google Drive yedekleme --- */
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function loadBackupStatus() {
+  const r = await fetch('/api/backup/status');
+  if (r.status === 401) return;
+  const data = await r.json();
+  const warn = document.getElementById('backupConfigWarn');
+  const line = document.getElementById('backupStatusLine');
+  const btn = document.getElementById('backupNowBtn');
+  const connectBtn = document.getElementById('backupConnectBtn');
+
+  // OAuth (kendi Google hesabın) yapılandırılmış ama henüz bağlanılmamışsa bağlan butonunu göster.
+  connectBtn.style.display = (data.oauthAvailable && !data.oauthConnected) ? 'inline-block' : 'none';
+
+  if (!data.configured) {
+    if (data.oauthAvailable && !data.oauthConnected) {
+      warn.innerHTML = `<div class="warnbox">Google OAuth bilgileri girilmiş ama henüz bağlanılmamış. Sağdaki "Google ile Bağlan" butonuyla kendi Google hesabınla bir kez giriş yap.</div>`;
+    } else {
+      warn.innerHTML = `<div class="warnbox">Google Drive yedekleme henüz yapılandırılmadı. .env dosyasına GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI ve GOOGLE_DRIVE_FOLDER_ID eklenmeli.</div>`;
+    }
+    line.textContent = 'Yapılandırılmadı.';
+    btn.disabled = true;
+    return;
+  }
+  warn.innerHTML = '';
+  btn.disabled = false;
+  const lb = data.lastBackup || {};
+  let text = `Otomatik yedekleme: ${data.intervalHours} saatte bir. `;
+  text += lb.at ? `Son başarılı yedek: ${fmtDate(new Date(lb.at).getTime())}.` : 'Henüz başarılı bir yedekleme yapılmadı.';
+  if (lb.error) text += ` Son deneme hata verdi: ${lb.error}`;
+  line.textContent = text;
+}
+
+function connectGoogleDrive() {
+  window.open('/api/backup/oauth/start', '_blank');
+}
+
+async function loadBackupList() {
+  const r = await fetch('/api/backup/list');
+  if (r.status === 401) return;
+  const data = await r.json();
+  const tbody = document.getElementById('backupRows');
+  tbody.innerHTML = '';
+  if (!data.ok) { document.getElementById('backupEmpty').style.display = 'block'; return; }
+  const files = data.files || [];
+  document.getElementById('backupEmpty').style.display = files.length ? 'none' : 'block';
+  files.forEach(f => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-family:monospace;">${f.name}</td>
+      <td class="muted">${fmtDate(new Date(f.createdTime).getTime())}</td>
+      <td class="muted">${fmtBytes(f.size)}</td>
+      <td><button class="ghost small" onclick="restoreBackup('${f.id}','${f.name}')">Geri Yükle</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function runBackupNow() {
+  const btn = document.getElementById('backupNowBtn');
+  btn.disabled = true; btn.textContent = 'Yedekleniyor...';
+  try {
+    const resp = await fetch('/api/backup/run', { method: 'POST' });
+    const data = await resp.json();
+    toast(data.ok ? 'Yedek Drive\'a kaydedildi.' : (data.error || 'Yedekleme başarısız.'));
+    await loadBackupStatus();
+    await loadBackupList();
+  } finally {
+    btn.disabled = false; btn.textContent = 'Şimdi Yedekle';
+  }
+}
+
+async function restoreBackup(fileId, name) {
+  const ok = confirm(`"${name}" yedeğini geri yüklemek istediğine emin misin?\n\nŞu anki tüm ürün, stok ve senkron günlüğü verisi bu yedekteki verilerle DEĞİŞTİRİLECEK. Bu işlem geri alınamaz.`);
+  if (!ok) return;
+  toast('Geri yükleniyor…');
+  const resp = await fetch('/api/backup/restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileId })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Geri yükleme başarısız.'); return; }
+  toast(`Geri yüklendi (${data.productCount} ürün).`);
+  await loadProducts();
+  await loadLog();
+}
+
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+checkAuth();
+</script>
+</body>
+</html>
