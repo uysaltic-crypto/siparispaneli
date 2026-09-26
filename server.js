@@ -609,32 +609,43 @@ async function pushStockToN11(barcode, quantity) {
 }
 
 /* ==================================================================
-   ÇİÇEKSEPETİ — resmi API var (ciceksepeti.dev) fakat dokümantasyon
-   sitesi otomatik erişimi engellediği için uç nokta/alan adlarını
-   yalnızca dolaylı kaynaklardan (SDK referansı) doğrulayabildim.
-   BU BÖLÜM DOĞRULANMAYA MUHTAÇ — gerçek denemede hata görürsen
-   "Senkron Günlüğü"ndeki mesajı bana ilet, birlikte düzeltelim.
+   ÇİÇEKSEPETİ — ciceksepeti.dev resmi dokümanına göre doğrulandı (25.09.2026):
+   - Base URL: prod https://apis.ciceksepeti.com/api/v1/ , test https://sandbox-apis.ciceksepeti.com/api/v1/
+   - Sipariş listesi: POST /api/v1/Order/GetOrders  (GET DEĞİL, body ile parametre)
+   - Her istekte iki header zorunlu: x-api-key (API Key) VE user-agent
+     (entegratör kullanılmıyorsa sadece Satıcı ID; entegratörle çalışılıyorsa
+     "Satıcı Id-Entegratör Adı")
+   - Aynı request body ile dakikada 1 istekten fazla atılamıyor (rate limit).
 ================================================================== */
 function csConfigured() {
-  return !!process.env.CS_API_KEY;
+  return !!(process.env.CS_API_KEY && process.env.CS_SUPPLIER_ID);
+}
+
+function csHost() {
+  return process.env.CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
+}
+
+function csHeaders() {
+  const { CS_API_KEY, CS_SUPPLIER_ID, CS_INTEGRATOR_NAME } = process.env;
+  const userAgent = CS_INTEGRATOR_NAME ? `${CS_SUPPLIER_ID}-${CS_INTEGRATOR_NAME}` : String(CS_SUPPLIER_ID);
+  return { "x-api-key": CS_API_KEY, "user-agent": userAgent, "Content-Type": "application/json", Accept: "application/json" };
 }
 
 async function fetchCiceksepetiOrders() {
-  if (!csConfigured()) return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik.", orders: [] };
-  const { CS_API_KEY, CS_ENV } = process.env;
-  const host = CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
-  const url = `https://${host}/api/v1/orders`;
+  if (!csConfigured())
+    return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", orders: [] };
+  const url = `https://${csHost()}/api/v1/Order/GetOrders`;
   const endDate = new Date();
   const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   try {
-    const resp = await axios.get(url, {
-      headers: { "x-api-key": CS_API_KEY, Accept: "application/json" },
-      params: { startDate: startDate.toISOString(), endDate: endDate.toISOString(), page: 1, pageSize: 100 },
-      timeout: 20000,
-    });
-    const orders = resp.data?.orders || resp.data?.content || [];
-    return { platform: "cs", error: null, orders: orders.map(normalizeCsPackage) };
+    const resp = await axios.post(
+      url,
+      { startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page: 0 },
+      { headers: csHeaders(), timeout: 20000 }
+    );
+    const orders = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
+    return { platform: "cs", error: null, orders: (Array.isArray(orders) ? orders : []).map(normalizeCsPackage) };
   } catch (err) {
     const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
     const msg =
@@ -668,18 +679,16 @@ function normalizeCsPackage(pkg) {
   };
 }
 
+// NOT: Bu uç nokta (stok/fiyat güncelleme) henüz sipariş listeleme kadar
+// doğrulanmadı — "Ürün Yönetimi" bölümünde farklı bir yol olabilir. İlk
+// denemede hata alırsan Senkron Günlüğü'ndeki mesajı ilet, dokümandan
+// "Stok Güncelleme" bölümünü birlikte kontrol ederiz.
 async function pushStockToCiceksepeti(barcode, quantity) {
   if (!csConfigured()) return { ok: false, message: "Çiçeksepeti API bilgisi eksik." };
-  const { CS_API_KEY, CS_ENV } = process.env;
-  const host = CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
-  const url = `https://${host}/api/v1/products/stock-price`;
+  const url = `https://${csHost()}/api/v1/products/stock-price`;
   const qty = Math.max(0, Math.floor(Number(quantity) || 0));
   try {
-    const resp = await axios.post(
-      url,
-      { items: [{ stockCode: barcode, stockQuantity: qty }] },
-      { headers: { "x-api-key": CS_API_KEY, "Content-Type": "application/json" }, timeout: 15000 }
-    );
+    const resp = await axios.post(url, { items: [{ stockCode: barcode, stockQuantity: qty }] }, { headers: csHeaders(), timeout: 15000 });
     return { ok: true, message: "Gönderildi", batchId: resp.data?.batchId || null };
   } catch (err) {
     return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
