@@ -702,7 +702,8 @@ const PLATFORMS = [
   { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
   { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
   { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: null, stockPullVerified: false, verified: true },
-  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: null, stockPullVerified: false, verified: false },
+  // Sipariş çekme (GetOrders) resmi dokümana göre doğrulandı; stok/fiyat gönderme ucu henüz doğrulanmadı.
+  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: null, stockPullVerified: false, verified: true },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
