@@ -790,6 +790,115 @@ async function pushStockToCiceksepeti(barcode, quantity) {
 /* ==================================================================
    PLATFORM KAYDI — yeni bir pazaryeri eklemek için buraya bir satır
 ================================================================== */
+/* ==================================================================
+   KOÇTAŞ — koctas.mirakl.net üzerinde, Mirakl adlı hazır pazaryeri
+   altyapısıyla çalışıyor. Mirakl API'si onlarca farklı perakendecide aynı
+   şemayla kullanılan, yıllardır kararlı, herkese açık dokümante edilmiş
+   (developer.mirakl.com) bir API — bu yüzden diğer platformlar gibi yüksek
+   güvenle yazıldı. Kimlik doğrulama: Authorization header'ında API
+   anahtarının kendisi (Bearer öneki YOK, doğrudan "API anahtarı" değeri).
+   NOT: Koçtaş'ın kendi kurulumuna karşı henüz canlı test edilmedi — ilk
+   denemede hata çıkarsa Senkron Günlüğü'ndeki mesajı ilet, birlikte
+   düzeltelim (stockPullVerified/verified bu yüzden false bırakıldı).
+================================================================== */
+const KOCTAS_HOST = "https://koctas.mirakl.net";
+
+function koctasConfigured() {
+  return !!process.env.KOCTAS_API_KEY;
+}
+
+function koctasHeaders() {
+  return { Authorization: process.env.KOCTAS_API_KEY, Accept: "application/json", "Content-Type": "application/json" };
+}
+
+function koctasErrorMessage(err) {
+  const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+  if (err.response?.status === 401 || err.response?.status === 403) return `Koçtaş kimlik doğrulama hatası (${err.response.status})${detail}`;
+  if (err.response?.data) return `Koçtaş hata: ${JSON.stringify(err.response.data).slice(0, 300)}`;
+  return `Koçtaş bağlantı hatası: ${err.message}`;
+}
+
+function normalizeKoctasPackage(order) {
+  const items = order.order_lines || order.orderLines || [];
+  const lines = items.map((it) => ({
+    barcode: String(it.shop_sku || it.offer_sku || it.product_sku || "").trim(),
+    quantity: Number(it.quantity || 1),
+    name: it.product_title || it.offer_title || it.shop_sku || "",
+  }));
+  const customer = order.customer || {};
+  const address = customer.shipping_address || customer.billing_address || {};
+  return {
+    platform: "koctas",
+    orderNumber: String(order.order_id || order.commercial_id || "—"),
+    packageId: String(order.order_id || ""),
+    customer: customer.firstname ? `${customer.firstname} ${customer.lastname || ""}`.trim() : "Müşteri",
+    city: address.city || "",
+    productSummary: lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ") || "—",
+    amount: Number(order.total_price ?? order.price ?? 0),
+    status: order.order_state || order.status || "—",
+    date: order.created_date ? new Date(order.created_date).getTime() : null,
+    lines,
+  };
+}
+
+async function fetchKoctasOrders() {
+  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", orders: [] };
+  try {
+    const resp = await axios.get(`${KOCTAS_HOST}/api/orders`, {
+      headers: koctasHeaders(),
+      params: { max: 100, order_state_codes: "WAITING_ACCEPTANCE,SHIPPING,SHIPPED,STAGING" },
+      timeout: 20000,
+    });
+    const orders = resp.data?.orders || [];
+    return { platform: "koctas", error: null, orders: orders.map(normalizeKoctasPackage) };
+  } catch (err) {
+    return { platform: "koctas", error: koctasErrorMessage(err), orders: [] };
+  }
+}
+
+// Ürün/stok/fiyat listeleme — Mirakl'ın "offers" (teklifler) uç noktası.
+async function fetchStockKoctas() {
+  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", rows: [] };
+  const rows = [];
+  try {
+    let offset = 0;
+    const max = 100;
+    let totalCount = Infinity;
+    while (offset < totalCount && offset < 5000) {
+      const resp = await axios.get(`${KOCTAS_HOST}/api/offers`, { headers: koctasHeaders(), params: { max, offset }, timeout: 20000 });
+      const offers = resp.data?.offers || [];
+      totalCount = Number(resp.data?.total_count ?? offers.length + offset);
+      offers.forEach((o) => {
+        const barcode = String(o.shop_sku || o.sku || "").trim();
+        if (!barcode) return;
+        rows.push({
+          barcode,
+          stock: Number(o.quantity ?? o.state?.quantity ?? 0),
+          name: o.product_title || o.offer_title || "",
+          price: Number(o.price) || undefined,
+          productCode: o.product_id != null ? String(o.product_id) : undefined,
+        });
+      });
+      if (!offers.length) break;
+      offset += max;
+    }
+    return { platform: "koctas", error: null, rows };
+  } catch (err) {
+    return { platform: "koctas", error: koctasErrorMessage(err), rows: [] };
+  }
+}
+
+async function pushStockToKoctas(barcode, quantity) {
+  if (!koctasConfigured()) return { ok: false, message: "Koçtaş API bilgisi eksik." };
+  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  try {
+    const resp = await axios.put(`${KOCTAS_HOST}/api/offers/bulk`, { offers: [{ sku: barcode, quantity: qty }] }, { headers: koctasHeaders(), timeout: 15000 });
+    return { ok: true, message: "Gönderildi", batchId: resp.data?.import_id || null };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
 const PLATFORMS = [
   { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
   { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
@@ -797,6 +906,9 @@ const PLATFORMS = [
   // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
   // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
   { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
+  // Koçtaş'ın Mirakl altyapısı için: genel Mirakl API şemasına göre yazıldı,
+  // Koçtaş'a özel canlı testi henüz yapılmadı — bu yüzden verified: false.
+  { id: "koctas", name: "Koçtaş", color: "#F5821F", configured: koctasConfigured, fetchOrders: fetchKoctasOrders, pushStock: pushStockToKoctas, fetchStock: fetchStockKoctas, stockPullVerified: false, verified: false },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
