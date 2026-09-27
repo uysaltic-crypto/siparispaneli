@@ -455,7 +455,13 @@ async function loadProducts() {
 function renderStock() {
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
   let list = state.products;
-  if (q) list = list.filter(p => p.barcode.toLocaleLowerCase('tr').includes(q) || (p.name||'').toLocaleLowerCase('tr').includes(q) || (p.category||'').toLocaleLowerCase('tr').includes(q));
+  if (q) {
+    const terms = q.split(/\s+/).filter(Boolean);
+    list = list.filter(p => {
+      const haystack = [p.barcode, p.name, p.category].filter(Boolean).join(' ').toLocaleLowerCase('tr');
+      return terms.every(t => haystack.includes(t));
+    });
+  }
 
   const sortVal = document.getElementById('stockSort').value;
   const collator = new Intl.Collator('tr');
@@ -780,11 +786,7 @@ async function triggerPull(platform) {
     });
     const result = await resp.json();
     if (!resp.ok || !result.ok) {
-      // Backend hata mesajları zaten platform adıyla başlıyor (örn. "Çiçeksepeti hata: ..."),
-      // burada tekrar eklemiyoruz — sadece platform adı mesajda hiç geçmiyorsa (örn. genel
-      // "Geçersiz platform" gibi mesajlar) başına ekliyoruz.
-      const msg = result.error || 'bilinmeyen hata';
-      toast(msg.toLowerCase().includes(pm.name.toLowerCase()) ? msg : `${pm.name}: ${msg}`);
+      toast(`${pm.name} hata: ${result.error || 'bilinmeyen hata'}`);
       return;
     }
     toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi).`);
