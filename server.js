@@ -46,6 +46,19 @@ function persistPushLog() {
   saveJSON("push-log.json", pushLog);
 }
 
+// Çiçeksepeti stok ucu (/api/v1/products/stock-price) 10 dakikada 1 istekten
+// fazlasını kabul etmiyor ("Limit aşımı" hatası) — bu yüzden gönderimler anlık
+// değil, bir kuyrukta biriktirilip pencere açılınca TEK istekte toplu gönderilir.
+// Sunucu yeniden başlasa bile kuyruk ve son gönderim zamanı kalıcı tutulur.
+let csStockQueue = new Map(Object.entries(loadJSON("cs-stock-queue.json", {})));
+let csLastPushAt = Number(loadJSON("cs-last-push.json", {}).at) || 0;
+function persistCsQueue() {
+  saveJSON("cs-stock-queue.json", Object.fromEntries(csStockQueue));
+}
+function persistCsLastPush() {
+  saveJSON("cs-last-push.json", { at: csLastPushAt });
+}
+
 // products artık "ürün kodu" (code) altında toplanır. Her ürün, platform bazında
 // farklı bir barkod/SKU'ya bağlanabilir (skus: { hb: "...", ty: "...", ... }).
 // Bir platform için ayrıca bir SKU tanımlanmamışsa, o platformda ürün kodunun
@@ -809,20 +822,71 @@ async function fetchStockCiceksepeti() {
   }
 }
 
-// NOT: Bu uç nokta (stok/fiyat güncelleme) henüz sipariş listeleme kadar
-// doğrulanmadı — "Ürün Yönetimi" bölümünde farklı bir yol olabilir. İlk
-// denemede hata alırsan Senkron Günlüğü'ndeki mesajı ilet, dokümandan
-// "Stok Güncelleme" bölümünü birlikte kontrol ederiz.
+// NOT: "Ürün Yönetimi" > stok/fiyat güncelleme ucu (/api/v1/products/stock-price)
+// canlıda denendiğinde şu hatayı verdi: "Limit aşımı! Bu endpointe aynı isteği
+// 10 dakikada 1 kez atabilirsiniz." — yani ürün bazında değil, UÇ NOKTA bazında
+// 10 dakikada sadece 1 istek kabul ediliyor. Bu yüzden her ürün için ayrı ayrı
+// anlık göndermek yerine: gelen güncellemeler bir kuyrukta biriktirilir, 10
+// dakikalık pencere açık ise hemen (kuyrukta birikmiş her şeyle birlikte) TEK
+// istekte gönderilir; pencere kapalıysa kuyruğa eklenir ve pencere açılır
+// açılmaz otomatik olarak toplu gönderilir.
+const CS_STOCK_RATE_LIMIT_MS = 10 * 60 * 1000 + 5000; // 10 dk + küçük güvenlik payı
+let csFlushTimer = null;
+
+async function csFlushStockQueue() {
+  csFlushTimer = null;
+  if (!csStockQueue.size) return { ok: true, message: "Kuyruk boş" };
+  const items = Array.from(csStockQueue.entries()).map(([stockCode, stockQuantity]) => ({ stockCode, stockQuantity }));
+  csStockQueue = new Map();
+  csLastPushAt = Date.now();
+  persistCsQueue();
+  persistCsLastPush();
+  let ok = true;
+  let message = "Gönderildi";
+  try {
+    await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
+  } catch (err) {
+    ok = false;
+    message = err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message;
+  }
+  pushLog.push({
+    time: new Date().toISOString(),
+    barcode: items.map((i) => i.stockCode).join(", "),
+    name: `${items.length} ürün (Çiçeksepeti toplu gönderim)`,
+    centralStock: null,
+    trigger: "cs-toplu",
+    results: { cs: ok ? { ok: true } : { ok: false, message } },
+  });
+  persistPushLog();
+  return { ok, message };
+}
+
+function csScheduleFlush(delayMs) {
+  if (csFlushTimer) return;
+  csFlushTimer = setTimeout(() => {
+    csFlushStockQueue().catch(() => {});
+  }, Math.max(0, delayMs));
+}
+
+// Sunucu, kuyrukta bekleyen kayıtlarla yeniden başlamış olabilir — pencere
+// zaten açıksa hemen, değilse kalan süre kadar bekleyip otomatik gönder.
+if (csStockQueue.size) {
+  csScheduleFlush(Math.max(0, CS_STOCK_RATE_LIMIT_MS - (Date.now() - csLastPushAt)));
+}
+
 async function pushStockToCiceksepeti(barcode, quantity) {
   if (!csConfigured()) return { ok: false, message: "Çiçeksepeti API bilgisi eksik." };
-  const url = `https://${csHost()}/api/v1/products/stock-price`;
   const qty = Math.max(0, Math.floor(Number(quantity) || 0));
-  try {
-    const resp = await axios.post(url, { items: [{ stockCode: barcode, stockQuantity: qty }] }, { headers: csHeaders(), timeout: 15000 });
-    return { ok: true, message: "Gönderildi", batchId: resp.data?.batchId || null };
-  } catch (err) {
-    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  csStockQueue.set(String(barcode), qty);
+  persistCsQueue();
+
+  const elapsed = Date.now() - csLastPushAt;
+  if (elapsed >= CS_STOCK_RATE_LIMIT_MS) {
+    return await csFlushStockQueue();
   }
+  const remainingMin = Math.max(1, Math.ceil((CS_STOCK_RATE_LIMIT_MS - elapsed) / 60000));
+  csScheduleFlush(CS_STOCK_RATE_LIMIT_MS - elapsed);
+  return { ok: true, message: `Çiçeksepeti hız sınırı nedeniyle kuyruğa alındı — en geç ${remainingMin} dk içinde toplu gönderilecek` };
 }
 
 /* ==================================================================
