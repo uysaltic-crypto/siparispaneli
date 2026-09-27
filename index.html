@@ -452,15 +452,26 @@ async function loadProducts() {
   renderCompete();
 }
 
+// Sürükle-bırak ile bir ürünün altına birleştirilen (mergedInto dolu) ürünler artık
+// silinmiyor; ana ürünün kartında "Birleşen ürünler" olarak, kendi platform stok
+// koduyla birlikte listelenmeye devam ediyor. Bu yüzden ana listede sadece bağımsız/
+// ana ürünler (mergedInto boş olanlar) ayrı bir kart olarak gösterilir.
+function getChildren(code) {
+  return state.products.filter(p => p.mergedInto === code);
+}
+
 function renderStock() {
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
-  let list = state.products;
+  let list = state.products.filter(p => !p.mergedInto);
   if (q) {
     const terms = q.split(/\s+/).filter(Boolean);
-    list = list.filter(p => {
+    const matchesText = (p) => {
       const haystack = [p.barcode, p.name, p.category].filter(Boolean).join(' ').toLocaleLowerCase('tr');
       return terms.every(t => haystack.includes(t));
-    });
+    };
+    // Aramada ana ürün kendisi eşleşmese bile, altına birleştirilmiş bir ürün
+    // eşleşiyorsa (kendi adı/kodu üzerinden) ana ürün yine listelensin.
+    list = list.filter(p => matchesText(p) || getChildren(p.code).some(matchesText));
   }
 
   const sortVal = document.getElementById('stockSort').value;
@@ -537,10 +548,37 @@ function renderStock() {
         </div>
       </div>
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
+      ${mergedChildrenHtml(p.code)}
     `;
     attachDragHandlers(card);
     wrap.appendChild(card);
   });
+}
+
+// Bu ana ürünün altına sürükle-bırak ile birleştirilmiş ürünleri, kendi
+// (siteden çekilmiş) platform stok kodlarıyla birlikte küçük bir liste olarak
+// gösterir. Hiçbir birleşen ürün panelden kaybolmaz; burada görünmeye devam eder.
+function mergedChildrenHtml(code) {
+  const children = getChildren(code);
+  if (!children.length) return '';
+  const rows = children.map(child => {
+    const codes = Object.entries(child.skus || {}).map(([platformId, sku]) => {
+      const pl = platformMeta(platformId);
+      return `<span class="muted" style="font-family:monospace;">${pl.name}: ${sku}</span>`;
+    }).join(' &nbsp;·&nbsp; ');
+    return `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid var(--border, #2a2a2a);">
+        <div style="min-width:0;">
+          <div style="font-size:12px; font-weight:600;">${child.name}</div>
+          <div style="font-size:11px;">${codes || `<span class="muted">Kendi platform SKU'su yok — ürün kodu: ${child.code}</span>`}</div>
+        </div>
+      </div>`;
+  }).join('');
+  return `
+    <div style="margin-top:8px;">
+      <div class="muted" style="font-size:10px; margin-bottom:2px;">BİRLEŞEN ÜRÜNLER (${children.length})</div>
+      ${rows}
+    </div>`;
 }
 
 /* --- Ürün kartlarını sürükleyerek birleştirme --- */
@@ -577,7 +615,7 @@ function attachDragHandlers(card) {
     const toP = state.products.find(p => p.code === toCode);
     const fromName = fromP ? fromP.name : fromCode;
     const toName = toP ? toP.name : toCode;
-    const ok = confirm(`"${fromName}" ürününü "${toName}" ile birleştirmek istiyor musun?\n\nSKU'lar ve platform stokları "${toName}" altında birleşecek, "${fromName}" silinecek. Bu işlem geri alınamaz.`);
+    const ok = confirm(`"${fromName}" ürününü "${toName}" ile birleştirmek istiyor musun?\n\n"${fromName}" silinmeyecek — "${toName}" kartının altında kendi platform stok koduyla listelenmeye devam edecek. İkisinin merkezi stoğu ortaklaşacak (en yüksek değer üzerinden).`);
     if (!ok) return;
     await mergeProducts(fromCode, toCode);
   });
