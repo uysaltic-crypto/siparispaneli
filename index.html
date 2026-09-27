@@ -461,6 +461,13 @@ function getChildren(code) {
 }
 
 function renderStock() {
+  // Panelde her 30 saniyede bir arka planda otomatik yenileme (loadProducts) çalışıyor
+  // ve bu fonksiyonu tekrar çağırıyor. Kullanıcı o an bir ürün kartında bir alanı
+  // (fiyat/adet/ürün kodu) düzenliyorsa, henüz kaydetmediği yazı bu yenilemeyle
+  // sessizce silinmesin diye bu döngüde kartları yeniden oluşturmayı atlıyoruz.
+  const active = document.activeElement;
+  if (active && active.closest && active.closest('#stockCards')) return;
+
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
   let list = state.products.filter(p => !p.mergedInto);
   if (q) {
@@ -736,6 +743,12 @@ async function pushProduct(barcode) {
 }
 
 function renderCompete() {
+  // Aynı sebep: rakip link kutusuna (ya da min/maks fiyat/otomatik fiyatlandırma
+  // kutucuğuna) yazı yazarken 30 saniyelik arka plan yenilemesi araya girip henüz
+  // "Kaydet"e basılmamış içeriği sunucudaki eski haliyle ezmesin diye bu döngüyü atla.
+  const activeCompete = document.activeElement;
+  if (activeCompete && activeCompete.id && /^(urls_|min_|max_|auto_)/.test(activeCompete.id)) return;
+
   const tbody = document.getElementById('competeRows');
   document.getElementById('competeEmpty').style.display = state.products.length ? 'none' : 'block';
   tbody.innerHTML = '';
