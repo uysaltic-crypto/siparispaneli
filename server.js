@@ -29,6 +29,9 @@ function loadJSON(file, fallback) {
 function saveJSON(file, data) {
   fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // products: { [barcode]: { name, stocks: { hb, ty, n11, cs }, centralStock } }
 let products = loadJSON("products.json", {});
@@ -781,14 +784,17 @@ function normalizeCsPackage(pkg) {
 // Ürün Listeleme — ciceksepeti.dev resmi dokümanına göre doğrulandı (25.09.2026):
 // GET /api/v1/Products — Page 1'den başlar, PageSize en fazla 60.
 // Response: { totalCount, products: [{ stockCode, stockQuantity, salesPrice, productName, images: [...] }] }
+// NOT: Bu uç nokta "farklı istekleri 5 saniyede 1 kez" kabul ediyor (rate limit) —
+// çok sayfalı ürün listesi çekerken sayfalar arasına bu yüzden bekleme konuyor.
 async function fetchStockCiceksepeti() {
   if (!csConfigured()) return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", rows: [] };
   const url = `https://${csHost()}/api/v1/Products`;
   const rows = [];
-  try {
-    let page = 1;
-    let totalCount = Infinity;
-    while (rows.length < totalCount && page < 200) {
+  let page = 1;
+  let totalCount = Infinity;
+  while (rows.length < totalCount && page < 200) {
+    try {
+      if (page > 1) await sleep(5200); // "5 saniyede 1 farklı istek" sınırına takılmamak için
       const resp = await axios.get(url, { headers: csHeaders(), params: { Page: page, PageSize: 60 }, timeout: 20000 });
       const products = resp.data?.products || resp.data?.Products || [];
       totalCount = Number(resp.data?.totalCount ?? resp.data?.TotalCount ?? products.length);
@@ -808,18 +814,20 @@ async function fetchStockCiceksepeti() {
       });
       if (!products.length) break;
       page++;
+    } catch (err) {
+      const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+      const msg =
+        err.response?.status === 401 || err.response?.status === 403
+          ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
+          : err.response?.data
+          ? `Çiçeksepeti hata (sayfa ${page})${rows.length ? `, ${rows.length} ürün alındıktan sonra` : ""}: ${JSON.stringify(err.response.data).slice(0, 300)}`
+          : `Çiçeksepeti bağlantı hatası: ${err.message}`;
+      // Önceki sayfalardan toplanan ürünler varsa onları at, kısmi sonuçla dön —
+      // tüm listeyi boşa düşürmek yerine "şimdilik bu kadarı geldi" demek daha iyi.
+      return { platform: "cs", error: msg, rows };
     }
-    return { platform: "cs", error: null, rows };
-  } catch (err) {
-    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
-    const msg =
-      err.response?.status === 401 || err.response?.status === 403
-        ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
-        : err.response?.data
-        ? `Çiçeksepeti hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
-        : `Çiçeksepeti bağlantı hatası: ${err.message}`;
-    return { platform: "cs", error: msg, rows: [] };
   }
+  return { platform: "cs", error: null, rows };
 }
 
 // NOT: "Ürün Yönetimi" > stok/fiyat güncelleme ucu (/api/v1/products/stock-price)
