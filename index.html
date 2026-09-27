@@ -780,7 +780,11 @@ async function triggerPull(platform) {
     });
     const result = await resp.json();
     if (!resp.ok || !result.ok) {
-      toast(`${pm.name} hata: ${result.error || 'bilinmeyen hata'}`);
+      // Backend hata mesajları zaten platform adıyla başlıyor (örn. "Çiçeksepeti hata: ..."),
+      // burada tekrar eklemiyoruz — sadece platform adı mesajda hiç geçmiyorsa (örn. genel
+      // "Geçersiz platform" gibi mesajlar) başına ekliyoruz.
+      const msg = result.error || 'bilinmeyen hata';
+      toast(msg.toLowerCase().includes(pm.name.toLowerCase()) ? msg : `${pm.name}: ${msg}`);
       return;
     }
     toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi).`);
