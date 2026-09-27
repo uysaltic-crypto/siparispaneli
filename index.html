@@ -805,11 +805,13 @@ function handleImportFile(e) {
     const barcodeCol = guess(['barkod','sku','stok kod','ürün kod','urun kod']);
     const stockCol = guess(['stok adedi','stok miktar','miktar','adet','stok']);
     const nameCol = guess(['ürün adı','urun adi','başlık','baslik','ad']);
+    const priceCol = guess(['fiyat','price','satış fiyat','satis fiyat']);
     const dataRows = rows.slice(1).filter(r => r.some(c => String(c).trim() !== ''));
     const parsed = dataRows.map(r => ({
       barcode: String(r[barcodeCol >= 0 ? barcodeCol : 0] ?? '').trim(),
       stock: Number(String(r[stockCol >= 0 ? stockCol : 1]).replace(/[^\d.-]/g,'')) || 0,
       name: nameCol >= 0 ? String(r[nameCol] ?? '').trim() : '',
+      price: priceCol >= 0 ? (Number(String(r[priceCol]).replace(/[^\d.-]/g,'')) || undefined) : undefined,
     }));
     const resp = await fetch('/api/products/import', {
       method:'POST', headers:{'Content-Type':'application/json'},
