@@ -826,6 +826,161 @@ async function pushStockToCiceksepeti(barcode, quantity) {
 }
 
 /* ==================================================================
+   KOÇTAŞ — koctas.mirakl.net standart Mirakl altyapısı üzerinde çalışıyor
+   (ekran görüntüsündeki "Koçtaş Satış Ortağım" panelinde Ayarlar > API
+   Anahtarı bölümünden alınan anahtarla). Mirakl'ın resmi Seller API
+   dokümanına göre (developer.mirakl.com):
+   - Kimlik doğrulama: her istekte "Authorization: {API anahtarı}" header'ı
+     (Mirakl'a özel — appKey/appSecret ikilisi yok, tek bir anahtar yeterli).
+   - Sipariş listesi: GET /api/orders (OR11) — sayfalama offset/max ile.
+   - Ürün/teklif listesi (stok+fiyat): GET /api/offers (OF21).
+   - Stok güncelleme: POST /api/offers/stock/imports (STO01) — CSV dosyası,
+     multipart/form-data, "offer-sku";"quantity";"warehouse-code";"update-delete"
+     formatında. Diğer platformlardan farklı olarak SENKRON değil: istek bir
+     import_id döner, gerçek güncelleme Mirakl tarafında kuyrukta işlenir.
+   - shop_id parametresi opsiyonel — hesabın tek mağazası varsa Mirakl
+     otomatik olarak onu kullanır; birden fazla mağazaya erişimi olan
+     hesaplarda .env'e KOCTAS_SHOP_ID eklenmesi gerekebilir.
+   Uç noktalar resmi dokümana göre doğru yazıldı ancak bu hesapla henüz
+   canlı test edilmedi — bu yüzden aşağıda "verified: false" işaretli;
+   ilk denemede hata alırsan Senkron Günlüğü'ndeki mesajı ilet.
+================================================================== */
+function koctasConfigured() {
+  return !!process.env.KOCTAS_API_KEY;
+}
+
+function koctasHost() {
+  return process.env.KOCTAS_HOST || "koctas.mirakl.net";
+}
+
+function koctasHeaders(extra) {
+  return { Authorization: process.env.KOCTAS_API_KEY, Accept: "application/json", ...extra };
+}
+
+function koctasShopParams() {
+  return process.env.KOCTAS_SHOP_ID ? { shop_id: Number(process.env.KOCTAS_SHOP_ID) } : {};
+}
+
+async function fetchKoctasOrders() {
+  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", orders: [] };
+  const url = `https://${koctasHost()}/api/orders`;
+  try {
+    const resp = await axios.get(url, {
+      headers: koctasHeaders(),
+      params: { ...koctasShopParams(), max: 100 },
+      timeout: 20000,
+    });
+    const orders = resp.data?.orders || [];
+    return { platform: "koctas", error: null, orders: orders.map(normalizeKoctasOrder) };
+  } catch (err) {
+    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? `Koçtaş kimlik doğrulama hatası (${err.response.status})${detail}`
+        : err.response?.data
+        ? `Koçtaş hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Koçtaş bağlantı hatası: ${err.message}`;
+    return { platform: "koctas", error: msg, orders: [] };
+  }
+}
+
+function normalizeKoctasOrder(o) {
+  const lines = (o.order_lines || o.lines || []).map((l) => ({
+    barcode: String(l.offer_sku || l.shop_sku || l.product_sku || "").trim(),
+    quantity: Number(l.quantity || 1),
+    name: l.product_title || l.offer_sku || "",
+  }));
+  return {
+    platform: "koctas",
+    orderNumber: o.order_id || o.commercial_id || String(o.id || "—"),
+    packageId: String(o.order_id || o.id || ""),
+    customer: [o.customer?.firstname, o.customer?.lastname].filter(Boolean).join(" ") || "Müşteri",
+    city: o.customer?.shipping_address?.city || "",
+    productSummary: lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ") || "—",
+    amount: Number(o.total_price ?? o.price ?? 0),
+    status: o.order_state || o.status || "—",
+    date: o.created_date ? new Date(o.created_date).getTime() : null,
+    lines,
+  };
+}
+
+// Ürün/teklif listesi — Mirakl OF21: GET /api/offers (offset/max sayfalama).
+async function fetchStockKoctas() {
+  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", rows: [] };
+  const url = `https://${koctasHost()}/api/offers`;
+  const rows = [];
+  try {
+    let offset = 0;
+    const max = 100;
+    let totalCount = Infinity;
+    while (offset < totalCount && offset < 20000) {
+      const resp = await axios.get(url, {
+        headers: koctasHeaders(),
+        params: { ...koctasShopParams(), offset, max },
+        timeout: 20000,
+      });
+      const offers = resp.data?.offers || [];
+      totalCount = Number(resp.data?.total_count ?? offers.length + offset);
+      offers.forEach((o) => {
+        const barcode = String(o.shop_sku || o.sku || "").trim();
+        if (!barcode) return;
+        const price = Number(o.price ?? 0) || undefined;
+        const productCode = o.product_sku != null ? String(o.product_sku) : undefined; // Mirakl "product-id"
+        rows.push({
+          barcode,
+          stock: Number(o.quantity ?? 0),
+          name: o.product_title || "",
+          price,
+          image: o.product_image_urls?.[0] || undefined,
+          productCode,
+        });
+      });
+      if (!offers.length) break;
+      offset += max;
+    }
+    return { platform: "koctas", error: null, rows };
+  } catch (err) {
+    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? `Koçtaş kimlik doğrulama hatası (${err.response.status})${detail}`
+        : err.response?.data
+        ? `Koçtaş hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Koçtaş bağlantı hatası: ${err.message}`;
+    return { platform: "koctas", error: msg, rows: [] };
+  }
+}
+
+// Stok güncelleme — Mirakl STO01: POST /api/offers/stock/imports. multipart/form-data
+// gerektiriyor; ekstra bir npm paketine ihtiyaç duymamak için gövde, Google Drive
+// yedekleme fonksiyonunda (uploadBackupToDrive) olduğu gibi elle inşa ediliyor.
+// Diğer platformlardan farklı olarak yanıt anında "başarılı/başarısız" değil, bir
+// import_id döner — gerçek sonuç Mirakl tarafında ayrıca işlenir.
+async function pushStockToKoctas(barcode, quantity) {
+  if (!koctasConfigured()) return { ok: false, message: "Koçtaş API bilgisi eksik." };
+  const url = `https://${koctasHost()}/api/offers/stock/imports`;
+  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  const sku = String(barcode).replace(/"/g, '""');
+  const csv = `"offer-sku";"quantity";"warehouse-code";"update-delete"\r\n"${sku}";"${qty}";"";""\r\n`;
+
+  const boundary = "koctasstok" + crypto.randomBytes(8).toString("hex");
+  const body =
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="stok.csv"\r\nContent-Type: text/csv\r\n\r\n${csv}\r\n` +
+    `--${boundary}--`;
+
+  try {
+    const resp = await axios.post(url, body, {
+      headers: koctasHeaders({ "Content-Type": `multipart/form-data; boundary=${boundary}` }),
+      params: koctasShopParams(),
+      timeout: 15000,
+    });
+    return { ok: true, message: "Gönderildi (Mirakl kuyruğuna alındı)", importId: resp.data?.import_id || null };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+/* ==================================================================
    PLATFORM KAYDI — yeni bir pazaryeri eklemek için buraya bir satır
 ================================================================== */
 const PLATFORMS = [
@@ -835,6 +990,9 @@ const PLATFORMS = [
   // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
   // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
   { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
+  // Mirakl'ın resmi API dokümanına göre yazıldı (OR11/OF21/STO01) ama bu hesapla
+  // henüz canlı denenmedi — ilk kullanımda uç nokta/alan adlarını birlikte doğrularız.
+  { id: "koctas", name: "Koçtaş", color: "#F58220", configured: koctasConfigured, fetchOrders: fetchKoctasOrders, pushStock: pushStockToKoctas, fetchStock: fetchStockKoctas, stockPullVerified: false, verified: false },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
