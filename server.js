@@ -1632,7 +1632,18 @@ app.post("/api/backup/restore", requireAuth, async (req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname, "public")));
+// index.html ve diğer statik dosyalar server.js ile AYNI klasörde duruyor
+// (ayrı bir "public" alt klasörü yok) — bu yüzden doğrudan __dirname servis edilir.
+app.use(express.static(__dirname));
+
+// Herhangi bir API/asset eşleşmesi olmayan GET isteklerinde (ör. tarayıcıdan
+// doğrudan "/" ziyareti) her zaman ana paneli (index.html) döndür.
+// (app.get("*", ...) yerine app.use kullanılıyor — Express'in tüm sürümlerinde
+// "*" joker rotası aynı şekilde çalışmayabiliyor, app.use ise her sürümde güvenli.)
+app.use((req, res, next) => {
+  if (req.method !== "GET" || req.path.startsWith("/api/")) return next();
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
 app.listen(PORT, () => {
   console.log(`Panel çalışıyor: http://localhost:${PORT}`);
