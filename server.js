@@ -67,6 +67,10 @@ function ensureProduct(code, name) {
       listingStatus: {}, // { platformId: 'satista' | 'pasif' }
       pricing: { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
       competitors: [], // [{ url, label, lastPrice, lastCheckedAt, lastError, sellerName }]
+      // Bu ürün sürükle-bırak ile başka bir ürünün altında birleştirildiyse, ana
+      // ürünün kodu burada tutulur (aşağıdaki "Birleştirme ailesi" bölümüne bakın).
+      // Birleştirilmemiş / bağımsız bir ürünse null'dur.
+      mergedInto: null,
     };
   }
   if (!products[code].stocks) products[code].stocks = {};
@@ -77,12 +81,46 @@ function ensureProduct(code, name) {
   if (products[code].category === undefined) products[code].category = "";
   if (!products[code].pricing) products[code].pricing = { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
   if (!products[code].competitors) products[code].competitors = [];
+  if (products[code].mergedInto === undefined) products[code].mergedInto = null;
   return products[code];
 }
 
 function skuForPlatform(code, platform) {
   const p = products[code];
   return (p?.skus?.[platform] || code || "").trim();
+}
+
+/* ------------------------------------------------------------------
+   Birleştirme ailesi: sürükle-bırak ile bir ürün başka birinin üzerine
+   bırakıldığında artık SİLİNMİYOR — `mergedInto` alanına ana ürünün kodu
+   yazılıyor ve kendi skus/stocks/prices/productCodes/listingStatus verisi
+   olduğu gibi kalıyor. Böylece hiçbir "siteden çekilen kendi stok kodu"
+   ezilip kaybolmuyor; panelde ana ürünün altında ayrı bir alt ürün olarak
+   görünmeye devam ediyor. Merkezi stok tüm aile için ortak tutulur ve stok
+   senkronizasyonu ailedeki her üyenin kendi gerçek platform SKU'suna da
+   ayrıca gönderilir (aşağıya bakın: processNewOrdersAndSync, push endpoint).
+------------------------------------------------------------------ */
+function resolveRoot(code, _hops = 0) {
+  const p = products[code];
+  if (!p || !p.mergedInto || !products[p.mergedInto] || _hops > 10) return code;
+  return resolveRoot(p.mergedInto, _hops + 1);
+}
+
+function getFamilyCodes(anyCode) {
+  const root = resolveRoot(anyCode);
+  const family = [root];
+  Object.keys(products).forEach((c) => {
+    if (c !== root && resolveRoot(c) === root) family.push(c);
+  });
+  return family;
+}
+
+// Merkezi stoğu ailenin tamamına (ana ürün + tüm alt ürünler) aynı değerle yazar.
+function propagateCentralStock(anyCode, value) {
+  const v = Number(value) || 0;
+  getFamilyCodes(anyCode).forEach((c) => {
+    if (products[c]) products[c].centralStock = v;
+  });
 }
 
 // platform -> { sku: productCode } eşleşme dizini. Sipariş satırlarındaki barkodu
@@ -790,115 +828,6 @@ async function pushStockToCiceksepeti(barcode, quantity) {
 /* ==================================================================
    PLATFORM KAYDI — yeni bir pazaryeri eklemek için buraya bir satır
 ================================================================== */
-/* ==================================================================
-   KOÇTAŞ — koctas.mirakl.net üzerinde, Mirakl adlı hazır pazaryeri
-   altyapısıyla çalışıyor. Mirakl API'si onlarca farklı perakendecide aynı
-   şemayla kullanılan, yıllardır kararlı, herkese açık dokümante edilmiş
-   (developer.mirakl.com) bir API — bu yüzden diğer platformlar gibi yüksek
-   güvenle yazıldı. Kimlik doğrulama: Authorization header'ında API
-   anahtarının kendisi (Bearer öneki YOK, doğrudan "API anahtarı" değeri).
-   NOT: Koçtaş'ın kendi kurulumuna karşı henüz canlı test edilmedi — ilk
-   denemede hata çıkarsa Senkron Günlüğü'ndeki mesajı ilet, birlikte
-   düzeltelim (stockPullVerified/verified bu yüzden false bırakıldı).
-================================================================== */
-const KOCTAS_HOST = "https://koctas.mirakl.net";
-
-function koctasConfigured() {
-  return !!process.env.KOCTAS_API_KEY;
-}
-
-function koctasHeaders() {
-  return { Authorization: process.env.KOCTAS_API_KEY, Accept: "application/json", "Content-Type": "application/json" };
-}
-
-function koctasErrorMessage(err) {
-  const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
-  if (err.response?.status === 401 || err.response?.status === 403) return `Koçtaş kimlik doğrulama hatası (${err.response.status})${detail}`;
-  if (err.response?.data) return `Koçtaş hata: ${JSON.stringify(err.response.data).slice(0, 300)}`;
-  return `Koçtaş bağlantı hatası: ${err.message}`;
-}
-
-function normalizeKoctasPackage(order) {
-  const items = order.order_lines || order.orderLines || [];
-  const lines = items.map((it) => ({
-    barcode: String(it.shop_sku || it.offer_sku || it.product_sku || "").trim(),
-    quantity: Number(it.quantity || 1),
-    name: it.product_title || it.offer_title || it.shop_sku || "",
-  }));
-  const customer = order.customer || {};
-  const address = customer.shipping_address || customer.billing_address || {};
-  return {
-    platform: "koctas",
-    orderNumber: String(order.order_id || order.commercial_id || "—"),
-    packageId: String(order.order_id || ""),
-    customer: customer.firstname ? `${customer.firstname} ${customer.lastname || ""}`.trim() : "Müşteri",
-    city: address.city || "",
-    productSummary: lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ") || "—",
-    amount: Number(order.total_price ?? order.price ?? 0),
-    status: order.order_state || order.status || "—",
-    date: order.created_date ? new Date(order.created_date).getTime() : null,
-    lines,
-  };
-}
-
-async function fetchKoctasOrders() {
-  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", orders: [] };
-  try {
-    const resp = await axios.get(`${KOCTAS_HOST}/api/orders`, {
-      headers: koctasHeaders(),
-      params: { max: 100, order_state_codes: "WAITING_ACCEPTANCE,SHIPPING,SHIPPED,STAGING" },
-      timeout: 20000,
-    });
-    const orders = resp.data?.orders || [];
-    return { platform: "koctas", error: null, orders: orders.map(normalizeKoctasPackage) };
-  } catch (err) {
-    return { platform: "koctas", error: koctasErrorMessage(err), orders: [] };
-  }
-}
-
-// Ürün/stok/fiyat listeleme — Mirakl'ın "offers" (teklifler) uç noktası.
-async function fetchStockKoctas() {
-  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", rows: [] };
-  const rows = [];
-  try {
-    let offset = 0;
-    const max = 100;
-    let totalCount = Infinity;
-    while (offset < totalCount && offset < 5000) {
-      const resp = await axios.get(`${KOCTAS_HOST}/api/offers`, { headers: koctasHeaders(), params: { max, offset }, timeout: 20000 });
-      const offers = resp.data?.offers || [];
-      totalCount = Number(resp.data?.total_count ?? offers.length + offset);
-      offers.forEach((o) => {
-        const barcode = String(o.shop_sku || o.sku || "").trim();
-        if (!barcode) return;
-        rows.push({
-          barcode,
-          stock: Number(o.quantity ?? o.state?.quantity ?? 0),
-          name: o.product_title || o.offer_title || "",
-          price: Number(o.price) || undefined,
-          productCode: o.product_id != null ? String(o.product_id) : undefined,
-        });
-      });
-      if (!offers.length) break;
-      offset += max;
-    }
-    return { platform: "koctas", error: null, rows };
-  } catch (err) {
-    return { platform: "koctas", error: koctasErrorMessage(err), rows: [] };
-  }
-}
-
-async function pushStockToKoctas(barcode, quantity) {
-  if (!koctasConfigured()) return { ok: false, message: "Koçtaş API bilgisi eksik." };
-  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
-  try {
-    const resp = await axios.put(`${KOCTAS_HOST}/api/offers/bulk`, { offers: [{ sku: barcode, quantity: qty }] }, { headers: koctasHeaders(), timeout: 15000 });
-    return { ok: true, message: "Gönderildi", batchId: resp.data?.import_id || null };
-  } catch (err) {
-    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
-  }
-}
-
 const PLATFORMS = [
   { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
   { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
@@ -906,9 +835,6 @@ const PLATFORMS = [
   // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
   // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
   { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
-  // Koçtaş'ın Mirakl altyapısı için: genel Mirakl API şemasına göre yazıldı,
-  // Koçtaş'a özel canlı testi henüz yapılmadı — bu yüzden verified: false.
-  { id: "koctas", name: "Koçtaş", color: "#F5821F", configured: koctasConfigured, fetchOrders: fetchKoctasOrders, pushStock: pushStockToKoctas, fetchStock: fetchStockKoctas, stockPullVerified: false, verified: false },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
@@ -947,8 +873,13 @@ async function processNewOrdersAndSync(ordersByPlatform) {
       const p = ensureProduct(code, line.name);
       if (!p.skus[order.platform]) p.skus[order.platform] = line.barcode;
       if (line.name && (!p.name || p.name === "İsimsiz ürün")) p.name = line.name;
-      p.centralStock = Math.max(0, (Number(p.centralStock) || 0) - (Number(line.quantity) || 1));
-      changedCodes.add(code);
+      // Bu ürün birleştirme ile bir ana ürünün altındaysa, merkezi stok TÜM aile
+      // için ortak: düşüşü ailenin ortak stoğundan yap ve tüm aileye yay.
+      const root = resolveRoot(code);
+      const currentFamilyStock = Number(products[root]?.centralStock) || 0;
+      const newStock = Math.max(0, currentFamilyStock - (Number(line.quantity) || 1));
+      propagateCentralStock(root, newStock);
+      changedCodes.add(root);
     });
 
     processedPackages.add(key);
@@ -962,17 +893,36 @@ async function processNewOrdersAndSync(ordersByPlatform) {
     persistProducts();
   }
 
-  for (const code of changedCodes) {
-    const p = products[code];
+  for (const rootCode of changedCodes) {
+    const root = products[rootCode];
+    if (!root) continue;
+    const familyCodes = getFamilyCodes(rootCode);
+    const central = Number(root.centralStock) || 0;
     const results = {};
     await Promise.all(
       PLATFORMS.filter((pl) => pl.configured()).map(async (pl) => {
-        const r = await pl.pushStock(skuForPlatform(code, pl.id), p.centralStock);
-        results[pl.id] = r;
-        if (r.ok) p.stocks[pl.id] = p.centralStock;
+        // Ana ürünün kendi kaydı (eskiden olduğu gibi — SKU tanımlı değilse ürün
+        // kodu fallback olarak kullanılır) + bu platformda gerçek/kendi SKU'su olan
+        // her alt ürün AYRICA gönderilir, böylece hangi platformda kaç farklı
+        // listeleme (SKU) varsa hepsi güncel stokla senkron kalır.
+        const targets = [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }];
+        familyCodes.forEach((c) => {
+          if (c === rootCode) return;
+          const ownSku = products[c]?.skus?.[pl.id];
+          if (ownSku) targets.push({ code: c, sku: ownSku });
+        });
+        const outcomes = await Promise.all(
+          targets.map(async (t) => {
+            const r = await pl.pushStock(t.sku, central);
+            if (r.ok && products[t.code]) products[t.code].stocks[pl.id] = central;
+            return r;
+          })
+        );
+        const ok = outcomes.every((o) => o.ok);
+        results[pl.id] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
       })
     );
-    pushLog.push({ time: new Date().toISOString(), barcode: code, name: p.name, centralStock: p.centralStock, trigger: "sipariş", results });
+    pushLog.push({ time: new Date().toISOString(), barcode: rootCode, name: root.name, centralStock: central, trigger: "sipariş", results });
   }
 
   if (changedCodes.size) {
@@ -1035,6 +985,7 @@ app.get("/api/products", requireAuth, (req, res) => {
       image: p.image || null,
       pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
       competitors: p.competitors || [],
+      mergedInto: p.mergedInto || null,
     })),
   });
 });
@@ -1059,7 +1010,7 @@ app.post("/api/products", requireAuth, (req, res) => {
   const p = ensureProduct(productCode, name);
   if (name?.trim()) p.name = name.trim();
   if (category !== undefined) p.category = String(category || "").trim();
-  if (centralStock !== undefined && centralStock !== "") p.centralStock = Number(centralStock);
+  if (centralStock !== undefined && centralStock !== "") propagateCentralStock(productCode, Number(centralStock));
   if (stocks && typeof stocks === "object") {
     Object.entries(stocks).forEach(([platformId, val]) => {
       if (val !== undefined && val !== "") p.stocks[platformId] = Number(val);
@@ -1100,7 +1051,13 @@ app.post("/api/products", requireAuth, (req, res) => {
 });
 
 app.delete("/api/products/:code", requireAuth, (req, res) => {
-  delete products[req.params.code];
+  const code = req.params.code;
+  // Silinen ürün başka ürünlerin ana ürünüyse (yani alt ürünleri varsa), o alt
+  // ürünler ortada kalmasın diye bağımsız (birleştirilmemiş) ürünlere dönüşür.
+  Object.values(products).forEach((p) => {
+    if (p.mergedInto === code) p.mergedInto = null;
+  });
+  delete products[code];
   persistProducts();
   res.json({ ok: true });
 });
@@ -1121,16 +1078,25 @@ app.post("/api/products/:code/rename", requireAuth, (req, res) => {
 
   products[newCode] = p;
   delete products[oldCode];
+  // Bu ürünün kodu değiştiği için ona bağlı (mergedInto ile işaret eden) alt
+  // ürünlerin ve bu ürünün kendisi bir alt ürünse onu işaret eden hiçbir şeyin
+  // referansı kopmasın diye eski koda işaret eden her yer yeni koda güncellenir.
+  Object.values(products).forEach((other) => {
+    if (other.mergedInto === oldCode) other.mergedInto = newCode;
+  });
   persistProducts();
   res.json({ ok: true, product: { code: newCode, ...p } });
 });
 
-// İki ürünü tek üründe birleştirir (sürükle-bırak ile farklı platformlardaki
-// karşılıkları aynı ürün kodu altında toplamak için). `from` ürününün platform
-// bazlı TÜM verileri (SKU, stok, fiyat, ürün/model kodu, satış durumu) `to`
-// ürününe aktarılır — to'da o platform için zaten veri varsa to'nunki korunur,
-// hiçbir platform verisi sessizce kaybolmaz. Merkezi stok en yüksek olan değer
-// korunur, `from` silinir.
+// İki ürünü aynı "aile" altında birleştirir (sürükle-bırak ile farklı
+// platformlardaki karşılıkları tek bir Ana Ürün altında toplamak için).
+// ÖNEMLİ: `from` ürünü ARTIK SİLİNMİYOR. Kendi skus/stocks/prices/productCodes/
+// listingStatus verisi (siteden çekilen kendi stok kodu dahil) aynen kalıyor;
+// sadece `mergedInto` alanına ana ürünün kodu yazılıp panelde ana ürünün altında
+// bir "alt ürün" olarak görünmeye devam ediyor. Böylece hiçbir platform verisi ya
+// da stok kodu sessizce kaybolmaz/ezilmez. Merkezi stok tüm aile için ortak tek
+// bir değere (en yüksek olan) eşitlenir; stok senkronizasyonu da artık ailedeki
+// her üyenin kendi gerçek platform SKU'suna ayrıca gönderilir.
 app.post("/api/products/merge", requireAuth, (req, res) => {
   const { from, to } = req.body || {};
   const src = products[from];
@@ -1138,34 +1104,28 @@ app.post("/api/products/merge", requireAuth, (req, res) => {
   if (!src || !dst) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
   if (from === to) return res.status(400).json({ ok: false, error: "Aynı ürünü kendisiyle birleştiremezsin." });
 
-  // Platform ID'lerinin birleşimi: iki üründe görülen her platform için sırayla
-  // her alt-alanı (sku/stok/fiyat/ürün kodu/satış durumu) kontrol edip, to'da
-  // eksikse from'dakini aktar.
-  const allPlatformIds = new Set([
-    ...Object.keys(src.skus || {}),
-    ...Object.keys(src.stocks || {}),
-    ...Object.keys(src.prices || {}),
-    ...Object.keys(src.productCodes || {}),
-    ...Object.keys(src.listingStatus || {}),
-  ]);
-  allPlatformIds.forEach((platformId) => {
-    if (!dst.skus[platformId] && src.skus?.[platformId]) dst.skus[platformId] = src.skus[platformId];
-    if (dst.stocks[platformId] === undefined && src.stocks?.[platformId] !== undefined) dst.stocks[platformId] = src.stocks[platformId];
-    if (!dst.prices[platformId] && src.prices?.[platformId]) dst.prices[platformId] = src.prices[platformId];
-    if (!dst.productCodes[platformId] && src.productCodes?.[platformId]) dst.productCodes[platformId] = src.productCodes[platformId];
-    if (!dst.listingStatus[platformId] && src.listingStatus?.[platformId]) dst.listingStatus[platformId] = src.listingStatus[platformId];
-  });
-  // to'nun rekabet takibi tanımlı değilse from'unkini devral.
+  const newRoot = resolveRoot(to);
+  if (resolveRoot(from) === newRoot) {
+    return res.status(400).json({ ok: false, error: "Bu ürünler zaten aynı ana ürün altında birleşik." });
+  }
+
+  // Reparent etmeden ÖNCE, birleşecek iki ailenin (from'un kendi alt ürünleri
+  // varsa onlar dahil, to'nun mevcut ailesi dahil) merkezi stoklarının en
+  // yükseğini bul — birleştirme sonrası tüm aile bu değere eşitlenecek.
+  const combinedCodesBeforeMerge = [...new Set([...getFamilyCodes(from), ...getFamilyCodes(newRoot)])];
+  const unified = Math.max(...combinedCodesBeforeMerge.map((c) => Number(products[c]?.centralStock) || 0), 0);
+
+  src.mergedInto = newRoot;
+
+  // Ana ürün için resim/rekabet ayarı tanımlı değilse alt üründen bilgi amaçlı devral
+  // (bu bir "kayıp" değil, sadece ana kartta gösterilecek varsayılanı doldurmak).
+  if (!dst.image && src.image) dst.image = src.image;
   if ((!dst.competitors || !dst.competitors.length) && src.competitors?.length) dst.competitors = src.competitors;
 
-  dst.centralStock = Math.max(Number(dst.centralStock) || 0, Number(src.centralStock) || 0);
-  if (!dst.image && src.image) dst.image = src.image;
-  if ((!dst.name || dst.name === "İsimsiz ürün") && src.name) dst.name = src.name;
-  if (!dst.category && src.category) dst.category = src.category;
+  propagateCentralStock(newRoot, unified);
 
-  delete products[from];
   persistProducts();
-  res.json({ ok: true, product: { code: to, ...dst } });
+  res.json({ ok: true, product: { code: newRoot, ...products[newRoot] }, familyCodes: getFamilyCodes(newRoot) });
 });
 
 // Ortak birleştirme mantığı: hem Excel/CSV içe aktarma hem de "Siteden Çek" (API)
@@ -1231,17 +1191,37 @@ app.post("/api/products/:code/push", requireAuth, async (req, res) => {
   const p = products[code];
   if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
 
+  // Hangi kod verilirse verilsin (ana ürün ya da bir alt ürün), tüm aile için
+  // ortak merkezi stok, ailedeki her üyenin kendi gerçek platform SKU'suna
+  // ayrıca gönderilir — böylece birleştirilmiş ürünlerin hiçbiri geride kalmaz.
+  const rootCode = resolveRoot(code);
+  const root = products[rootCode];
+  const familyCodes = getFamilyCodes(rootCode);
+  const central = Number(root.centralStock) || 0;
+
   const results = {};
   await Promise.all(
     PLATFORMS.filter((pl) => pl.configured()).map(async (pl) => {
-      const r = await pl.pushStock(skuForPlatform(code, pl.id), p.centralStock);
-      results[pl.id] = r;
-      if (r.ok) p.stocks[pl.id] = p.centralStock;
+      const targets = [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }];
+      familyCodes.forEach((c) => {
+        if (c === rootCode) return;
+        const ownSku = products[c]?.skus?.[pl.id];
+        if (ownSku) targets.push({ code: c, sku: ownSku });
+      });
+      const outcomes = await Promise.all(
+        targets.map(async (t) => {
+          const r = await pl.pushStock(t.sku, central);
+          if (r.ok && products[t.code]) products[t.code].stocks[pl.id] = central;
+          return r;
+        })
+      );
+      const ok = outcomes.every((o) => o.ok);
+      results[pl.id] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
     })
   );
   persistProducts();
 
-  const entry = { time: new Date().toISOString(), barcode: code, name: p.name, centralStock: p.centralStock, trigger: "manuel", results };
+  const entry = { time: new Date().toISOString(), barcode: rootCode, name: root.name, centralStock: central, trigger: "manuel", results };
   pushLog.push(entry);
   persistPushLog();
 
@@ -1652,15 +1632,6 @@ app.post("/api/backup/restore", requireAuth, async (req, res) => {
   }
 });
 
-// index.html hem depo kökünde (uysaltic-crypto/siparispaneli/index.html) hem de
-// bir "public" klasörü içinde olsa da çalışsın diye ikisini de dener.
-app.get("/", (req, res) => {
-  const rootIndex = path.join(__dirname, "index.html");
-  const publicIndex = path.join(__dirname, "public", "index.html");
-  if (fs.existsSync(rootIndex)) return res.sendFile(rootIndex);
-  if (fs.existsSync(publicIndex)) return res.sendFile(publicIndex);
-  res.status(404).send("index.html bulunamadı.");
-});
 app.use(express.static(path.join(__dirname, "public")));
 
 app.listen(PORT, () => {
