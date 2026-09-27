@@ -1540,6 +1540,15 @@ app.post("/api/backup/restore", requireAuth, async (req, res) => {
   }
 });
 
+// index.html hem depo kökünde (uysaltic-crypto/siparispaneli/index.html) hem de
+// bir "public" klasörü içinde olsa da çalışsın diye ikisini de dener.
+app.get("/", (req, res) => {
+  const rootIndex = path.join(__dirname, "index.html");
+  const publicIndex = path.join(__dirname, "public", "index.html");
+  if (fs.existsSync(rootIndex)) return res.sendFile(rootIndex);
+  if (fs.existsSync(publicIndex)) return res.sendFile(publicIndex);
+  res.status(404).send("index.html bulunamadı.");
+});
 app.use(express.static(path.join(__dirname, "public")));
 
 app.listen(PORT, () => {
