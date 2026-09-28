@@ -1435,6 +1435,18 @@ app.post("/api/products", requireAuth, (req, res) => {
   res.json({ ok: true, product: { code: productCode, ...p }, conflicts });
 });
 
+// Birleştirilmiş bir ürünü ana üründen ayırır: tekrar bağımsız bir kart olur.
+// Kendi platform verileri zaten kendi kaydında durduğu için hiçbir şey kaybolmaz;
+// merkezi stok ayrılma anındaki değeriyle kalır ve artık ayrı takip edilir.
+app.post("/api/products/:code/unmerge", requireAuth, (req, res) => {
+  const p = products[req.params.code];
+  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  if (!p.mergedInto) return res.status(400).json({ ok: false, error: "Bu ürün zaten birleştirilmemiş." });
+  p.mergedInto = null;
+  persistProducts();
+  res.json({ ok: true, product: { code: req.params.code, ...p } });
+});
+
 app.delete("/api/products/:code", requireAuth, (req, res) => {
   const code = req.params.code;
   // Silinen ürün başka ürünlerin ana ürünüyse (yani alt ürünleri varsa), o alt
