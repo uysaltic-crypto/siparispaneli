@@ -48,9 +48,6 @@
   .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
   .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
   .pcard-title { font-weight:700; }
-  .pcard-title-input { display:block; background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; line-height:1.35; color:var(--text); width:100%; resize:none; overflow:hidden; box-sizing:border-box; }
-  .pcard-title-input:hover { border-color:var(--border); }
-  .pcard-title-input:focus { border-color:var(--border); background:var(--surface2); outline:none; }
   .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
   .pcard-code-row { display:flex; align-items:center; gap:6px; margin-top:1px; }
   .pcard-code-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; font-family:monospace; font-size:11px; color:var(--muted); width:150px; }
@@ -59,13 +56,20 @@
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
   .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
-  .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
-  .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
-  .pchip-dot { width:8px; height:8px; border-radius:50%; }
-  .pchip input[type=number] { width:70px; }
-  .pchip .status-btn { font-size:10px; padding:2px 8px; border-radius:100px; border:none; cursor:pointer; }
-  .status-btn.satista { background:#34D39918; color:var(--ok); }
-  .status-btn.pasif { background:#F8717118; color:var(--danger); }
+  .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; position:relative; }
+  .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:4px; }
+  .pchip-dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .pchip-line { display:flex; align-items:center; gap:5px; font-size:11px; margin-bottom:4px; }
+  .pchip-line input[type=number] { width:60px; font-size:11px; }
+  .status-dot { width:7px; height:7px; border-radius:50%; flex:none; }
+  .status-dot.satista { background:var(--ok); }
+  .status-dot.pasif { background:var(--danger); }
+  .pchip-menu-btn { margin-left:auto; background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:2px 4px; }
+  .pchip-menu-btn:hover { color:var(--text); }
+  .pchip-menu { position:absolute; right:6px; top:28px; z-index:20; background:var(--panel, #181818); border:1px solid var(--border); border-radius:8px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); overflow:hidden; }
+  .pchip-menu a, .pchip-menu button { display:block; width:100%; text-align:left; background:none; border:none; color:inherit; text-decoration:none; font-size:12px; padding:8px 12px; cursor:pointer; }
+  .pchip-menu a:hover, .pchip-menu button:hover { background:rgba(255,255,255,.06); }
+  .pchip-menu button.danger { color:var(--danger); }
   .muted { color:var(--muted); font-size:11px; }
   .amount { font-family:monospace; font-weight:600; }
   #loginScreen { display:flex; align-items:center; justify-content:center; height:100vh; }
@@ -495,25 +499,12 @@ function getChildren(code) {
   return state.products.filter(p => p.mergedInto === code);
 }
 
-// Tek bir ürünün tek bir platformdaki kutusu (SKU/kod, satış durumu, fiyat, gönder).
-// Hem ana kartta hem de birleşen ürün satırlarında aynı şekilde kullanılır.
-function platformChipHtml(p, pl) {
-  const priceVal = p.prices?.[pl.id] ?? '';
-  const status = p.listingStatus?.[pl.id] || 'satista';
-  const platformSku = p.skus?.[pl.id] || p.code;
-  const cl = platformCodeInfo(pl.id, p, platformSku);
-  return `
-    <div class="pchip">
-      <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku, p.name)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
-        <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
-      </div>
-      <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
-      <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
-        <span class="muted">₺</span>
-        <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
-      </div>
-      <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
-    </div>`;
+// Birleştirilmiş bir ailede her platformun verisi, o platforma bağlı SKU'yu taşıyan
+// üyeden okunur (ana ürün ya da altına birleştirilmiş bir ürün olabilir) — böylece
+// tek bir kartta, ailenin tüm platform bağlantıları bir arada gösterilir.
+function platformOwner(rootProduct, platformId) {
+  const members = [rootProduct, ...getChildren(rootProduct.code)];
+  return members.find(m => m.skus?.[platformId]) || rootProduct;
 }
 
 function renderStock() {
@@ -562,20 +553,34 @@ function renderStock() {
       ? `<img class="pcard-thumb" src="${p.image}" alt="">`
       : `<div class="pcard-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`;
 
-    const familyMembers = [p, ...getChildren(p.code)];
-    const familyHasAnyListing = familyMembers.some(m => Object.keys(m.skus || {}).length || Object.keys(m.productCodes || {}).length);
     const chips = activePlatforms.map(pl => {
-      // Ürün bu pazar yerinden gerçekten çekilmediyse (kendi SKU/ürün kodu yoksa) "Satışta"
-      // gibi göstermeyiz. Hiçbir yerden çekilmemiş elle açılmış ürünlerde eski davranış sürer.
-      const listed = !familyHasAnyListing || familyMembers.some(m => m.skus?.[pl.id] || m.productCodes?.[pl.id]);
-      if (!listed) {
-        return `
-        <div class="pchip" style="opacity:.45;">
-          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><span>${pl.name}</span></div>
-          <div class="muted" style="font-size:11px; padding:6px 0;">Bu pazar yerinde yok</div>
+      const owner = platformOwner(p, pl.id);
+      const uid = `${p.code}__${pl.id}`.replace(/[^a-zA-Z0-9_]/g, '_');
+      const stockVal = owner.stocks?.[pl.id] ?? 0;
+      const priceVal = owner.prices?.[pl.id] ?? '';
+      const status = owner.listingStatus?.[pl.id] || 'satista';
+      const platformSku = owner.skus?.[pl.id] || owner.code;
+      const cl = platformCodeInfo(pl.id, owner, platformSku);
+      const statusLabel = status === 'pasif' ? 'Pasif' : 'Satışta';
+      return `
+        <div class="pchip">
+          <div class="pchip-head">
+            <span class="pchip-dot" style="background:${pl.color}"></span>
+            <a href="${platformListingUrl(pl.id, platformSku, owner.name)}" target="_blank" rel="noopener" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;" title="${pl.name}'da bu ürünü aç">${pl.name} ↗</a>
+            <button class="pchip-menu-btn" onclick="togglePchipMenu(event,'${uid}')" title="İşlemler">⋮</button>
+            <div class="pchip-menu" id="menu_${uid}" hidden>
+              <a href="${platformListingUrl(pl.id, platformSku, owner.name)}" target="_blank" rel="noopener">Pazaryeri Sayfası</a>
+              <button onclick="closePchipMenus(); triggerPull('${pl.id}')">Güncel Durumu Al</button>
+              <button onclick="closePchipMenus(); goToCompetitor('${owner.code}')">Rekabet Analizi Ekle</button>
+              <button onclick="closePchipMenus(); document.getElementById('price_${uid}').focus()">Düzenle</button>
+              <button onclick="closePchipMenus(); pushPlatform('${owner.code}','${pl.id}')">Fiyat Güncelle</button>
+              <button onclick="closePchipMenus(); toggleStatus('${owner.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Satışa Aç' : 'Satışı Durdur'}</button>
+              <button class="danger" onclick="closePchipMenus(); unlinkPlatform('${owner.code}','${pl.id}','${pl.name}')">Bağlantıyı Sil</button>
+            </div>
+          </div>
+          <div class="pchip-line"><span class="status-dot ${status}"></span>${statusLabel} - <input id="price_${uid}" type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${owner.code}','${pl.id}',this.value)" placeholder="fiyat">₺</div>
+          <div class="muted" style="font-family:monospace; font-size:10px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''} · Stok: ${stockVal}</div>
         </div>`;
-      }
-      return platformChipHtml(p, pl);
     }).join('');
 
     const card = document.createElement('div');
@@ -586,8 +591,8 @@ function renderStock() {
       <div class="pcard-head">
         <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
         ${thumb}
-        <div style="flex:1; min-width:260px;">
-          <textarea class="pcard-title-input" rows="1" spellcheck="false" title="Ürün adı — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="renameProductName('${p.code}', this.value)">${escAttr(p.name)}</textarea>
+        <div>
+          <div class="pcard-title">${p.name}</div>
           ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
           <div class="pcard-code-row">
             <input class="pcard-code-input" type="text" value="${p.code}" spellcheck="false" title="Ana ürün kodu — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProduct('${p.code}', this.value)">
@@ -605,43 +610,46 @@ function renderStock() {
         </div>
       </div>
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
-      ${mergedChildrenHtml(p.code)}
     `;
     attachDragHandlers(card);
     wrap.appendChild(card);
-    card.querySelectorAll('textarea.pcard-title-input').forEach(autoGrow);
   });
 }
 
-// Bu ana ürünün altına sürükle-bırak ile birleştirilmiş ürünleri, kendi
-// (siteden çekilmiş) platform stok kodlarıyla birlikte küçük bir liste olarak
-// gösterir. Hiçbir birleşen ürün panelden kaybolmaz; burada görünmeye devam eder.
-function mergedChildrenHtml(code) {
-  const children = getChildren(code);
-  if (!children.length) return '';
-  const rows = children.map(child => {
-    const childChips = state.platforms.filter(pl => pl.configured && (child.skus?.[pl.id] || child.productCodes?.[pl.id])).map(pl => platformChipHtml(child, pl)).join('');
-    const codes = Object.entries(child.skus || {}).map(([platformId, sku]) => {
-      const pl = platformMeta(platformId);
-      return `<span class="muted" style="font-family:monospace;">${pl.name}: ${sku}</span>`;
-    }).join(' &nbsp;·&nbsp; ');
-    return `
-      <div style="border-top:1px solid var(--border, #2a2a2a);">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0;">
-        <div style="min-width:0; flex:1;">
-          <textarea class="pcard-title-input" style="font-size:12px;" rows="1" spellcheck="false" title="Ürün adını değiştir" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="renameProductName('${child.code}', this.value)">${escAttr(child.name)}</textarea>
-          ${childChips ? '' : `<div style="font-size:11px;">${codes || `<span class="muted">Kendi platform SKU'su yok — ürün kodu: ${child.code}</span>`}</div>`}
-        </div>
-        <button class="ghost small" style="white-space:nowrap;" onclick="unmergeProduct('${child.code}')" title="Bu ürünü ana üründen ayır, tekrar ayrı kart olsun">Ayır</button>
-      </div>
-      ${childChips ? `<div class="pcard-platforms" style="padding-bottom:8px;">${childChips}</div>` : ''}
-      </div>`;
-  }).join('');
-  return `
-    <div style="margin-top:8px;">
-      <div class="muted" style="font-size:10px; margin-bottom:2px;">BİRLEŞEN ÜRÜNLER (${children.length})</div>
-      ${rows}
-    </div>`;
+// Bu ana ürünün altına sürükle-bırak ile birleştirilmiş ürünler artık ayrı
+// gösterilmiyor — platform verileri platformOwner() ile tek karta toplanıyor.
+
+let openPchipMenu = null;
+function togglePchipMenu(e, uid) {
+  e.stopPropagation();
+  const el = document.getElementById('menu_' + uid);
+  if (!el) return;
+  const willOpen = el.hidden;
+  closePchipMenus();
+  el.hidden = !willOpen;
+  if (willOpen) openPchipMenu = el;
+}
+function closePchipMenus() {
+  document.querySelectorAll('.pchip-menu').forEach(m => m.hidden = true);
+  openPchipMenu = null;
+}
+document.addEventListener('click', closePchipMenus);
+
+function goToCompetitor(code) {
+  showTab('compete');
+  setTimeout(() => {
+    const el = document.getElementById('urls_' + code);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); }
+    else toast('Ürünü Rekabet sekmesinde bulamadım — arama kutusundan ara.');
+  }, 150);
+}
+
+async function unlinkPlatform(code, platformId, platformName) {
+  if (!confirm(`${platformName} bağlantısını bu üründen kaldırmak istediğine emin misin? Stok kodu, fiyat ve durum bilgisi silinecek.`)) return;
+  const r = await fetch(`/api/products/${encodeURIComponent(code)}/unlink/${encodeURIComponent(platformId)}`, { method: 'DELETE' });
+  const data = await r.json();
+  if (!data.ok) { toast(data.error || 'Bağlantı kaldırılamadı.'); return; }
+  await loadProducts();
 }
 
 /* --- Ürün kartlarını sürükleyerek birleştirme --- */
@@ -712,39 +720,6 @@ function competeBadgeHtml(p) {
   const myPrice = p.pricing?.myPrice;
   const ok = myPrice != null && myPrice <= lowestVal;
   return `<span class="badge ${ok ? 'ok' : 'fail'}" title="En düşük rakip fiyatı">${ok ? 'en ucuz sensin' : 'rakip'}: ${lowestVal.toFixed(2)} ₺</span>`;
-}
-
-function autoGrow(el) {
-  el.style.height = 'auto';
-  el.style.height = el.scrollHeight + 2 + 'px';
-}
-
-function escAttr(v) {
-  return String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-async function renameProductName(code, nameRaw) {
-  const name = (nameRaw || '').trim();
-  const current = state.products.find(p => p.code === code);
-  if (!name || (current && current.name === name)) { renderStock(); return; }
-  const resp = await fetch('/api/products', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ barcode: code, name })
-  });
-  const data = await resp.json();
-  if (!data.ok) { toast(data.error || 'Ürün adı değiştirilemedi.'); renderStock(); return; }
-  toast('Ürün adı güncellendi.');
-  await loadProducts();
-}
-
-async function unmergeProduct(code) {
-  const child = state.products.find(p => p.code === code);
-  if (!confirm(`"${child ? child.name : code}" ürününü ana üründen ayırmak istiyor musun?\n\nTekrar ayrı bir kart olacak, kendi platform kodları korunacak. Merkezi stokları ayrı takip edilir.`)) return;
-  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/unmerge`, { method: 'POST' });
-  const data = await resp.json();
-  if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
-  toast('Ürün ayrıldı.');
-  await loadProducts();
 }
 
 async function renameProduct(oldCode, newCodeRaw) {
