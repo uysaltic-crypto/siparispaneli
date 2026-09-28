@@ -564,7 +564,7 @@ function clamp(n, min, max) {
 }
 
 // Tek bir ürün için: rakip fiyatlarını tazeler, otomatik fiyatlandırma açıksa
-// yeni fiyatı hesaplayıp Trendyol'a gönderir. results.priceLog'a bir kayıt düşer.
+// yeni fiyatı hesaplayıp Trendyol'a ve Hepsiburada'ya gönderir.
 async function repriceProduct(code) {
   const p = products[code];
   if (!p) return { ok: false, error: "Ürün bulunamadı." };
@@ -590,21 +590,35 @@ async function repriceProduct(code) {
   if (p.pricing.autoReprice && p.pricing.minPrice != null && p.pricing.maxPrice != null && lowest != null) {
     const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
     if (target !== p.pricing.myPrice) {
-      const qty = p.stocks?.ty ?? p.centralStock ?? 0;
-      const sku = skuForPlatform(code, "ty");
-      const r = await pushPriceToTrendyol(sku, target, qty);
-      pushResult = { ok: r.ok, message: r.message, newPrice: target };
-      if (r.ok) {
-        p.pricing.myPrice = target;
-        p.prices.ty = target;
+      const results = {};
+
+      const tyQty = p.stocks?.ty ?? p.centralStock ?? 0;
+      const tySku = skuForPlatform(code, "ty");
+      results.ty = await pushPriceToTrendyol(tySku, target, tyQty);
+      if (results.ty.ok) p.prices.ty = target;
+
+      if (hbConfigured()) {
+        const hbQty = p.stocks?.hb ?? p.centralStock ?? 0;
+        const hbSku = skuForPlatform(code, "hb");
+        results.hb = await pushListingToPlatform("hb", hbSku, hbQty, target);
+        if (results.hb.ok) p.prices.hb = target;
       }
+
+      const anyOk = Object.values(results).some((r) => r.ok);
+      pushResult = {
+        ok: anyOk,
+        newPrice: target,
+        message: Object.entries(results).map(([id, r]) => `${id}: ${r.ok ? "OK" : r.message}`).join(" | "),
+      };
+      if (anyOk) p.pricing.myPrice = target;
+
       pushLog.push({
         time: new Date().toISOString(),
         barcode: code,
         name: p.name,
         centralStock: p.centralStock,
         trigger: "otomatik fiyatlandırma",
-        results: { ty: r },
+        results,
       });
       persistPushLog();
     }
@@ -615,7 +629,10 @@ async function repriceProduct(code) {
 }
 
 async function repriceAll() {
-  const codes = Object.keys(products).filter((c) => (products[c].competitors || []).length > 0);
+  // Rekabet ayarı artık panelde sadece aile kökünde (mergedInto boş) düzenleniyor
+  // ve tüm aileyi kapsıyor — birleşen alt ürünlerde eski/artık ayarı kalmışsa bile
+  // burada atlanır, aynı ürün iki kez kontrol edilmesin.
+  const codes = Object.keys(products).filter((c) => !products[c].mergedInto && (products[c].competitors || []).length > 0);
   for (const code of codes) {
     try {
       await repriceProduct(code);
