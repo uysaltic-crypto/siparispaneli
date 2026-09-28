@@ -873,7 +873,17 @@ let csFlushTimer = null;
 async function csFlushStockQueue() {
   csFlushTimer = null;
   if (!csStockQueue.size) return { ok: true, message: "Kuyruk boş" };
-  const items = Array.from(csStockQueue.entries()).map(([stockCode, stockQuantity]) => ({ stockCode, stockQuantity }));
+  // Kuyruk değeri eski sürümde sadece sayıydı; yeni sürümde { qty, price }.
+  const items = Array.from(csStockQueue.entries()).map(([stockCode, v]) => {
+    const qty = typeof v === "object" && v !== null ? v.qty : v;
+    const price = typeof v === "object" && v !== null ? v.price : undefined;
+    const item = { stockCode, stockQuantity: qty };
+    if (Number(price) > 0) {
+      item.listPrice = price;
+      item.salesPrice = price;
+    }
+    return item;
+  });
   csStockQueue = new Map();
   csLastPushAt = Date.now();
   persistCsQueue();
@@ -911,10 +921,13 @@ if (csStockQueue.size) {
   csScheduleFlush(Math.max(0, CS_STOCK_RATE_LIMIT_MS - (Date.now() - csLastPushAt)));
 }
 
-async function pushStockToCiceksepeti(barcode, quantity) {
+async function pushStockToCiceksepeti(barcode, quantity, price) {
   if (!csConfigured()) return { ok: false, message: "Çiçeksepeti API bilgisi eksik." };
   const qty = Math.max(0, Math.floor(Number(quantity) || 0));
-  csStockQueue.set(String(barcode), qty);
+  const prev = csStockQueue.get(String(barcode));
+  const prevPrice = typeof prev === "object" && prev !== null ? prev.price : undefined;
+  const pr = Number(price) > 0 ? Math.round(Number(price) * 100) / 100 : prevPrice;
+  csStockQueue.set(String(barcode), { qty, price: pr });
   persistCsQueue();
 
   const elapsed = Date.now() - csLastPushAt;
@@ -1078,6 +1091,103 @@ async function pushStockToKoctas(barcode, quantity) {
     return { ok: true, message: "Gönderildi (Mirakl kuyruğuna alındı)", importId: resp.data?.import_id || null };
   } catch (err) {
     return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+// Fiyat güncelleme — Mirakl PRI01: POST /api/offers/pricing/imports (multipart, "file" alanında
+// CSV: "offer-sku";"price"). Dakikada en fazla 1 istek; yanıt import_id döner (kuyruğa alınır).
+async function pushPriceToKoctas(barcode, price) {
+  if (!koctasConfigured()) return { ok: false, message: "Koçtaş API bilgisi eksik." };
+  const url = `https://${koctasHost()}/api/offers/pricing/imports`;
+  const sku = String(barcode).replace(/"/g, '""');
+  const pr = (Math.round(Number(price) * 100) / 100).toFixed(2);
+  const csv = `"offer-sku";"price"\r\n"${sku}";"${pr}"\r\n`;
+  const boundary = "koctasfiyat" + crypto.randomBytes(8).toString("hex");
+  const body =
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="fiyat.csv"\r\nContent-Type: text/csv\r\n\r\n${csv}\r\n` +
+    `--${boundary}--`;
+  try {
+    const resp = await axios.post(url, body, {
+      headers: koctasHeaders({ "Content-Type": `multipart/form-data; boundary=${boundary}` }),
+      params: koctasShopParams(),
+      timeout: 15000,
+    });
+    return { ok: true, message: "Fiyat gönderildi (Mirakl kuyruğuna alındı)", importId: resp.data?.import_id || null };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+// N11: aynı price-stock-update görevi fiyatı da taşıyabiliyor (listPrice/salePrice).
+async function pushListingToN11(barcode, quantity, price) {
+  if (!n11Configured()) return { ok: false, message: "N11 API bilgisi eksik." };
+  const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+  const qty = Math.max(0, Math.floor(Number(quantity) || 0));
+  const pr = Math.round(Number(price) * 100) / 100;
+  const body = {
+    payload: { integrator: "TicaretPaneli", skus: [{ stockCode: barcode, quantity: qty, listPrice: pr, salePrice: pr, currencyType: "TL" }] },
+  };
+  try {
+    const resp = await axios.post("https://api.n11.com/ms/product/tasks/price-stock-update", body, {
+      headers: { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, "Content-Type": "application/json" },
+      timeout: 15000,
+    });
+    if (resp.data?.status === "REJECT") return { ok: false, message: (resp.data?.reasons || []).join(" ") || "N11 reddetti." };
+    return { ok: true, message: "Gönderildi", taskId: resp.data?.id || null };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+// Hepsiburada: price-uploads (XML, stok gönderimiyle aynı yapı). Resmi örnekte ondalık ayracı virgül.
+async function pushPriceToHepsiburada(barcode, price) {
+  if (!hbConfigured()) return { ok: false, message: "Hepsiburada API bilgisi eksik." };
+  const { HB_MERCHANT_ID, HB_ENV } = process.env;
+  const hbAuth = hbAuthConfig();
+  const host = HB_ENV === "test" ? "listing-external-sit.hepsiburada.com" : "listing-external.hepsiburada.com";
+  const url = `https://${host}/listings/merchantid/${HB_MERCHANT_ID}/price-uploads`;
+  const pr = (Math.round(Number(price) * 100) / 100).toFixed(2).replace(".", ",");
+  const xml =
+    `<?xml version="1.0" encoding="utf-8"?>` +
+    `<listings><listing><MerchantSku>${escapeXml(barcode)}</MerchantSku><Price>${pr}</Price></listing></listings>`;
+  try {
+    const resp = await axios.post(url, xml, {
+      auth: hbAuth.auth,
+      headers: { "Content-Type": "application/xml", Accept: "application/json", "User-Agent": hbAuth.userAgent },
+      timeout: 15000,
+    });
+    return { ok: true, message: "Fiyat gönderildi", trackingId: resp.data?.Id || resp.data?.id || null };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+// Bir platforma bir ürünün STOK + FİYAT bilgisini birlikte gönderir. Fiyat yoksa sadece stok gider.
+async function pushListingToPlatform(platformId, sku, quantity, price) {
+  const pl = PLATFORMS.find((x) => x.id === platformId);
+  if (!pl) return { ok: false, message: "Geçersiz platform." };
+  const hasPrice = Number(price) > 0;
+  if (!hasPrice) return pl.pushStock(sku, quantity);
+  switch (platformId) {
+    case "ty":
+      return pushPriceToTrendyol(sku, price, quantity);
+    case "n11":
+      return pushListingToN11(sku, quantity, price);
+    case "cs":
+      return pushStockToCiceksepeti(sku, quantity, price);
+    case "hb": {
+      const [stockRes, priceRes] = await Promise.all([pl.pushStock(sku, quantity), pushPriceToHepsiburada(sku, price)]);
+      const ok = stockRes.ok && priceRes.ok;
+      return { ok, message: ok ? "Stok ve fiyat gönderildi" : [!stockRes.ok && `stok: ${stockRes.message}`, !priceRes.ok && `fiyat: ${priceRes.message}`].filter(Boolean).join(" | ") };
+    }
+    case "koctas": {
+      const stockRes = await pl.pushStock(sku, quantity);
+      const priceRes = await pushPriceToKoctas(sku, price);
+      const ok = stockRes.ok && priceRes.ok;
+      return { ok, message: ok ? "Stok ve fiyat gönderildi (Mirakl kuyruğuna alındı)" : [!stockRes.ok && `stok: ${stockRes.message}`, !priceRes.ok && `fiyat: ${priceRes.message}`].filter(Boolean).join(" | ") };
+    }
+    default:
+      return pl.pushStock(sku, quantity);
   }
 }
 
@@ -1485,6 +1595,37 @@ app.post("/api/products/:code/push", requireAuth, async (req, res) => {
   pushLog.push(entry);
   persistPushLog();
 
+  res.json({ ok: true, results });
+});
+
+// Panelde bir platform kutusuna girilen (o platforma ÖZEL) stok ve fiyatı ilgili siteye gönderir.
+// body: { platform } → sadece o platform; boşsa yapılandırılmış tüm platformlar.
+app.post("/api/products/:code/push-platform", requireAuth, async (req, res) => {
+  const code = req.params.code;
+  const p = products[code];
+  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  const onlyId = req.body?.platform;
+  const targets = PLATFORMS.filter((pl) => pl.configured() && (!onlyId || pl.id === onlyId));
+  if (!targets.length) return res.status(400).json({ ok: false, error: "Yapılandırılmış platform yok." });
+
+  const results = {};
+  await Promise.all(
+    targets.map(async (pl) => {
+      const qty = p.stocks?.[pl.id] ?? p.centralStock ?? 0;
+      const price = p.prices?.[pl.id];
+      const sku = skuForPlatform(code, pl.id);
+      results[pl.id] = await pushListingToPlatform(pl.id, sku, qty, price);
+    })
+  );
+  pushLog.push({
+    time: new Date().toISOString(),
+    barcode: code,
+    name: p.name,
+    centralStock: p.centralStock,
+    trigger: "manuel (fiyat+stok)",
+    results: Object.fromEntries(Object.entries(results).map(([id, r]) => [id, r.ok ? { ok: true } : { ok: false, message: r.message }])),
+  });
+  persistPushLog();
   res.json({ ok: true, results });
 });
 
