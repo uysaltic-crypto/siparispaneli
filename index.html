@@ -48,7 +48,7 @@
   .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
   .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
   .pcard-title { font-weight:700; }
-  .pcard-title-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; color:var(--text); width:100%; min-width:200px; }
+  .pcard-title-input { display:block; background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; line-height:1.35; color:var(--text); width:100%; resize:none; overflow:hidden; box-sizing:border-box; }
   .pcard-title-input:hover { border-color:var(--border); }
   .pcard-title-input:focus { border-color:var(--border); background:var(--surface2); outline:none; }
   .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
@@ -582,8 +582,8 @@ function renderStock() {
       <div class="pcard-head">
         <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
         ${thumb}
-        <div>
-          <input class="pcard-title-input" type="text" value="${escAttr(p.name)}" spellcheck="false" title="Ürün adı — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProductName('${p.code}', this.value)">
+        <div style="flex:1; min-width:260px;">
+          <textarea class="pcard-title-input" rows="1" spellcheck="false" title="Ürün adı — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="renameProductName('${p.code}', this.value)">${escAttr(p.name)}</textarea>
           ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
           <div class="pcard-code-row">
             <input class="pcard-code-input" type="text" value="${p.code}" spellcheck="false" title="Ana ürün kodu — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProduct('${p.code}', this.value)">
@@ -605,6 +605,7 @@ function renderStock() {
     `;
     attachDragHandlers(card);
     wrap.appendChild(card);
+    card.querySelectorAll('textarea.pcard-title-input').forEach(autoGrow);
   });
 }
 
@@ -622,7 +623,7 @@ function mergedChildrenHtml(code) {
     return `
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid var(--border, #2a2a2a);">
         <div style="min-width:0; flex:1;">
-          <input class="pcard-title-input" style="font-size:12px; min-width:0;" type="text" value="${escAttr(child.name)}" spellcheck="false" title="Ürün adını değiştir" onchange="renameProductName('${child.code}', this.value)">
+          <textarea class="pcard-title-input" style="font-size:12px;" rows="1" spellcheck="false" title="Ürün adını değiştir" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="renameProductName('${child.code}', this.value)">${escAttr(child.name)}</textarea>
           <div style="font-size:11px;">${codes || `<span class="muted">Kendi platform SKU'su yok — ürün kodu: ${child.code}</span>`}</div>
         </div>
         <button class="ghost small" style="white-space:nowrap;" onclick="unmergeProduct('${child.code}')" title="Bu ürünü ana üründen ayır, tekrar ayrı kart olsun">Ayır</button>
@@ -703,6 +704,11 @@ function competeBadgeHtml(p) {
   const myPrice = p.pricing?.myPrice;
   const ok = myPrice != null && myPrice <= lowestVal;
   return `<span class="badge ${ok ? 'ok' : 'fail'}" title="En düşük rakip fiyatı">${ok ? 'en ucuz sensin' : 'rakip'}: ${lowestVal.toFixed(2)} ₺</span>`;
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 2 + 'px';
 }
 
 function escAttr(v) {
