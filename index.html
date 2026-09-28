@@ -48,6 +48,9 @@
   .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
   .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
   .pcard-title { font-weight:700; }
+  .pcard-title-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; color:var(--text); width:100%; min-width:200px; }
+  .pcard-title-input:hover { border-color:var(--border); }
+  .pcard-title-input:focus { border-color:var(--border); background:var(--surface2); outline:none; }
   .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
   .pcard-code-row { display:flex; align-items:center; gap:6px; margin-top:1px; }
   .pcard-code-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; font-family:monospace; font-size:11px; color:var(--muted); width:150px; }
@@ -580,7 +583,7 @@ function renderStock() {
         <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
         ${thumb}
         <div>
-          <div class="pcard-title">${p.name}</div>
+          <input class="pcard-title-input" type="text" value="${escAttr(p.name)}" spellcheck="false" title="Ürün adı — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProductName('${p.code}', this.value)">
           ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
           <div class="pcard-code-row">
             <input class="pcard-code-input" type="text" value="${p.code}" spellcheck="false" title="Ana ürün kodu — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProduct('${p.code}', this.value)">
@@ -618,10 +621,11 @@ function mergedChildrenHtml(code) {
     }).join(' &nbsp;·&nbsp; ');
     return `
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid var(--border, #2a2a2a);">
-        <div style="min-width:0;">
-          <div style="font-size:12px; font-weight:600;">${child.name}</div>
+        <div style="min-width:0; flex:1;">
+          <input class="pcard-title-input" style="font-size:12px; min-width:0;" type="text" value="${escAttr(child.name)}" spellcheck="false" title="Ürün adını değiştir" onchange="renameProductName('${child.code}', this.value)">
           <div style="font-size:11px;">${codes || `<span class="muted">Kendi platform SKU'su yok — ürün kodu: ${child.code}</span>`}</div>
         </div>
+        <button class="ghost small" style="white-space:nowrap;" onclick="unmergeProduct('${child.code}')" title="Bu ürünü ana üründen ayır, tekrar ayrı kart olsun">Ayır</button>
       </div>`;
   }).join('');
   return `
@@ -699,6 +703,34 @@ function competeBadgeHtml(p) {
   const myPrice = p.pricing?.myPrice;
   const ok = myPrice != null && myPrice <= lowestVal;
   return `<span class="badge ${ok ? 'ok' : 'fail'}" title="En düşük rakip fiyatı">${ok ? 'en ucuz sensin' : 'rakip'}: ${lowestVal.toFixed(2)} ₺</span>`;
+}
+
+function escAttr(v) {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function renameProductName(code, nameRaw) {
+  const name = (nameRaw || '').trim();
+  const current = state.products.find(p => p.code === code);
+  if (!name || (current && current.name === name)) { renderStock(); return; }
+  const resp = await fetch('/api/products', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ barcode: code, name })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ürün adı değiştirilemedi.'); renderStock(); return; }
+  toast('Ürün adı güncellendi.');
+  await loadProducts();
+}
+
+async function unmergeProduct(code) {
+  const child = state.products.find(p => p.code === code);
+  if (!confirm(`"${child ? child.name : code}" ürününü ana üründen ayırmak istiyor musun?\n\nTekrar ayrı bir kart olacak, kendi platform kodları korunacak. Merkezi stokları ayrı takip edilir.`)) return;
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/unmerge`, { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
+  toast('Ürün ayrıldı.');
+  await loadProducts();
 }
 
 async function renameProduct(oldCode, newCodeRaw) {
