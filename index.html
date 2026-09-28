@@ -538,7 +538,19 @@ function renderStock() {
       ? `<img class="pcard-thumb" src="${p.image}" alt="">`
       : `<div class="pcard-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`;
 
+    const familyMembers = [p, ...getChildren(p.code)];
+    const familyHasAnyListing = familyMembers.some(m => Object.keys(m.skus || {}).length || Object.keys(m.productCodes || {}).length);
     const chips = activePlatforms.map(pl => {
+      // Ürün bu pazar yerinden gerçekten çekilmediyse (kendi SKU/ürün kodu yoksa) "Satışta"
+      // gibi göstermeyiz. Hiçbir yerden çekilmemiş elle açılmış ürünlerde eski davranış sürer.
+      const listed = !familyHasAnyListing || familyMembers.some(m => m.skus?.[pl.id] || m.productCodes?.[pl.id]);
+      if (!listed) {
+        return `
+        <div class="pchip" style="opacity:.45;">
+          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><span>${pl.name}</span></div>
+          <div class="muted" style="font-size:11px; padding:6px 0;">Bu pazar yerinde yok</div>
+        </div>`;
+      }
       const stockVal = p.stocks?.[pl.id] ?? 0;
       const mismatch = Number(stockVal) !== c;
       const priceVal = p.prices?.[pl.id] ?? '';
