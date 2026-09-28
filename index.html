@@ -555,11 +555,7 @@ function renderStock() {
             <span class="muted">₺</span>
             <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
           </div>
-          <div style="display:flex; gap:6px; align-items:center; font-size:11px; margin-top:4px;">
-            <span class="muted">Adet</span>
-            <input class="stockcell ${mismatch ? 'mismatch' : ''}" type="number" value="${stockVal}" onchange="updateStock('${p.code}','${pl.id}',this.value)">
-          </div>
-          <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyat ve adedi ${pl.name}'a gönder">${pl.name}'a gönder</button>
+          <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
         </div>`;
     }).join('');
 
@@ -585,7 +581,7 @@ function renderStock() {
             <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
           </div>
           <button class="ghost small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
-          <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platform kutusundaki fiyat ve adedi ilgili siteye gönderir">Fiyat+stok gönder</button>
+          <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat+stok gönder</button>
           <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
         </div>
       </div>
