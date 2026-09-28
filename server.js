@@ -201,20 +201,38 @@ function escapeXml(str) {
 /* ==================================================================
    HEPSİBURADA
 ================================================================== */
+// Hepsiburada yetkilendirme (Ağustos 2024 "Yeni Entegratör Servis Auth" düzenlemesi,
+// developers.hepsiburada.com): Basic Auth kullanıcı adı = Merchant ID, şifre = Servis
+// Anahtarı (12 karakter; Satıcı Paneli > Bilgilerim > Entegrasyon > Entegratörlerim);
+// User-Agent başlığı = geliştirici kullanıcı adı (örn. xxx_dev).
+//   HB_MERCHANT_ID  → Merchant ID
+//   HB_SERVICE_KEY  → Servis Anahtarı
+//   HB_USERNAME     → geliştirici kullanıcı adı (User-Agent olarak gider)
+// Eski yapı (HB_USERNAME + HB_PASSWORD ile doğrudan Basic Auth) HB_SERVICE_KEY
+// tanımlı değilse geriye dönük uyumluluk için çalışmaya devam eder.
 function hbConfigured() {
-  return !!(process.env.HB_MERCHANT_ID && process.env.HB_USERNAME && process.env.HB_PASSWORD);
+  const e = process.env;
+  return !!(e.HB_MERCHANT_ID && e.HB_USERNAME && (e.HB_SERVICE_KEY || e.HB_PASSWORD));
+}
+function hbAuthConfig() {
+  const { HB_MERCHANT_ID, HB_USERNAME, HB_PASSWORD, HB_SERVICE_KEY } = process.env;
+  if (HB_SERVICE_KEY) {
+    return { auth: { username: HB_MERCHANT_ID, password: HB_SERVICE_KEY }, userAgent: HB_USERNAME };
+  }
+  return { auth: { username: HB_USERNAME, password: HB_PASSWORD }, userAgent: `${HB_MERCHANT_ID} - SelfIntegration` };
 }
 
 async function fetchHepsiburadaOrders() {
   if (!hbConfigured()) return { platform: "hb", error: "Hepsiburada API bilgileri .env dosyasında eksik.", orders: [] };
-  const { HB_MERCHANT_ID, HB_USERNAME, HB_PASSWORD, HB_ENV } = process.env;
+  const { HB_MERCHANT_ID, HB_ENV } = process.env;
+  const hbAuth = hbAuthConfig();
   const host = HB_ENV === "test" ? "oms-external-sit.hepsiburada.com" : "oms-external.hepsiburada.com";
   const url = `https://${host}/packages/merchantid/${HB_MERCHANT_ID}?timespan=24`;
 
   try {
     const resp = await axios.get(url, {
-      auth: { username: HB_USERNAME, password: HB_PASSWORD },
-      headers: { "User-Agent": `${HB_MERCHANT_ID} - SelfIntegration`, Accept: "application/json" },
+      auth: hbAuth.auth,
+      headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
       timeout: 20000,
     });
     const raw = Array.isArray(resp.data) ? resp.data : resp.data?.items || resp.data?.Items || [];
@@ -262,7 +280,8 @@ function normalizeHbPackage(pkg) {
 // tam doğrulanamadı, uç nokta yapısı push tarafıyla aynı host/desen üzerinden tahmin edildi).
 async function fetchStockHepsiburada() {
   if (!hbConfigured()) return { platform: "hb", error: "Hepsiburada API bilgileri .env dosyasında eksik.", rows: [] };
-  const { HB_MERCHANT_ID, HB_USERNAME, HB_PASSWORD, HB_ENV } = process.env;
+  const { HB_MERCHANT_ID, HB_ENV } = process.env;
+  const hbAuth = hbAuthConfig();
   const host = HB_ENV === "test" ? "listing-external-sit.hepsiburada.com" : "listing-external.hepsiburada.com";
   const url = `https://${host}/listings/merchantid/${HB_MERCHANT_ID}`;
   const rows = [];
@@ -271,9 +290,9 @@ async function fetchStockHepsiburada() {
     const limit = 200;
     for (let page = 0; page < 25; page++) {
       const resp = await axios.get(url, {
-        auth: { username: HB_USERNAME, password: HB_PASSWORD },
+        auth: hbAuth.auth,
         params: { limit, offset },
-        headers: { "User-Agent": `${HB_MERCHANT_ID} - SelfIntegration`, Accept: "application/json" },
+        headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
         timeout: 20000,
       });
       const items = resp.data?.listings || resp.data?.Listings || resp.data?.items || (Array.isArray(resp.data) ? resp.data : []);
@@ -306,7 +325,8 @@ async function fetchStockHepsiburada() {
 
 async function pushStockToHepsiburada(barcode, quantity) {
   if (!hbConfigured()) return { ok: false, message: "Hepsiburada API bilgisi eksik." };
-  const { HB_MERCHANT_ID, HB_USERNAME, HB_PASSWORD, HB_ENV } = process.env;
+  const { HB_MERCHANT_ID, HB_ENV } = process.env;
+  const hbAuth = hbAuthConfig();
   const host = HB_ENV === "test" ? "listing-external-sit.hepsiburada.com" : "listing-external.hepsiburada.com";
   const url = `https://${host}/listings/merchantid/${HB_MERCHANT_ID}/stock-uploads`;
   const qty = Math.max(0, Math.floor(Number(quantity) || 0));
@@ -316,8 +336,8 @@ async function pushStockToHepsiburada(barcode, quantity) {
     `<AvailableStock>${qty}</AvailableStock></listing></listings>`;
   try {
     const resp = await axios.post(url, xml, {
-      auth: { username: HB_USERNAME, password: HB_PASSWORD },
-      headers: { "Content-Type": "application/xml", Accept: "application/json", "User-Agent": `${HB_MERCHANT_ID} - SelfIntegration` },
+      auth: hbAuth.auth,
+      headers: { "Content-Type": "application/xml", Accept: "application/json", "User-Agent": hbAuth.userAgent },
       timeout: 15000,
     });
     return { ok: true, message: "Gönderildi", trackingId: resp.data?.Id || resp.data?.id || null };
@@ -1056,15 +1076,15 @@ async function pushStockToKoctas(barcode, quantity) {
    PLATFORM KAYDI — yeni bir pazaryeri eklemek için buraya bir satır
 ================================================================== */
 const PLATFORMS = [
-  { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true },
-  { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true },
-  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: fetchStockN11, stockPullVerified: true, verified: true },
+  { id: "hb", name: "Hepsiburada", color: "#FF6A00", configured: hbConfigured, fetchOrders: fetchHepsiburadaOrders, pushStock: pushStockToHepsiburada, fetchStock: fetchStockHepsiburada, stockPullVerified: false, verified: true, panelUrl: "https://merchant.hepsiburada.com/" },
+  { id: "ty", name: "Trendyol", color: "#00C2B2", configured: tyConfigured, fetchOrders: fetchTrendyolOrders, pushStock: pushStockToTrendyol, fetchStock: fetchStockTrendyol, stockPullVerified: true, verified: true, panelUrl: "https://partner.trendyol.com/" },
+  { id: "n11", name: "N11", color: "#7B2CBF", configured: n11Configured, fetchOrders: fetchN11Orders, pushStock: pushStockToN11, fetchStock: fetchStockN11, stockPullVerified: true, verified: true, panelUrl: "https://so.n11.com/" },
   // Sipariş çekme (GetOrders) ve ürün listeleme (Products) resmi dokümana göre doğrulandı;
   // stok/fiyat gönderme ucu (products/stock-price) henüz doğrulanmadı.
-  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true },
+  { id: "cs", name: "Çiçeksepeti", color: "#E4287C", configured: csConfigured, fetchOrders: fetchCiceksepetiOrders, pushStock: pushStockToCiceksepeti, fetchStock: fetchStockCiceksepeti, stockPullVerified: true, verified: true, panelUrl: "https://seller.ciceksepeti.com/" },
   // Mirakl'ın resmi API dokümanına göre yazıldı (OR11/OF21/STO01) ama bu hesapla
   // henüz canlı denenmedi — ilk kullanımda uç nokta/alan adlarını birlikte doğrularız.
-  { id: "koctas", name: "Koçtaş", color: "#F58220", configured: koctasConfigured, fetchOrders: fetchKoctasOrders, pushStock: pushStockToKoctas, fetchStock: fetchStockKoctas, stockPullVerified: false, verified: false },
+  { id: "koctas", name: "Koçtaş", color: "#F58220", configured: koctasConfigured, fetchOrders: fetchKoctasOrders, pushStock: pushStockToKoctas, fetchStock: fetchStockKoctas, stockPullVerified: false, verified: false, panelUrl: `https://${koctasHost()}/` },
 ];
 
 app.get("/api/platforms", requireAuth, (req, res) => {
@@ -1077,6 +1097,7 @@ app.get("/api/platforms", requireAuth, (req, res) => {
       verified: p.verified,
       pullable: !!p.fetchStock,
       stockPullVerified: p.stockPullVerified,
+      panelUrl: p.panelUrl || null,
     })),
   });
 });
