@@ -397,6 +397,18 @@ function fmtDate(ts) {
   return new Date(Number(ts)).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
 }
 
+function platformListingUrl(id, sku) {
+  const q = encodeURIComponent(String(sku || '').trim());
+  const map = {
+    ty: `https://www.trendyol.com/sr?q=${q}`,
+    n11: `https://www.n11.com/arama?q=${q}`,
+    cs: `https://www.ciceksepeti.com/arama?query=${q}`,
+    hb: `https://www.hepsiburada.com/ara?q=${q}`,
+    koctas: `https://www.koctas.com.tr/search?text=${q}`,
+  };
+  return map[id] || '#';
+}
+
 function platformMeta(id) {
   return state.platforms.find(p => p.id === id) || { name: id.toUpperCase(), color: '#999' };
 }
@@ -514,7 +526,7 @@ function renderStock() {
       const platformSku = p.skus?.[pl.id] || p.code;
       return `
         <div class="pchip">
-          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span>${pl.name}
+          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
             <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
           </div>
           <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">Stok kodu: ${platformSku}</div>
