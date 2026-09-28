@@ -106,6 +106,20 @@ function skuForPlatform(code, platform) {
   return (p?.skus?.[platform] || code || "").trim();
 }
 
+// Ürün bu platformda GERÇEKTEN kayıtlı mı? Siteden çekme / içe aktarma / sipariş /
+// elle SKU girişi bir platform için `skus` (veya `productCodes`) kaydı bırakır.
+// Hiçbir platformda kaydı olmayan (elle açılmış, henüz hiçbir yerden çekilmemiş) ürünlerde
+// eski davranış korunur: her platformda varmış gibi kabul edilir.
+function hasAnyListing(p) {
+  return !!p && (Object.keys(p.skus || {}).length > 0 || Object.keys(p.productCodes || {}).length > 0);
+}
+function isListedOn(code, platform) {
+  const p = products[code];
+  if (!p) return false;
+  if (p.skus?.[platform] || p.productCodes?.[platform]) return true;
+  return !hasAnyListing(p);
+}
+
 /* ------------------------------------------------------------------
    Birleştirme ailesi: sürükle-bırak ile bir ürün başka birinin üzerine
    bırakıldığında artık SİLİNMİYOR — `mergedInto` alanına ana ürünün kodu
@@ -1275,7 +1289,7 @@ async function processNewOrdersAndSync(ordersByPlatform) {
         // kodu fallback olarak kullanılır) + bu platformda gerçek/kendi SKU'su olan
         // her alt ürün AYRICA gönderilir, böylece hangi platformda kaç farklı
         // listeleme (SKU) varsa hepsi güncel stokla senkron kalır.
-        const targets = [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }];
+        const targets = isListedOn(rootCode, pl.id) ? [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }] : [];
         familyCodes.forEach((c) => {
           if (c === rootCode) return;
           const ownSku = products[c]?.skus?.[pl.id];
@@ -1288,6 +1302,7 @@ async function processNewOrdersAndSync(ordersByPlatform) {
             return r;
           })
         );
+        if (!outcomes.length) return;
         const ok = outcomes.every((o) => o.ok);
         results[pl.id] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
       })
@@ -1572,7 +1587,7 @@ app.post("/api/products/:code/push", requireAuth, async (req, res) => {
   const results = {};
   await Promise.all(
     PLATFORMS.filter((pl) => pl.configured()).map(async (pl) => {
-      const targets = [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }];
+      const targets = isListedOn(rootCode, pl.id) ? [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }] : [];
       familyCodes.forEach((c) => {
         if (c === rootCode) return;
         const ownSku = products[c]?.skus?.[pl.id];
@@ -1585,6 +1600,7 @@ app.post("/api/products/:code/push", requireAuth, async (req, res) => {
           return r;
         })
       );
+      if (!outcomes.length) return;
       const ok = outcomes.every((o) => o.ok);
       results[pl.id] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
     })
@@ -1612,6 +1628,10 @@ app.post("/api/products/:code/push-platform", requireAuth, async (req, res) => {
   await Promise.all(
     targets.map(async (pl) => {
       // Stok artık sadece MERKEZİ stoktan gelir (birleştirilmiş ürünlerde ailenin ortak stoğu).
+      if (!isListedOn(code, pl.id)) {
+        results[pl.id] = { ok: false, message: `Ürün ${pl.name}'da kayıtlı değil (bu platformdan çekilmemiş).` };
+        return;
+      }
       const qty = Number(products[resolveRoot(code)]?.centralStock) || 0;
       const price = p.prices?.[pl.id];
       const sku = skuForPlatform(code, pl.id);
