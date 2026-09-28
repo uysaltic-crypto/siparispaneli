@@ -413,8 +413,12 @@ function platformCodeInfo(id, p, sku) {
   return { label: cfg.label, value, syncSku: productCode && productCode !== sku ? sku : '' };
 }
 
-function platformListingUrl(id, sku) {
-  const q = encodeURIComponent(String(sku || '').trim());
+// Koçtaş sitesi stok koduyla aramada ürünü buluyor; diğer sitelerin aramaları satıcının
+// kendi stok kodunu/barkodunu indekslemediği için ürün ADIYLA arıyoruz (ad yoksa kodla).
+function platformListingUrl(id, sku, name) {
+  const cleanName = String(name || '').trim();
+  const useName = id !== 'koctas' && cleanName && cleanName !== 'İsimsiz ürün';
+  const q = encodeURIComponent(useName ? cleanName : String(sku || '').trim());
   const map = {
     ty: `https://www.trendyol.com/sr?q=${q}`,
     n11: `https://www.n11.com/arama?q=${q}`,
@@ -543,7 +547,7 @@ function renderStock() {
       const cl = platformCodeInfo(pl.id, p, platformSku);
       return `
         <div class="pchip">
-          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
+          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku, p.name)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
             <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
           </div>
           <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
