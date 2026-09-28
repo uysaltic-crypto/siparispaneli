@@ -227,15 +227,24 @@ async function fetchHepsiburadaOrders() {
   const { HB_MERCHANT_ID, HB_ENV } = process.env;
   const hbAuth = hbAuthConfig();
   const host = HB_ENV === "test" ? "oms-external-sit.hepsiburada.com" : "oms-external.hepsiburada.com";
-  const url = `https://${host}/packages/merchantid/${HB_MERCHANT_ID}?timespan=24`;
+  const url = `https://${host}/packages/merchantid/${HB_MERCHANT_ID}`;
 
   try {
-    const resp = await axios.get(url, {
-      auth: hbAuth.auth,
-      headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
-      timeout: 20000,
-    });
-    const raw = Array.isArray(resp.data) ? resp.data : resp.data?.items || resp.data?.Items || [];
+    // Hepsiburada bu uçta limit ve offset parametrelerini ZORUNLU tutuyor
+    // ("Bad Request limit and offset parameters are required") — sayfalayarak çekiyoruz.
+    const raw = [];
+    const limit = 50;
+    for (let page = 0; page < 40; page++) {
+      const resp = await axios.get(url, {
+        auth: hbAuth.auth,
+        params: { timespan: 24, limit, offset: page * limit },
+        headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
+        timeout: 20000,
+      });
+      const batch = Array.isArray(resp.data) ? resp.data : resp.data?.items || resp.data?.Items || resp.data?.packages || [];
+      raw.push(...batch);
+      if (batch.length < limit) break;
+    }
     return { platform: "hb", error: null, orders: raw.map(normalizeHbPackage) };
   } catch (err) {
     const msg =
