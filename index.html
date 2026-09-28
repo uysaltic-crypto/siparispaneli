@@ -559,6 +559,7 @@ function renderStock() {
             <span class="muted">Adet</span>
             <input class="stockcell ${mismatch ? 'mismatch' : ''}" type="number" value="${stockVal}" onchange="updateStock('${p.code}','${pl.id}',this.value)">
           </div>
+          <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyat ve adedi ${pl.name}'a gönder">${pl.name}'a gönder</button>
         </div>`;
     }).join('');
 
@@ -583,7 +584,8 @@ function renderStock() {
             <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
             <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
           </div>
-          <button class="ghost small" onclick="pushProduct('${p.code}')">Gönder</button>
+          <button class="ghost small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
+          <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platform kutusundaki fiyat ve adedi ilgili siteye gönderir">Fiyat+stok gönder</button>
           <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
         </div>
       </div>
@@ -764,6 +766,30 @@ async function updateCentral(barcode, value) {
 async function deleteProduct(barcode) {
   await fetch('/api/products/' + encodeURIComponent(barcode), { method:'DELETE' });
   await loadProducts();
+}
+
+async function pushPlatform(code, platformId) {
+  // Yazılmış ama henüz kaydedilmemiş (change olayı tetiklenmemiş) değer kalmasın diye
+  // önce odaktaki kutudan çık, sonra sunucudaki güncel değerlerle gönder.
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  await new Promise(r => setTimeout(r, 400));
+  toast('Gönderiliyor...');
+  try {
+    const r = await fetch(`/api/products/${encodeURIComponent(code)}/push-platform`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(platformId ? { platform: platformId } : {})
+    });
+    const data = await r.json();
+    if (!data.ok) { toast(data.error || 'Gönderilemedi.'); return; }
+    const entries = Object.entries(data.results || {});
+    const failed = entries.filter(([, res]) => !res.ok);
+    toast(failed.length
+      ? failed.map(([id, res]) => `${platformMeta(id).name}: ${res.message}`).join(' | ')
+      : entries.map(([id]) => `${platformMeta(id).name} ✓`).join(' '));
+  } catch (e) {
+    toast('Bağlantı hatası: ' + e.message);
+  }
+  await loadProducts(); await loadLog();
 }
 
 async function pushProduct(barcode) {
