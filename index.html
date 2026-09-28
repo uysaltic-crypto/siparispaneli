@@ -495,6 +495,27 @@ function getChildren(code) {
   return state.products.filter(p => p.mergedInto === code);
 }
 
+// Tek bir ürünün tek bir platformdaki kutusu (SKU/kod, satış durumu, fiyat, gönder).
+// Hem ana kartta hem de birleşen ürün satırlarında aynı şekilde kullanılır.
+function platformChipHtml(p, pl) {
+  const priceVal = p.prices?.[pl.id] ?? '';
+  const status = p.listingStatus?.[pl.id] || 'satista';
+  const platformSku = p.skus?.[pl.id] || p.code;
+  const cl = platformCodeInfo(pl.id, p, platformSku);
+  return `
+    <div class="pchip">
+      <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku, p.name)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
+        <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
+      </div>
+      <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
+      <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
+        <span class="muted">₺</span>
+        <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
+      </div>
+      <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
+    </div>`;
+}
+
 function renderStock() {
   // Panelde her 30 saniyede bir arka planda otomatik yenileme (loadProducts) çalışıyor
   // ve bu fonksiyonu tekrar çağırıyor. Kullanıcı o an bir ürün kartında bir alanı
@@ -554,24 +575,7 @@ function renderStock() {
           <div class="muted" style="font-size:11px; padding:6px 0;">Bu pazar yerinde yok</div>
         </div>`;
       }
-      const stockVal = p.stocks?.[pl.id] ?? 0;
-      const mismatch = Number(stockVal) !== c;
-      const priceVal = p.prices?.[pl.id] ?? '';
-      const status = p.listingStatus?.[pl.id] || 'satista';
-      const platformSku = p.skus?.[pl.id] || p.code;
-      const cl = platformCodeInfo(pl.id, p, platformSku);
-      return `
-        <div class="pchip">
-          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku, p.name)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
-            <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
-          </div>
-          <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
-          <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
-            <span class="muted">₺</span>
-            <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
-          </div>
-          <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
-        </div>`;
+      return platformChipHtml(p, pl);
     }).join('');
 
     const card = document.createElement('div');
@@ -616,17 +620,21 @@ function mergedChildrenHtml(code) {
   const children = getChildren(code);
   if (!children.length) return '';
   const rows = children.map(child => {
+    const childChips = state.platforms.filter(pl => pl.configured && (child.skus?.[pl.id] || child.productCodes?.[pl.id])).map(pl => platformChipHtml(child, pl)).join('');
     const codes = Object.entries(child.skus || {}).map(([platformId, sku]) => {
       const pl = platformMeta(platformId);
       return `<span class="muted" style="font-family:monospace;">${pl.name}: ${sku}</span>`;
     }).join(' &nbsp;·&nbsp; ');
     return `
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid var(--border, #2a2a2a);">
+      <div style="border-top:1px solid var(--border, #2a2a2a);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 0;">
         <div style="min-width:0; flex:1;">
           <textarea class="pcard-title-input" style="font-size:12px;" rows="1" spellcheck="false" title="Ürün adını değiştir" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="renameProductName('${child.code}', this.value)">${escAttr(child.name)}</textarea>
-          <div style="font-size:11px;">${codes || `<span class="muted">Kendi platform SKU'su yok — ürün kodu: ${child.code}</span>`}</div>
+          ${childChips ? '' : `<div style="font-size:11px;">${codes || `<span class="muted">Kendi platform SKU'su yok — ürün kodu: ${child.code}</span>`}</div>`}
         </div>
         <button class="ghost small" style="white-space:nowrap;" onclick="unmergeProduct('${child.code}')" title="Bu ürünü ana üründen ayır, tekrar ayrı kart olsun">Ayır</button>
+      </div>
+      ${childChips ? `<div class="pcard-platforms" style="padding-bottom:8px;">${childChips}</div>` : ''}
       </div>`;
   }).join('');
   return `
