@@ -397,6 +397,22 @@ function fmtDate(ts) {
   return new Date(Number(ts)).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
 }
 
+// Her platformun kendi terimiyle gösterilen kod: Çiçeksepeti/N11/Koçtaş'ta "Ürün kodu",
+// Trendyol'da "Stok kodu", Hepsiburada'da "SKU". Ürün kodu platformdan çekilmişse o
+// gösterilir (yoksa stok koduna düşer); stok gönderiminde kullanılan kod farklıysa altta ayrıca belirtilir.
+function platformCodeInfo(id, p, sku) {
+  const cfg = {
+    cs: { label: 'Ürün kodu', product: true },
+    n11: { label: 'Ürün kodu', product: true },
+    koctas: { label: 'Ürün kodu', product: true },
+    ty: { label: 'Stok kodu', product: false },
+    hb: { label: 'SKU', product: false },
+  }[id] || { label: 'Stok kodu', product: false };
+  const productCode = cfg.product ? (p.productCodes?.[id] || '') : '';
+  const value = productCode || sku;
+  return { label: cfg.label, value, syncSku: productCode && productCode !== sku ? sku : '' };
+}
+
 function platformListingUrl(id, sku) {
   const q = encodeURIComponent(String(sku || '').trim());
   const map = {
@@ -524,12 +540,13 @@ function renderStock() {
       const priceVal = p.prices?.[pl.id] ?? '';
       const status = p.listingStatus?.[pl.id] || 'satista';
       const platformSku = p.skus?.[pl.id] || p.code;
+      const cl = platformCodeInfo(pl.id, p, platformSku);
       return `
         <div class="pchip">
           <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
             <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
           </div>
-          <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">Stok kodu: ${platformSku}</div>
+          <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
           <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
             <span class="muted">₺</span>
             <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
