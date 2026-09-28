@@ -1611,7 +1611,8 @@ app.post("/api/products/:code/push-platform", requireAuth, async (req, res) => {
   const results = {};
   await Promise.all(
     targets.map(async (pl) => {
-      const qty = p.stocks?.[pl.id] ?? p.centralStock ?? 0;
+      // Stok artık sadece MERKEZİ stoktan gelir (birleştirilmiş ürünlerde ailenin ortak stoğu).
+      const qty = Number(products[resolveRoot(code)]?.centralStock) || 0;
       const price = p.prices?.[pl.id];
       const sku = skuForPlatform(code, pl.id);
       results[pl.id] = await pushListingToPlatform(pl.id, sku, qty, price);
