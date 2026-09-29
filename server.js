@@ -1645,7 +1645,10 @@ const FOLD = { ı: "i", ş: "s", ğ: "g", ü: "u", ö: "o", ç: "c", â: "a", î
 const normName = (t) =>
   String(t || "")
     .toLocaleLowerCase("tr")
-    .replace(/[ışğüöçâîû]/g, (c) => FOLD[c])
+    .normalize("NFD")
+    .replace(/\p{M}+/gu, "") // ayrışık gelen aksan işaretlerini (ş = s + ¸) sil
+    .replace(/[ıİ]/g, "i")
+    .replace(/[ışğüöçâîû]/g, (c) => FOLD[c] || c)
     .replace(/['’`´"]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
@@ -1669,12 +1672,13 @@ function groupBlocked(roots) {
 // ailesi tam bunun için var (stok her SKU'ya ayrı gönderilir). Birebir aynı adlarda ise
 // (büyük olasılıkla renk/beden varyantı) bu izin verilmez.
 function tryAutoMergeGroup(rootsIn, reason, out, allowSamePlatform) {
-  const roots = [...new Set(rootsIn.map(resolveRoot))];
+  // Hiçbir platformda SKU kaydı olmayan ürünler (elle açılmış boş kayıtlar) gruba
+  // katılmaz ama grubun geri kalanının birleşmesini de engellemez.
+  const roots = [...new Set(rootsIn.map(resolveRoot))].filter((r) => familyPlatforms(r).size > 0);
   if (roots.length < 2) return;
   const seen = new Set();
   for (const r of roots) {
     const plats = familyPlatforms(r);
-    if (!plats.size) return; // hiçbir platformda kaydı yok → kanıt yok
     for (const pl of plats) {
       if (seen.has(pl) && !allowSamePlatform) return; // aynı platformda iki ayrı listeleme → farklı ürün olabilir
       seen.add(pl);
@@ -1687,6 +1691,12 @@ function tryAutoMergeGroup(rootsIn, reason, out, allowSamePlatform) {
     out.push({ time: new Date().toISOString(), reason, from, fromName: products[from]?.name || from, to: target, toName: products[target]?.name || target });
     doMerge(from, target, "min");
   });
+}
+
+function sameCore(a, b) {
+  let k = 0;
+  while (k < a.length && k < b.length && a[a.length - 1 - k] === b[b.length - 1 - k]) k++;
+  return k >= 4 && k / a.length >= 0.6 && k / b.length >= 0.6 && a.length - k <= 3 && b.length - k <= 3;
 }
 
 function autoMatchProducts() {
@@ -1736,11 +1746,6 @@ function autoMatchProducts() {
       if (!suffixBuckets.has(key)) suffixBuckets.set(key, []);
       suffixBuckets.get(key).push({ root, toks });
     });
-  const sameCore = (a, b) => {
-    let k = 0;
-    while (k < a.length && k < b.length && a[a.length - 1 - k] === b[b.length - 1 - k]) k++;
-    return k >= 4 && k / a.length >= 0.6 && k / b.length >= 0.6 && a.length - k <= 3 && b.length - k <= 3;
-  };
   suffixBuckets.forEach((list) => {
     if (list.length < 2) return;
     for (let i = 0; i < list.length; i++)
@@ -1779,6 +1784,46 @@ function autoMatchProducts() {
 app.post("/api/products/auto-match", requireAuth, (req, res) => {
   const merged = autoMatchProducts();
   res.json({ ok: true, count: merged.length, merged });
+});
+
+// İki ürün kodunun neden otomatik birleşmediğini açıklar:
+//   /api/products/match-explain?a=KOD1&b=KOD2
+app.get("/api/products/match-explain", requireAuth, (req, res) => {
+  const a = String(req.query.a || "").trim();
+  const b = String(req.query.b || "").trim();
+  if (!products[a] || !products[b]) {
+    return res.json({ ok: false, error: `Ürün bulunamadı: ${!products[a] ? a : ""} ${!products[b] ? b : ""}`.trim() });
+  }
+  const ra = resolveRoot(a);
+  const rb = resolveRoot(b);
+  const info = (code) => {
+    const root = resolveRoot(code);
+    return {
+      code,
+      ad: products[code].name,
+      normalizeAd: normName(products[code].name),
+      birlesikOlduguAnaUrun: products[code].mergedInto || null,
+      ailePlatformSkulari: Object.fromEntries(getFamilyCodes(root).flatMap((c) => Object.entries(products[c].skus || {}).map(([pl, sku]) => [`${pl}:${c}`, sku]))),
+    };
+  };
+  const notes = [];
+  if (ra === rb) notes.push("Bu iki ürün zaten aynı ana ürün altında birleşik.");
+  else {
+    const ta = normName(products[a].name).split(" ").filter(Boolean);
+    const tb = normName(products[b].name).split(" ").filter(Boolean);
+    const sameBag = [...ta].sort().join(" ") === [...tb].sort().join(" ");
+    const sameName = ta.join(" ") === tb.join(" ");
+    const core = ta.length >= 4 && tb.length >= 4 && ta.slice(-3).join(" ") === tb.slice(-3).join(" ") && sameCore(ta, tb);
+    notes.push(`Adlar birebir aynı (normalize): ${sameName ? "evet" : "hayır"} · Aynı sözcükler farklı sırada: ${sameBag && !sameName ? "evet" : "hayır"} · Aynı asıl kısım (marka farklı): ${core ? "evet" : "hayır"}`);
+    if (!sameName && !sameBag && !core) notes.push("Ad kurallarından hiçbiri tutmadı — adlar sözcük olarak yeterince benzemiyor (normalize adlara bak).");
+    const pa = familyPlatforms(ra), pb = familyPlatforms(rb);
+    if (!pa.size) notes.push(`${a} hiçbir platformda SKU kaydına sahip değil → otomatik eşleştirme kanıt bulamıyor ve atlıyor.`);
+    if (!pb.size) notes.push(`${b} hiçbir platformda SKU kaydına sahip değil → otomatik eşleştirme kanıt bulamıyor ve atlıyor.`);
+    const overlap = [...pa].filter((x) => pb.has(x));
+    if (overlap.length) notes.push(`Ortak platform(lar): ${overlap.join(", ")} — adlar birebir aynıysa (varyant ihtimali) birleştirilmez; farklıysa izin verilir.`);
+    if (groupBlocked([ra, rb])) notes.push("Bu çift daha önce elle \"Ayır\" ile ayrılmış → otomatik eşleştirme bir daha birleştirmez.");
+  }
+  res.json({ ok: true, a: info(a), b: info(b), notes });
 });
 
 app.get("/api/products/match-log", requireAuth, (req, res) => {
