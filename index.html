@@ -58,6 +58,10 @@
   .pcard-code-input:focus { border-color:var(--border); background:var(--surface2); color:var(--text); outline:none; }
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .pcard-compete { display:flex; flex-direction:column; gap:5px; min-width:250px; max-width:290px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--bg, transparent); }
+  .pcard-compete .cmp-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; }
+  .pcard-compete textarea { width:100%; font-size:11px; }
+  .pcard-compete input[type=number] { width:64px; }
   .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
   .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
   .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
@@ -610,6 +614,7 @@ function renderStock(force) {
             ${competeBadgeHtml(p)}
           </div>
         </div>
+        ${competeCardHtml(p)}
         <div class="pcard-central">
           <div style="text-align:right;">
             <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
@@ -682,6 +687,66 @@ async function mergeProducts(fromCode, toCode) {
   } catch (e) {
     toast('Birleştirme hatası: ' + e.message);
   }
+}
+
+// Merkezi stoğun yanındaki "Rekabet Analizi" kutusu: rakip linkleri, min/maks fiyat,
+// otomatik fiyatlandırma ve en düşük rakip fiyatına göre kısa analiz. Rekabet
+// sekmesiyle aynı verileri (pricing / competitors) kullanır; id'ler çakışmasın diye
+// kart içindeki alanlar "c" önekiyle (cmin_, cmax_, curls_, cauto_) adlandırılır.
+function competeCardHtml(p) {
+  const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
+  const competitors = p.competitors || [];
+  const prices = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
+  const lowest = prices.length ? Math.min(...prices) : null;
+  const mine = pricing.myPrice != null ? Number(pricing.myPrice) : (p.prices?.ty != null && p.prices.ty !== '' ? Number(p.prices.ty) : null);
+  const errs = competitors.filter(c => c.lastError).length;
+  const lastChecked = competitors.map(c => c.lastCheckedAt).filter(Boolean).sort().pop();
+
+  let analysis = '<span class="muted">Rakip linki ekle, sonra “Kontrol et”.</span>';
+  if (competitors.length && lowest == null) {
+    analysis = `<span class="muted">${errs ? 'Fiyat okunamadı (' + errs + ' hata)' : 'Kontrol bekliyor'}</span>`;
+  } else if (lowest != null) {
+    let diff = '';
+    if (mine != null && mine > 0) {
+      const d = mine - lowest;
+      const pct = (d / lowest) * 100;
+      const cheaper = d <= 0;
+      diff = `<span class="badge ${cheaper ? 'ok' : 'fail'}">${cheaper ? 'en ucuzsun' : 'rakip ' + Math.abs(d).toFixed(2) + ' ₺ ucuz'} (${pct > 0 ? '+' : ''}${pct.toFixed(1)}%)</span>`;
+    }
+    analysis = `<span>En düşük rakip: <b>${lowest.toFixed(2)} ₺</b></span> ${mine != null ? `<span>Senin: <b>${mine.toFixed(2)} ₺</b></span>` : ''} ${diff}`;
+  }
+
+  return `
+    <div class="pcard-compete" onmousedown="event.stopPropagation()">
+      <div class="muted" style="font-size:10px;">REKABET ANALİZİ${competitors.length ? ` · ${competitors.length} rakip` : ''}</div>
+      <div class="cmp-row">${analysis}</div>
+      <textarea id="curls_${escAttr(p.code)}" rows="2" spellcheck="false" placeholder="Her satıra bir rakip ürün linki (Çiçeksepeti vb.)">${escAttr(competitors.map(c => c.url).join('\n'))}</textarea>
+      <div class="cmp-row">
+        <input type="number" step="0.01" placeholder="Min ₺" id="cmin_${escAttr(p.code)}" value="${pricing.minPrice ?? ''}">
+        <input type="number" step="0.01" placeholder="Maks ₺" id="cmax_${escAttr(p.code)}" value="${pricing.maxPrice ?? ''}">
+        <label style="display:flex; align-items:center; gap:3px;" title="Açıksa rakip fiyatına göre Trendyol fiyatı otomatik ayarlanır"><input type="checkbox" id="cauto_${escAttr(p.code)}" ${pricing.autoReprice ? 'checked' : ''}> otomatik</label>
+      </div>
+      <div class="cmp-row">
+        <button class="ghost small" onclick="saveCompeteCard('${p.code}')">Kaydet</button>
+        <button class="small" onclick="repriceNow('${p.code}')" title="Rakip fiyatlarını şimdi çek">Kontrol et</button>
+      </div>
+      ${lastChecked ? `<div class="muted" style="font-size:10px;">Son kontrol: ${new Date(lastChecked).toLocaleString('tr-TR')}</div>` : ''}
+    </div>`;
+}
+
+async function saveCompeteCard(code) {
+  const minPrice = document.getElementById('cmin_' + code).value;
+  const maxPrice = document.getElementById('cmax_' + code).value;
+  const autoReprice = document.getElementById('cauto_' + code).checked;
+  const competitorUrls = document.getElementById('curls_' + code).value.split('\n').map(s => s.trim()).filter(Boolean);
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/pricing`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minPrice, maxPrice, autoReprice, competitorUrls })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); return; }
+  toast('Rekabet ayarları kaydedildi.');
+  await loadProducts();
 }
 
 // Ürün kartında Ana Ürün Kodu'nun yanında gösterilen küçük rekabet özeti.
