@@ -48,6 +48,9 @@
   .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
   .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
   .pcard-title { font-weight:700; }
+  .pcard-title-input { display:block; background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; line-height:1.35; color:var(--text); width:100%; resize:none; overflow:hidden; box-sizing:border-box; }
+  .pcard-title-input:hover { border-color:var(--border); }
+  .pcard-title-input:focus { border-color:var(--border); background:var(--surface2); outline:none; }
   .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
   .pcard-code-row { display:flex; align-items:center; gap:6px; margin-top:1px; }
   .pcard-code-input { background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; font-family:monospace; font-size:11px; color:var(--muted); width:150px; }
@@ -56,20 +59,13 @@
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
   .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
-  .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; position:relative; }
-  .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:4px; }
-  .pchip-dot { width:8px; height:8px; border-radius:50%; flex:none; }
-  .pchip-line { display:flex; align-items:center; gap:5px; font-size:11px; margin-bottom:4px; }
-  .pchip-line input[type=number] { width:60px; font-size:11px; }
-  .status-dot { width:7px; height:7px; border-radius:50%; flex:none; }
-  .status-dot.satista { background:var(--ok); }
-  .status-dot.pasif { background:var(--danger); }
-  .pchip-menu-btn { margin-left:auto; background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:2px 4px; }
-  .pchip-menu-btn:hover { color:var(--text); }
-  .pchip-menu { position:absolute; right:6px; top:28px; z-index:20; background:var(--panel, #181818); border:1px solid var(--border); border-radius:8px; min-width:170px; box-shadow:0 6px 20px rgba(0,0,0,.4); overflow:hidden; }
-  .pchip-menu a, .pchip-menu button { display:block; width:100%; text-align:left; background:none; border:none; color:inherit; text-decoration:none; font-size:12px; padding:8px 12px; cursor:pointer; }
-  .pchip-menu a:hover, .pchip-menu button:hover { background:rgba(255,255,255,.06); }
-  .pchip-menu button.danger { color:var(--danger); }
+  .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
+  .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
+  .pchip-dot { width:8px; height:8px; border-radius:50%; }
+  .pchip input[type=number] { width:70px; }
+  .pchip .status-btn { font-size:10px; padding:2px 8px; border-radius:100px; border:none; cursor:pointer; }
+  .status-btn.satista { background:#34D39918; color:var(--ok); }
+  .status-btn.pasif { background:#F8717118; color:var(--danger); }
   .muted { color:var(--muted); font-size:11px; }
   .amount { font-family:monospace; font-weight:600; }
   #loginScreen { display:flex; align-items:center; justify-content:center; height:100vh; }
@@ -125,6 +121,7 @@
         <div class="tab active" data-tab="orders" onclick="showTab('orders')">Siparişler</div>
         <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
+        <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
         <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
         <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
       </div>
@@ -162,7 +159,6 @@
           <option value="category-asc">Kategoriye göre</option>
         </select>
         <button class="ghost small" onclick="toggleAddForm()">+ Ürün</button>
-        <button class="ghost small" onclick="repriceAllNow()" title="Tüm ürünlerin rakip fiyatlarını şimdi kontrol et">Rekabeti Şimdi Kontrol Et</button>
         <span id="importButtons"></span>
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(event)">
       </div>
@@ -221,6 +217,21 @@
       <div id="matchEmpty" class="empty" style="display:none;">Bu platform için eşleştirilmemiş ürün yok — hepsi eşleşti.</div>
     </div>
 
+    <!-- REKABET -->
+    <div class="panel" id="panel-compete">
+      <p class="muted" style="margin-bottom:10px;">
+        Rakip ürün linkleri resmi bir API değil, herkese açık ürün sayfası okunarak takip edilir — sayfa tasarımı değişirse ayıklama geçici olarak bozulabilir.
+        Rakip fiyatları günde birkaç kez otomatik kontrol edilir; "Şimdi Kontrol Et" ile elle de tetikleyebilirsin.
+      </p>
+      <div class="toolbar">
+        <button class="ghost small" onclick="repriceAllNow()">Tüm Ürünleri Şimdi Kontrol Et</button>
+      </div>
+      <table>
+        <thead><tr><th>Ürün</th><th>Benim Fiyatım (TY)</th><th>En Düşük Rakip</th><th>Min / Maks</th><th>Otomatik</th><th>Rakip Linkleri</th><th></th></tr></thead>
+        <tbody id="competeRows"></tbody>
+      </table>
+      <div id="competeEmpty" class="empty" style="display:none;">Henüz ürün yok. Önce Stok sekmesinden ürün ekle.</div>
+    </div>
   </div>
 </div>
 
@@ -257,13 +268,14 @@ async function login() {
 let polling = null;
 function startPolling() {
   if (polling) return;
-  polling = setInterval(async () => { await refresh(false); await loadProducts(); await loadLog(); }, 30000);
+  polling = setInterval(async () => { await refresh(false); await loadProducts(false); await loadLog(); }, 30000);
 }
 
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'match') loadMatchStatus();
+  if (name === 'compete') renderCompete();
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
 }
 
@@ -466,12 +478,13 @@ function renderOrders(data) {
   });
 }
 
-async function loadProducts() {
+async function loadProducts(force = true) {
   const r = await fetch('/api/products');
   if (r.status === 401) return;
   const data = await r.json();
   state.products = data.products || [];
-  renderStock();
+  renderStock(force);
+  renderCompete(force);
 }
 
 // Sürükle-bırak ile bir ürünün altına birleştirilen (mergedInto dolu) ürünler artık
@@ -482,21 +495,46 @@ function getChildren(code) {
   return state.products.filter(p => p.mergedInto === code);
 }
 
-// Birleştirilmiş bir ailede her platformun verisi, o platforma bağlı SKU'yu taşıyan
-// üyeden okunur (ana ürün ya da altına birleştirilmiş bir ürün olabilir) — böylece
-// tek bir kartta, ailenin tüm platform bağlantıları bir arada gösterilir.
-function platformOwner(rootProduct, platformId) {
-  const members = [rootProduct, ...getChildren(rootProduct.code)];
-  return members.find(m => m.skus?.[platformId]) || rootProduct;
+// Tek bir ürünün tek bir platformdaki kutusu (SKU/kod, satış durumu, fiyat, gönder).
+// Hem ana kartta hem de birleşen ürün satırlarında aynı şekilde kullanılır.
+function platformChipHtml(p, pl, rootCode) {
+  const priceVal = p.prices?.[pl.id] ?? '';
+  const status = p.listingStatus?.[pl.id] || 'satista';
+  const platformSku = p.skus?.[pl.id] || p.code;
+  const cl = platformCodeInfo(pl.id, p, platformSku);
+  // Bu kutu, birleştirilmiş bir alt ürüne mi ait (ana ürünün kendisi değil)? Öyleyse
+  // ayrı bir "BİRLEŞEN ÜRÜNLER" bölümü yapmadan, kutunun içine küçük bir ad satırı ve
+  // "Ayır" bağlantısı ekleyerek hangi ürüne ait olduğunu göster — kutu görünüşte
+  // diğerlerinden farklı değil, sadece hangi ürüne ait olduğu küçük yazıyla belli.
+  const childHead = (rootCode && p.code !== rootCode) ? `
+      <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+        <input class="pcard-title-input" style="font-size:11px; font-weight:600; flex:1; min-width:0;" type="text" value="${escAttr(p.name)}" spellcheck="false" title="Bu birleşen ürünün adını değiştir" onchange="renameProductName('${p.code}', this.value)">
+        <a href="#" class="muted" style="font-size:10px; white-space:nowrap;" onclick="event.preventDefault(); unmergeProduct('${p.code}');" title="Bu ürünü ana üründen ayır">Ayır</a>
+      </div>` : '';
+  return `
+    <div class="pchip">
+      ${childHead}
+      <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, platformSku, p.name)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
+        <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
+      </div>
+      <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
+      <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
+        <span class="muted">₺</span>
+        <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
+      </div>
+      <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
+    </div>`;
 }
 
-function renderStock() {
+function renderStock(force) {
   // Panelde her 30 saniyede bir arka planda otomatik yenileme (loadProducts) çalışıyor
   // ve bu fonksiyonu tekrar çağırıyor. Kullanıcı o an bir ürün kartında bir alanı
   // (fiyat/adet/ürün kodu) düzenliyorsa, henüz kaydetmediği yazı bu yenilemeyle
-  // sessizce silinmesin diye bu döngüde kartları yeniden oluşturmayı atlıyoruz.
+  // sessizce silinmesin diye SADECE o arka plan döngüsünde kartları yeniden oluşturmayı
+  // atlıyoruz. Birleştirme/ayırma/silme gibi kullanıcının doğrudan tetiklediği bir işlem
+  // sonrası (force=true) odak nerede olursa olsun ekran HER ZAMAN güncellenir.
   const active = document.activeElement;
-  if (active && active.closest && active.closest('#stockCards')) return;
+  if (!force && active && active.closest && active.closest('#stockCards')) return;
 
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
   let list = state.products.filter(p => !p.mergedInto);
@@ -536,34 +574,24 @@ function renderStock() {
       ? `<img class="pcard-thumb" src="${p.image}" alt="">`
       : `<div class="pcard-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`;
 
+    const familyMembers = [p, ...getChildren(p.code)];
+    const familyHasAnyListing = familyMembers.some(m => Object.keys(m.skus || {}).length || Object.keys(m.productCodes || {}).length);
     const chips = activePlatforms.map(pl => {
-      const owner = platformOwner(p, pl.id);
-      const uid = `${p.code}__${pl.id}`.replace(/[^a-zA-Z0-9_]/g, '_');
-      const stockVal = owner.stocks?.[pl.id] ?? 0;
-      const priceVal = owner.prices?.[pl.id] ?? '';
-      const status = owner.listingStatus?.[pl.id] || 'satista';
-      const platformSku = owner.skus?.[pl.id] || owner.code;
-      const cl = platformCodeInfo(pl.id, owner, platformSku);
-      const statusLabel = status === 'pasif' ? 'Pasif' : 'Satışta';
-      return `
-        <div class="pchip">
-          <div class="pchip-head">
-            <span class="pchip-dot" style="background:${pl.color}"></span>
-            <a href="${platformListingUrl(pl.id, platformSku, owner.name)}" target="_blank" rel="noopener" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;" title="${pl.name}'da bu ürünü aç">${pl.name} ↗</a>
-            <button class="pchip-menu-btn" onclick="togglePchipMenu(event,'${uid}')" title="İşlemler">⋮</button>
-            <div class="pchip-menu" id="menu_${uid}" hidden>
-              <a href="${platformListingUrl(pl.id, platformSku, owner.name)}" target="_blank" rel="noopener">Pazaryeri Sayfası</a>
-              <button onclick="closePchipMenus(); triggerPull('${pl.id}')">Güncel Durumu Al</button>
-              <button onclick="closePchipMenus(); goToCompetitor('${p.code}')">Rekabet Analizi Ekle</button>
-              <button onclick="closePchipMenus(); document.getElementById('price_${uid}').focus()">Düzenle</button>
-              <button onclick="closePchipMenus(); pushPlatform('${owner.code}','${pl.id}')">Fiyat Güncelle</button>
-              <button onclick="closePchipMenus(); toggleStatus('${owner.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Satışa Aç' : 'Satışı Durdur'}</button>
-              <button class="danger" onclick="closePchipMenus(); unlinkPlatform('${owner.code}','${pl.id}','${pl.name}')">Bağlantıyı Sil</button>
-            </div>
-          </div>
-          <div class="pchip-line"><span class="status-dot ${status}"></span>${statusLabel} - <input id="price_${uid}" type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${owner.code}','${pl.id}',this.value)" placeholder="fiyat">₺</div>
-          <div class="muted" style="font-family:monospace; font-size:10px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''} · Stok: ${stockVal}</div>
+      // Ürün bu pazar yerinden gerçekten çekilmediyse (kendi SKU/ürün kodu yoksa) "Satışta"
+      // gibi göstermeyiz. Hiçbir yerden çekilmemiş elle açılmış ürünlerde eski davranış sürer.
+      const listedMembers = familyMembers.filter(m => m.skus?.[pl.id] || m.productCodes?.[pl.id]);
+      if (familyHasAnyListing && !listedMembers.length) {
+        return `
+        <div class="pchip" style="opacity:.45;">
+          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><span>${pl.name}</span></div>
+          <div class="muted" style="font-size:11px; padding:6px 0;">Bu pazar yerinde yok</div>
         </div>`;
+      }
+      // Hiçbir yerden hiç çekilmemiş (elle açılmış) ürünlerde eski davranış: sadece ana ürünün kutusu.
+      if (!familyHasAnyListing) return platformChipHtml(p, pl, p.code);
+      // Bu platformda ana üründe VE bir/birkaç birleşen üründe kayıt varsa, hepsinin
+      // kutusu ayrı bir "birleşen ürünler" bölümü olmadan aynı sırada yan yana çıkar.
+      return listedMembers.map(m => platformChipHtml(m, pl, p.code)).join('');
     }).join('');
 
     const card = document.createElement('div');
@@ -574,11 +602,12 @@ function renderStock() {
       <div class="pcard-head">
         <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
         ${thumb}
-        <div>
-          <div class="pcard-title">${p.name}</div>
+        <div style="flex:1; min-width:260px;">
+          <textarea class="pcard-title-input" rows="1" spellcheck="false" title="Ürün adı — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" oninput="autoGrow(this)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}" onchange="renameProductName('${p.code}', this.value)">${escAttr(p.name)}</textarea>
           ${p.category ? `<div class="muted" style="font-size:11px;">${p.category}</div>` : ''}
           <div class="pcard-code-row">
             <input class="pcard-code-input" type="text" value="${p.code}" spellcheck="false" title="Ana ürün kodu — değiştirmek için düzenleyip Enter'a bas ya da başka bir yere tıkla" onchange="renameProduct('${p.code}', this.value)">
+            ${competeBadgeHtml(p)}
           </div>
         </div>
         <div class="pcard-central">
@@ -586,57 +615,17 @@ function renderStock() {
             <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
             <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
           </div>
-          <div style="text-align:right;">
-            <div>${competeBadgeHtml(p)}</div>
-            <button class="ghost small" onclick="toggleCompetePanel('${p.code}')" title="Rakip fiyat takibi — bu ayar aileye (birleşen tüm ürünlere) uygulanır">Rekabet Analizi</button>
-          </div>
           <button class="ghost small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
           <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat+stok gönder</button>
           <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
         </div>
       </div>
-      ${competePanelHtml(p)}
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
     `;
     attachDragHandlers(card);
     wrap.appendChild(card);
+    card.querySelectorAll('textarea.pcard-title-input').forEach(autoGrow);
   });
-}
-
-// Bu ana ürünün altına sürükle-bırak ile birleştirilmiş ürünler artık ayrı
-// gösterilmiyor — platform verileri platformOwner() ile tek karta toplanıyor.
-
-let openPchipMenu = null;
-function togglePchipMenu(e, uid) {
-  e.stopPropagation();
-  const el = document.getElementById('menu_' + uid);
-  if (!el) return;
-  const willOpen = el.hidden;
-  closePchipMenus();
-  el.hidden = !willOpen;
-  if (willOpen) openPchipMenu = el;
-}
-function closePchipMenus() {
-  document.querySelectorAll('.pchip-menu').forEach(m => m.hidden = true);
-  openPchipMenu = null;
-}
-document.addEventListener('click', closePchipMenus);
-
-function goToCompetitor(code) {
-  showTab('stock');
-  if (!openCompetePanels.has(code)) { openCompetePanels.add(code); renderStock(); }
-  setTimeout(() => {
-    const el = document.getElementById('urls_' + code);
-    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); }
-  }, 150);
-}
-
-async function unlinkPlatform(code, platformId, platformName) {
-  if (!confirm(`${platformName} bağlantısını bu üründen kaldırmak istediğine emin misin? Stok kodu, fiyat ve durum bilgisi silinecek.`)) return;
-  const r = await fetch(`/api/products/${encodeURIComponent(code)}/unlink/${encodeURIComponent(platformId)}`, { method: 'DELETE' });
-  const data = await r.json();
-  if (!data.ok) { toast(data.error || 'Bağlantı kaldırılamadı.'); return; }
-  await loadProducts();
 }
 
 /* --- Ürün kartlarını sürükleyerek birleştirme --- */
@@ -707,6 +696,39 @@ function competeBadgeHtml(p) {
   const myPrice = p.pricing?.myPrice;
   const ok = myPrice != null && myPrice <= lowestVal;
   return `<span class="badge ${ok ? 'ok' : 'fail'}" title="En düşük rakip fiyatı">${ok ? 'en ucuz sensin' : 'rakip'}: ${lowestVal.toFixed(2)} ₺</span>`;
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 2 + 'px';
+}
+
+function escAttr(v) {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function renameProductName(code, nameRaw) {
+  const name = (nameRaw || '').trim();
+  const current = state.products.find(p => p.code === code);
+  if (!name || (current && current.name === name)) { renderStock(); return; }
+  const resp = await fetch('/api/products', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ barcode: code, name })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ürün adı değiştirilemedi.'); renderStock(); return; }
+  toast('Ürün adı güncellendi.');
+  await loadProducts();
+}
+
+async function unmergeProduct(code) {
+  const child = state.products.find(p => p.code === code);
+  if (!confirm(`"${child ? child.name : code}" ürününü ana üründen ayırmak istiyor musun?\n\nTekrar ayrı bir kart olacak, kendi platform kodları korunacak. Merkezi stokları ayrı takip edilir.`)) return;
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/unmerge`, { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
+  toast('Ürün ayrıldı.');
+  await loadProducts();
 }
 
 async function renameProduct(oldCode, newCodeRaw) {
@@ -817,43 +839,53 @@ async function pushProduct(barcode) {
   await loadProducts(); await loadLog();
 }
 
-const openCompetePanels = new Set();
-function toggleCompetePanel(code) {
-  if (openCompetePanels.has(code)) openCompetePanels.delete(code); else openCompetePanels.add(code);
-  renderStock();
-}
+function renderCompete(force) {
+  // Aynı sebep: rakip link kutusuna (ya da min/maks fiyat/otomatik fiyatlandırma
+  // kutucuğuna) yazı yazarken 30 saniyelik arka plan yenilemesi araya girip henüz
+  // "Kaydet"e basılmamış içeriği sunucudaki eski haliyle ezmesin diye SADECE o arka
+  // plan döngüsünde bu tabloyu atlıyoruz — kullanıcının kendi tetiklediği bir işlem
+  // sonrasında (force=true) odak nerede olursa olsun tablo HER ZAMAN güncellenir.
+  const activeCompete = document.activeElement;
+  if (!force && activeCompete && activeCompete.id && /^(urls_|min_|max_|auto_)/.test(activeCompete.id)) return;
 
-// Rakip fiyat takibi ve otomatik fiyatlandırma ayarı SADECE ana üründe (aile
-// kökünde) tutulur ve altına birleştirilmiş tüm ürünler için de geçerli sayılır —
-// bu yüzden panel sadece merkezi stoğun yanındaki "Rekabet Analizi" ile açılır,
-// birleşen ürünlerin kendi kartı yoktur zaten.
-function competePanelHtml(p) {
-  if (!openCompetePanels.has(p.code)) return '';
-  const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
-  const competitors = p.competitors || [];
-  const linkList = competitors.map(c => {
-    const status = c.lastError ? `<span style="color:var(--danger)">hata: ${c.lastError}</span>` : (c.lastPrice ? `${c.lastPrice.toFixed(2)} ₺` : 'kontrol bekliyor');
-    return `<div class="muted" style="font-size:11px; word-break:break-all;">${c.url}<br>${status}</div>`;
-  }).join('<hr style="border-color:var(--border); margin:4px 0;">');
-  const childCount = getChildren(p.code).length;
-  return `
-    <div class="compete-panel" style="margin-top:10px; padding:10px; border:1px solid var(--border); border-radius:8px;">
-      <div class="muted" style="font-size:10px; margin-bottom:6px;">REKABET ANALİZİ${childCount ? ` — bu ayar, altına birleştirilmiş ${childCount} ürünü de kapsar` : ''}</div>
-      <p class="muted" style="font-size:11px; margin:0 0 8px;">Rakip linkleri herkese açık ürün sayfasından okunur; sayfa tasarımı değişirse ayıklama geçici olarak bozulabilir. Fiyatlar günde birkaç kez otomatik kontrol edilir.</p>
-      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:6px; font-size:11px;">
-        <span>Benim fiyatım (TY + HB): <b>${pricing.myPrice != null ? pricing.myPrice.toFixed(2) + ' ₺' : '-'}</b></span>
+  const tbody = document.getElementById('competeRows');
+  document.getElementById('competeEmpty').style.display = state.products.length ? 'none' : 'block';
+  tbody.innerHTML = '';
+  state.products.forEach(p => {
+    const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
+    const competitors = p.competitors || [];
+    const lowest = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
+    const lowestVal = lowest.length ? Math.min(...lowest) : null;
+    const badge = lowestVal != null
+      ? (pricing.myPrice != null && pricing.myPrice <= lowestVal
+          ? `<span class="badge ok">${lowestVal.toFixed(2)} ₺ (en ucuz sensin)</span>`
+          : `<span class="badge fail">${lowestVal.toFixed(2)} ₺</span>`)
+      : '<span class="muted">veri yok</span>';
+    const linkList = competitors.map(c => {
+      const status = c.lastError ? `<span style="color:var(--danger)">hata: ${c.lastError}</span>` : (c.lastPrice ? `${c.lastPrice.toFixed(2)} ₺` : 'kontrol bekliyor');
+      return `<div class="muted" style="font-size:11px; word-break:break-all;">${c.url}<br>${status}</div>`;
+    }).join('<hr style="border-color:var(--border); margin:4px 0;">');
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><b>${p.name}</b><div class="muted" style="font-family:monospace;">${p.code}</div></td>
+      <td>${pricing.myPrice != null ? pricing.myPrice.toFixed(2) + ' ₺' : '-'}</td>
+      <td>${badge}</td>
+      <td>
         <input type="number" step="0.01" placeholder="Min" id="min_${p.code}" value="${pricing.minPrice ?? ''}" style="width:70px;">
         <input type="number" step="0.01" placeholder="Maks" id="max_${p.code}" value="${pricing.maxPrice ?? ''}" style="width:70px;">
-        <label style="display:flex; align-items:center; gap:4px;"><input type="checkbox" id="auto_${p.code}" ${pricing.autoReprice ? 'checked' : ''}> Otomatik fiyatlandır</label>
-      </div>
-      <textarea id="urls_${p.code}" rows="2" style="width:100%; font-size:11px;" placeholder="Her satıra bir rakip ürün linki">${competitors.map(c => c.url).join('\n')}</textarea>
-      ${linkList ? `<div style="margin-top:6px;">${linkList}</div>` : ''}
-      <div style="margin-top:8px; display:flex; gap:8px;">
+      </td>
+      <td><input type="checkbox" id="auto_${p.code}" ${pricing.autoReprice ? 'checked' : ''}></td>
+      <td style="min-width:220px;">
+        <textarea id="urls_${p.code}" rows="2" style="width:100%; font-size:11px;" placeholder="Her satıra bir rakip ürün linki">${competitors.map(c => c.url).join('\n')}</textarea>
+        <div>${linkList}</div>
+      </td>
+      <td style="white-space:nowrap;">
         <button class="ghost small" onclick="saveCompete('${p.code}')">Kaydet</button>
         <button class="small" onclick="repriceNow('${p.code}')">Şimdi Kontrol Et</button>
-        <button class="ghost small" onclick="toggleCompetePanel('${p.code}')">Kapat</button>
-      </div>
-    </div>`;
+      </td>`;
+    tbody.appendChild(tr);
+  });
 }
 
 async function saveCompete(code) {
