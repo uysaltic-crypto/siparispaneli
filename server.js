@@ -1639,7 +1639,16 @@ function persistMatchBlocked() {
   saveJSON("match-blocked.json", Array.from(matchBlocked));
 }
 const pairKey = (a, b) => [String(a), String(b)].sort().join("|||");
-const normName = (t) => String(t || "").toLocaleLowerCase("tr").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const FOLD = { ı: "i", ş: "s", ğ: "g", ü: "u", ö: "o", ç: "c", â: "a", î: "i", û: "u" };
+// "Gazlı Piston 2'li" ve "Gazli Piston 2li" aynı çıksın: küçük harf + Türkçe karakter
+// katlama + kesme/tırnak işaretlerini silme + diğer işaretleri boşluğa çevirme.
+const normName = (t) =>
+  String(t || "")
+    .toLocaleLowerCase("tr")
+    .replace(/[ışğüöçâîû]/g, (c) => FOLD[c])
+    .replace(/['’`´"]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 
 function familyPlatforms(root) {
   const set = new Set();
@@ -1707,6 +1716,32 @@ function autoMatchProducts() {
     });
   names.forEach((list) => {
     if (list.length > 1) tryAutoMergeGroup(list, "aynı ürün adı", out);
+  });
+
+  // Kural 3: adların sonu (asıl ürün tanımı) aynı, sadece başındaki marka/model
+  // kelimeleri farklı — ör. "Nsp Gazlı Piston Montaj Aparatı 2'li" ile
+  // "Kalkan Kapak Gazli Piston Montaj Aparati 2li". Renk/beden gibi varyantlar
+  // genelde adın ortasında/sonunda farklılaştığı için bu kurala takılmaz.
+  const suffixBuckets = new Map();
+  Object.keys(products)
+    .filter((c) => !products[c].mergedInto)
+    .forEach((root) => {
+      const toks = normName(products[root].name).split(" ").filter(Boolean);
+      if (toks.length < 4 || toks[0] === "isimsiz") return;
+      const key = toks.slice(-3).join(" ");
+      if (!suffixBuckets.has(key)) suffixBuckets.set(key, []);
+      suffixBuckets.get(key).push({ root, toks });
+    });
+  const sameCore = (a, b) => {
+    let k = 0;
+    while (k < a.length && k < b.length && a[a.length - 1 - k] === b[b.length - 1 - k]) k++;
+    return k >= 4 && k / a.length >= 0.6 && k / b.length >= 0.6 && a.length - k <= 3 && b.length - k <= 3;
+  };
+  suffixBuckets.forEach((list) => {
+    if (list.length < 2) return;
+    for (let i = 0; i < list.length; i++)
+      for (let j = i + 1; j < list.length; j++) if (!sameCore(list[i].toks, list[j].toks)) return;
+    tryAutoMergeGroup(list.map((x) => x.root), "adın asıl kısmı aynı (marka/model farklı)", out);
   });
 
   if (out.length) {
