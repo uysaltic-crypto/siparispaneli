@@ -227,7 +227,11 @@
 
     <!-- EŞLEŞTİRME -->
     <div class="panel" id="panel-match">
-      <p class="muted" style="margin-bottom:10px;">Barkodu aynı olan ürünler otomatik eşleşir. Burada, henüz bir platforma özel SKU'su tanımlanmamış Ana Ürünleri görüp onaylayabilir ya da farklı bir SKU girebilirsin.</p>
+      <div class="toolbar" style="justify-content:space-between;">
+        <p class="muted" style="margin:0; max-width:760px;">Eşleştirme otomatik: ürün çekme/içe aktarma sonrası ve her yenilemede, aynı SKU/barkodu ya da aynı adı taşıyan ve farklı platformlardan gelen kayıtlar tek Ana Ürün altında birleştirilir. Aşağıda, bir platformda henüz karşılığı bulunamayanlar listelenir; istersen elle SKU girebilirsin.</p>
+        <button class="small" id="autoMatchBtn" onclick="runAutoMatch()">Şimdi Otomatik Eşleştir</button>
+      </div>
+      <div id="matchLogBox" style="display:none; margin:12px 0; border:1px solid var(--border); border-radius:8px; overflow:hidden;"></div>
       <div id="matchTabs" class="tabs" style="margin-bottom:14px;"></div>
       <table>
         <thead><tr><th>Ana Ürün</th><th>Varsayılan SKU (ürün koduyla aynı)</th><th>Bu platform için SKU</th><th></th></tr></thead>
@@ -315,6 +319,39 @@ async function loadMatchStatus() {
   }).join('');
 
   renderMatchRows();
+  loadMatchLog();
+}
+
+async function loadMatchLog() {
+  const box = document.getElementById('matchLogBox');
+  try {
+    const r = await fetch('/api/products/match-log');
+    if (r.status === 401) return;
+    const data = await r.json();
+    const log = (data.log || []).slice(0, 8);
+    if (!log.length) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    box.innerHTML = '<div class="muted" style="padding:8px 12px; border-bottom:1px solid var(--border);">Son otomatik eşleştirmeler (yanlışsa Stok sekmesinde ürünü "Ayır" — bir daha birleştirilmez)</div>' +
+      log.map(e => `<div style="padding:8px 12px; border-bottom:1px solid var(--border); font-size:13px;">
+        <b>${e.fromName}</b> → <b>${e.toName}</b>
+        <span class="muted"> · ${e.reason} · ${fmtDate(new Date(e.time).getTime())}</span></div>`).join('');
+  } catch (e) { box.style.display = 'none'; }
+}
+
+async function runAutoMatch() {
+  const btn = document.getElementById('autoMatchBtn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/products/auto-match', { method: 'POST' });
+    const data = await r.json();
+    toast(data.count ? `${data.count} ürün otomatik eşleştirildi.` : 'Eşleştirilecek yeni ürün bulunamadı.');
+    await loadProducts();
+    await loadMatchStatus();
+  } catch (e) {
+    toast('Eşleştirme hatası: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function setMatchPlatform(id) {
@@ -1067,7 +1104,7 @@ async function triggerPull(platform) {
       toast(`${pm.name} hata: ${result.error || 'bilinmeyen hata'}`);
       return;
     }
-    toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi).`);
+    toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi${result.autoMatched ? `, ${result.autoMatched} otomatik eşleşti` : ''}).`);
     loadProducts();
   } catch (e) {
     toast(`${pm.name} bağlantı hatası: ${e.message}`);
@@ -1176,7 +1213,7 @@ async function loadBackupStatus() {
   warn.innerHTML = '';
   btn.disabled = false;
   const lb = data.lastBackup || {};
-  let text = `Otomatik yedekleme: ${data.intervalHours} saatte bir. `;
+  let text = data.autoEnabled ? `Otomatik yedekleme: ${data.intervalHours} saatte bir. ` : 'Yedekleme manuel: "Şimdi Yedekle" ile alınır. ';
   text += lb.at ? `Son başarılı yedek: ${fmtDate(new Date(lb.at).getTime())}.` : 'Henüz başarılı bir yedekleme yapılmadı.';
   if (lb.error) text += ` Son deneme hata verdi: ${lb.error}`;
   line.textContent = text;
