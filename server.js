@@ -1407,6 +1407,11 @@ async function refreshAll() {
   } catch (e) {
     errors.push("Stok senkron hatası: " + e.message);
   }
+  try {
+    autoMatchProducts();
+  } catch (e) {
+    errors.push("Otomatik eşleştirme hatası: " + e.message);
+  }
 
   cache = { fetchedAt: new Date().toISOString(), orders: merged, errors, sync };
   return cache;
@@ -1455,6 +1460,7 @@ app.get("/api/products/match-status", requireAuth, (req, res) => {
   const status = {};
   PLATFORMS.filter((pl) => pl.configured()).forEach((pl) => {
     status[pl.id] = Object.entries(products)
+      .filter(([code]) => !getFamilyCodes(code).some((c) => products[c]?.skus?.[pl.id]))
       .filter(([, p]) => !p.skus?.[pl.id])
       .map(([code, p]) => ({ code, name: p.name, defaultSku: code }));
   });
@@ -1515,6 +1521,12 @@ app.post("/api/products/:code/unmerge", requireAuth, (req, res) => {
   const p = products[req.params.code];
   if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
   if (!p.mergedInto) return res.status(400).json({ ok: false, error: "Bu ürün zaten birleştirilmemiş." });
+  // Kullanıcı bilerek ayırdı → otomatik eşleştirme bu ürünü eski ailesiyle tekrar birleştirmesin.
+  const oldRoot = resolveRoot(req.params.code);
+  getFamilyCodes(oldRoot).forEach((c) => {
+    if (c !== req.params.code) matchBlocked.add(pairKey(req.params.code, c));
+  });
+  persistMatchBlocked();
   p.mergedInto = null;
   persistProducts();
   res.json({ ok: true, product: { code: req.params.code, ...p } });
@@ -1579,23 +1591,139 @@ app.post("/api/products/merge", requireAuth, (req, res) => {
     return res.status(400).json({ ok: false, error: "Bu ürünler zaten aynı ana ürün altında birleşik." });
   }
 
-  // Reparent etmeden ÖNCE, birleşecek iki ailenin (from'un kendi alt ürünleri
-  // varsa onlar dahil, to'nun mevcut ailesi dahil) merkezi stoklarının en
-  // yükseğini bul — birleştirme sonrası tüm aile bu değere eşitlenecek.
-  const combinedCodesBeforeMerge = [...new Set([...getFamilyCodes(from), ...getFamilyCodes(newRoot)])];
-  const unified = Math.max(...combinedCodesBeforeMerge.map((c) => Number(products[c]?.centralStock) || 0), 0);
-
-  src.mergedInto = newRoot;
-
-  // Ana ürün için resim/rekabet ayarı tanımlı değilse alt üründen bilgi amaçlı devral
-  // (bu bir "kayıp" değil, sadece ana kartta gösterilecek varsayılanı doldurmak).
-  if (!dst.image && src.image) dst.image = src.image;
-  if ((!dst.competitors || !dst.competitors.length) && src.competitors?.length) dst.competitors = src.competitors;
-
-  propagateCentralStock(newRoot, unified);
+  doMerge(from, to, "max");
 
   persistProducts();
   res.json({ ok: true, product: { code: newRoot, ...products[newRoot] }, familyCodes: getFamilyCodes(newRoot) });
+});
+
+// Birleştirme çekirdeği (elle birleştirme ve otomatik eşleştirme ortak kullanır).
+// `from` silinmez; mergedInto ile `to`'nun ailesine bağlanır. Merkezi stok tüm aile
+// için tek değere eşitlenir: elle birleştirmede en yüksek ("max"), otomatik
+// eşleştirmede aşırı satışı önlemek için en düşük ("min").
+function doMerge(from, to, stockMode) {
+  const src = products[from];
+  const dst = products[to];
+  const newRoot = resolveRoot(to);
+  const combined = [...new Set([...getFamilyCodes(from), ...getFamilyCodes(newRoot)])];
+  const stocks = combined.map((c) => Number(products[c]?.centralStock) || 0);
+  const unified = stockMode === "min" ? Math.min(...stocks) : Math.max(...stocks, 0);
+
+  src.mergedInto = newRoot;
+  if (!dst.image && src.image) dst.image = src.image;
+  if ((!dst.competitors || !dst.competitors.length) && src.competitors?.length) dst.competitors = src.competitors;
+  propagateCentralStock(newRoot, unified);
+  return newRoot;
+}
+
+/* ------------------------------------------------------------------
+   OTOMATİK EŞLEŞTİRME
+   Farklı platformlardan gelen ayrı kayıtlar, aşağıdaki iki kanıttan biri varsa
+   kendiliğinden tek Ana Ürün altında birleştirilir:
+     1) Aynı SKU/barkod dizesi (bir ürünün kodu ya da herhangi bir platformdaki
+        SKU'su, başka bir ürününkiyle aynı),
+     2) Aynı (normalize edilmiş) ürün adı — en az 12 karakter.
+   Güvenlik kuralları: birleşecek ürünlerin platformları birbirinden AYRI olmalı
+   (aynı platformda iki ayrı listeleme varsa farklı ürün/varyant sayılır ve
+   dokunulmaz); hiçbir platformda kaydı olmayan ürünler atlanır; kullanıcının
+   "Ayır" dediği çiftler bir daha otomatik birleştirilmez. Her birleştirme
+   günlüğe yazılır ve panelden tek tıkla geri alınabilir.
+------------------------------------------------------------------ */
+let matchLog = loadJSON("match-log.json", []);
+let matchBlocked = new Set(loadJSON("match-blocked.json", []));
+function persistMatchLog() {
+  matchLog = matchLog.slice(-100);
+  saveJSON("match-log.json", matchLog);
+}
+function persistMatchBlocked() {
+  saveJSON("match-blocked.json", Array.from(matchBlocked));
+}
+const pairKey = (a, b) => [String(a), String(b)].sort().join("|||");
+const normName = (t) => String(t || "").toLocaleLowerCase("tr").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+function familyPlatforms(root) {
+  const set = new Set();
+  getFamilyCodes(root).forEach((c) => Object.keys(products[c]?.skus || {}).forEach((pl) => set.add(pl)));
+  return set;
+}
+
+function groupBlocked(roots) {
+  for (let i = 0; i < roots.length; i++)
+    for (let j = i + 1; j < roots.length; j++)
+      for (const a of getFamilyCodes(roots[i]))
+        for (const b of getFamilyCodes(roots[j])) if (matchBlocked.has(pairKey(a, b))) return true;
+  return false;
+}
+
+function tryAutoMergeGroup(rootsIn, reason, out) {
+  const roots = [...new Set(rootsIn.map(resolveRoot))];
+  if (roots.length < 2) return;
+  const seen = new Set();
+  for (const r of roots) {
+    const plats = familyPlatforms(r);
+    if (!plats.size) return; // hiçbir platformda kaydı yok → kanıt yok
+    for (const pl of plats) {
+      if (seen.has(pl)) return; // aynı platformda iki ayrı listeleme → farklı ürün olabilir
+      seen.add(pl);
+    }
+  }
+  if (groupBlocked(roots)) return;
+  roots.sort((a, b) => familyPlatforms(b).size - familyPlatforms(a).size);
+  const target = roots[0];
+  roots.slice(1).forEach((from) => {
+    out.push({ time: new Date().toISOString(), reason, from, fromName: products[from]?.name || from, to: target, toName: products[target]?.name || target });
+    doMerge(from, target, "min");
+  });
+}
+
+function autoMatchProducts() {
+  const out = [];
+  const roots = Object.keys(products).filter((c) => !products[c].mergedInto);
+
+  // Kural 1: aynı SKU/barkod dizesi
+  const ids = new Map();
+  roots.forEach((root) =>
+    getFamilyCodes(root).forEach((c) => {
+      const vals = [c, ...Object.values(products[c].skus || {})].map((x) => String(x).trim().toLowerCase()).filter((x) => x.length >= 4);
+      new Set(vals).forEach((id) => {
+        if (!ids.has(id)) ids.set(id, new Set());
+        ids.get(id).add(root);
+      });
+    })
+  );
+  ids.forEach((set) => {
+    if (set.size > 1) tryAutoMergeGroup([...set], "aynı SKU/barkod", out);
+  });
+
+  // Kural 2: aynı ürün adı
+  const names = new Map();
+  Object.keys(products)
+    .filter((c) => !products[c].mergedInto)
+    .forEach((root) => {
+      const n = normName(products[root].name);
+      if (n.length < 12 || n.startsWith("isimsiz")) return;
+      if (!names.has(n)) names.set(n, []);
+      names.get(n).push(root);
+    });
+  names.forEach((list) => {
+    if (list.length > 1) tryAutoMergeGroup(list, "aynı ürün adı", out);
+  });
+
+  if (out.length) {
+    persistProducts();
+    matchLog.push(...out);
+    persistMatchLog();
+  }
+  return out;
+}
+
+app.post("/api/products/auto-match", requireAuth, (req, res) => {
+  const merged = autoMatchProducts();
+  res.json({ ok: true, count: merged.length, merged });
+});
+
+app.get("/api/products/match-log", requireAuth, (req, res) => {
+  res.json({ log: matchLog.slice(-50).reverse() });
 });
 
 // Ortak birleştirme mantığı: hem Excel/CSV içe aktarma hem de "Siteden Çek" (API)
@@ -1636,7 +1764,8 @@ app.post("/api/products/import", requireAuth, (req, res) => {
     return res.status(400).json({ ok: false, error: "Geçersiz istek." });
   }
   const result = mergeStockRows(platform, rows);
-  res.json({ ok: true, ...result });
+  const autoMatched = autoMatchProducts().length;
+  res.json({ ok: true, ...result, autoMatched });
 });
 
 // Siteden çekme: ilgili platformun API'sinden mevcut stok/ürün listesini alıp
@@ -1651,7 +1780,8 @@ app.post("/api/products/pull", requireAuth, async (req, res) => {
   const result = await pl.fetchStock();
   if (result.error) return res.status(502).json({ ok: false, error: result.error });
   const merged = mergeStockRows(platform, result.rows);
-  res.json({ ok: true, ...merged, total: result.rows.length });
+  const autoMatched = autoMatchProducts().length;
+  res.json({ ok: true, ...merged, total: result.rows.length, autoMatched });
 });
 
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
@@ -1805,6 +1935,9 @@ const GOOGLE_KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE || "";
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS || 24);
 const BACKUP_KEEP_COUNT = Number(process.env.BACKUP_KEEP_COUNT || 30);
+// Şimdilik yedekleme MANUEL: sadece panelden "Şimdi Yedekle" ile alınır.
+// Otomatik zamanlamayı tekrar açmak için .env'e BACKUP_AUTO=true ekle.
+const BACKUP_AUTO = String(process.env.BACKUP_AUTO || "false").toLowerCase() === "true";
 
 /* --- OAuth ile bağlantı (önerilen yöntem) ---
    Servis hesaplarının kendi depolama kotası olmadığı için normal (Workspace
@@ -2101,6 +2234,7 @@ app.get("/api/backup/status", requireAuth, (req, res) => {
     oauthAvailable: oauthConfigured(),
     oauthConnected: oauthReady(),
     lastBackup,
+    autoEnabled: BACKUP_AUTO,
     intervalHours: BACKUP_INTERVAL_HOURS,
   });
 });
@@ -2167,10 +2301,13 @@ app.listen(PORT, () => {
 
   // Google Drive yedeklemesi (varsayılan: günde bir). Yapılandırma eksikse sessizce atlanır.
   // Kurulumun doğru çalıştığını hemen görebilmek için 2 dakika sonra bir deneme yedeklemesi de yapılır.
-  if (driveConfigured()) {
-    setTimeout(() => runScheduledBackup(), 2 * 60 * 1000);
+  // Şimdilik kapalı (BACKUP_AUTO=true ile açılır); yedekleme panelden elle alınır.
+  if (BACKUP_AUTO) {
+    if (driveConfigured()) {
+      setTimeout(() => runScheduledBackup(), 2 * 60 * 1000);
+    }
+    setInterval(() => {
+      runScheduledBackup();
+    }, Math.max(BACKUP_INTERVAL_HOURS, 1) * 60 * 60 * 1000);
   }
-  setInterval(() => {
-    runScheduledBackup();
-  }, Math.max(BACKUP_INTERVAL_HOURS, 1) * 60 * 60 * 1000);
 });
