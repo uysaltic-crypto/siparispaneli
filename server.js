@@ -772,10 +772,11 @@ function csConfigured() {
 function csCodePrefix() {
   return (process.env.CS_CODE_PREFIX !== undefined ? process.env.CS_CODE_PREFIX : "kcm").trim().toLowerCase();
 }
-function csCodeAllowed(code) {
+// Birden fazla kod verilebilir (stok kodu, ürün kodu): herhangi biri önekle başlıyorsa kabul edilir.
+function csCodeAllowed(...codes) {
   const prefix = csCodePrefix();
   if (!prefix) return true;
-  return String(code || "").trim().toLowerCase().startsWith(prefix);
+  return codes.some((c) => String(c || "").trim().toLowerCase().startsWith(prefix));
 }
 
 function csHost() {
@@ -850,18 +851,25 @@ async function fetchStockCiceksepeti() {
   let page = 1;
   let totalCount = Infinity;
   let fetchedCount = 0; // filtreden ÖNCE çekilen ürün sayısı (döngünün bitişini bununla takip ediyoruz)
+  const skippedSamples = []; // filtreye takılan ürünlerden birkaç örnek kod (teşhis için)
+  let firstBodyKeys = null;
   while (fetchedCount < totalCount && page < 200) {
     try {
       if (page > 1) await sleep(5200); // "5 saniyede 1 farklı istek" sınırına takılmamak için
       const resp = await axios.get(url, { headers: csHeaders(), params: { Page: page, PageSize: 60 }, timeout: 20000 });
       const products = resp.data?.products || resp.data?.Products || [];
+      if (page === 1 && resp.data && typeof resp.data === "object") firstBodyKeys = Object.keys(resp.data).join(", ");
       totalCount = Number(resp.data?.totalCount ?? resp.data?.TotalCount ?? products.length);
       fetchedCount += products.length;
       products.forEach((it) => {
         const barcode = String(it.stockCode || it.StockCode || "").trim();
-        if (!barcode || !csCodeAllowed(barcode)) return;
-        const price = Number(it.salesPrice ?? it.SalesPrice ?? 0) || undefined;
         const productCode = it.mainProductCode || it.MainProductCode || undefined; // Çiçeksepeti'nde "Ürün Kodu"
+        if (!barcode) return;
+        if (!csCodeAllowed(barcode, productCode)) {
+          if (skippedSamples.length < 5) skippedSamples.push(`${barcode}${productCode ? " / " + productCode : ""}`);
+          return;
+        }
+        const price = Number(it.salesPrice ?? it.SalesPrice ?? 0) || undefined;
         rows.push({
           barcode,
           stock: Number(it.stockQuantity ?? it.StockQuantity ?? 0),
@@ -885,6 +893,24 @@ async function fetchStockCiceksepeti() {
       // tüm listeyi boşa düşürmek yerine "şimdilik bu kadarı geldi" demek daha iyi.
       return { platform: "cs", error: msg, rows };
     }
+  }
+  // 0 ürünle bitti: sebebini kullanıcıya açıkça söyle (sessizce "0 ürün" dönme).
+  if (!rows.length) {
+    if (fetchedCount > 0) {
+      return {
+        platform: "cs",
+        error:
+          `Çiçeksepeti'nden ${fetchedCount} ürün geldi ama hiçbirinin stok kodu/ürün kodu "${csCodePrefix()}" ile başlamıyor. ` +
+          `Örnek kodlar (stok kodu / ürün kodu): ${skippedSamples.join(", ")}. ` +
+          `Önek farklıysa .env'de CS_CODE_PREFIX değerini değiştir, filtreyi kapatmak için CS_CODE_PREFIX= (boş) bırak.`,
+        rows,
+      };
+    }
+    return {
+      platform: "cs",
+      error: `Çiçeksepeti ürün listesi boş döndü (yanıt alanları: ${firstBodyKeys || "yok"}). Satıcı ID / API anahtarını ve CS_ENV (test/canlı) ayarını kontrol et.`,
+      rows,
+    };
   }
   return { platform: "cs", error: null, rows };
 }
