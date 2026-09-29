@@ -849,12 +849,14 @@ async function fetchStockCiceksepeti() {
   const rows = [];
   let page = 1;
   let totalCount = Infinity;
-  while (rows.length < totalCount && page < 200) {
+  let fetchedCount = 0; // filtreden ÖNCE çekilen ürün sayısı (döngünün bitişini bununla takip ediyoruz)
+  while (fetchedCount < totalCount && page < 200) {
     try {
       if (page > 1) await sleep(5200); // "5 saniyede 1 farklı istek" sınırına takılmamak için
       const resp = await axios.get(url, { headers: csHeaders(), params: { Page: page, PageSize: 60 }, timeout: 20000 });
       const products = resp.data?.products || resp.data?.Products || [];
       totalCount = Number(resp.data?.totalCount ?? resp.data?.TotalCount ?? products.length);
+      fetchedCount += products.length;
       products.forEach((it) => {
         const barcode = String(it.stockCode || it.StockCode || "").trim();
         if (!barcode || !csCodeAllowed(barcode)) return;
