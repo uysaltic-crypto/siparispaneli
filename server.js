@@ -851,7 +851,7 @@ async function fetchStockCiceksepeti() {
   let page = 1;
   let totalCount = Infinity;
   let fetchedCount = 0; // filtreden ÖNCE çekilen ürün sayısı (döngünün bitişini bununla takip ediyoruz)
-  const skippedSamples = []; // filtreye takılan ürünlerden birkaç örnek kod (teşhis için)
+  let firstSkippedItem = null; // filtreye takılan ilk ürün (teşhis için tüm alanları gösterilir)
   let firstBodyKeys = null;
   while (fetchedCount < totalCount && page < 200) {
     try {
@@ -865,8 +865,11 @@ async function fetchStockCiceksepeti() {
         const barcode = String(it.stockCode || it.StockCode || "").trim();
         const productCode = it.mainProductCode || it.MainProductCode || undefined; // Çiçeksepeti'nde "Ürün Kodu"
         if (!barcode) return;
-        if (!csCodeAllowed(barcode, productCode)) {
-          if (skippedSamples.length < 5) skippedSamples.push(`${barcode}${productCode ? " / " + productCode : ""}`);
+        // Önek stok kodunda ya da ürün kodunda değilse, ürünün diğer düz metin alanlarına
+        // (barkod, model kodu, satıcı kodu vb.) da bakılır — hangi alanın "kcm" ile başladığını bilmiyoruz.
+        const otherValues = Object.values(it).filter((v) => typeof v === "string" || typeof v === "number");
+        if (!csCodeAllowed(barcode, productCode, ...otherValues)) {
+          if (!firstSkippedItem) firstSkippedItem = it;
           return;
         }
         const price = Number(it.salesPrice ?? it.SalesPrice ?? 0) || undefined;
@@ -900,9 +903,14 @@ async function fetchStockCiceksepeti() {
       return {
         platform: "cs",
         error:
-          `Çiçeksepeti'nden ${fetchedCount} ürün geldi ama hiçbirinin stok kodu/ürün kodu "${csCodePrefix()}" ile başlamıyor. ` +
-          `Örnek kodlar (stok kodu / ürün kodu): ${skippedSamples.join(", ")}. ` +
-          `Önek farklıysa .env'de CS_CODE_PREFIX değerini değiştir, filtreyi kapatmak için CS_CODE_PREFIX= (boş) bırak.`,
+          `Çiçeksepeti'nden ${fetchedCount} ürün geldi ama hiçbir alanı "${csCodePrefix()}" ile başlamıyor. ` +
+          `Örnek ürünün alanları: ${JSON.stringify(
+            Object.fromEntries(
+              Object.entries(firstSkippedItem || {})
+                .filter(([, v]) => v === null || ["string", "number", "boolean"].includes(typeof v))
+                .map(([k, v]) => [k, typeof v === "string" ? v.slice(0, 40) : v])
+            )
+          )}`,
         rows,
       };
     }
