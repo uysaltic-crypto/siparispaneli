@@ -428,7 +428,7 @@ function platformCodeInfo(id, p, sku) {
     n11: { label: 'Ürün kodu', product: true },
     koctas: { label: 'Ürün kodu', product: true },
     ty: { label: 'Stok kodu', product: false },
-    hb: { label: 'SKU', product: false },
+    hb: { label: 'SKU', product: true },
   }[id] || { label: 'Stok kodu', product: false };
   const productCode = cfg.product ? (p.productCodes?.[id] || '') : '';
   const value = productCode || sku;
