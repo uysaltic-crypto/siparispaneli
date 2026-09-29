@@ -329,6 +329,9 @@ async function fetchStockHepsiburada() {
           stock: Number(it.AvailableStock ?? it.availableStock ?? 0),
           name: it.ProductName || it.productName || "",
           price,
+          // Hepsiburada'nın sitedeki kodu ("HBCV00004YCNH5"): ürün adresinde ve satıcı panelindeki SKU'da
+          // görünen kod bu. Bizim MerchantSku'muz sitede aranınca çıkmıyor, bu yüzden ayrıca tutuyoruz.
+          productCode: it.HepsiburadaSku || it.hepsiburadaSku || it.HbSku || it.hbSku || undefined,
         });
       });
       if (items.length < limit) break;
