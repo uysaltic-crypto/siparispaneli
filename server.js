@@ -779,6 +779,22 @@ function csCodeAllowed(...codes) {
   return codes.some((c) => String(c || "").trim().toLowerCase().startsWith(prefix));
 }
 
+// Çiçeksepeti'nin sitedeki ürün kodu ("kcm68191179" gibi; ürün adresinin sonunda görünür).
+// API yanıtında hangi alanda geldiğini bilmediğimiz için ürünün düz metin alanlarında
+// (kod alanları ya da link/slug içinde) önekle başlayan ilk kodu arıyoruz.
+function csFindSiteCode(item) {
+  const prefix = csCodePrefix();
+  if (!prefix || !item) return undefined;
+  const esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(?:^|[^a-z0-9])(${esc}[a-z0-9]+)`, "i");
+  const vals = Object.values(item).filter((v) => typeof v === "string" || typeof v === "number");
+  for (const v of vals) {
+    const m = String(v).match(re);
+    if (m) return m[1].toLowerCase();
+  }
+  return undefined;
+}
+
 function csHost() {
   return process.env.CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
 }
@@ -863,12 +879,16 @@ async function fetchStockCiceksepeti() {
       fetchedCount += products.length;
       products.forEach((it) => {
         const barcode = String(it.stockCode || it.StockCode || "").trim();
-        const productCode = it.mainProductCode || it.MainProductCode || undefined; // Çiçeksepeti'nde "Ürün Kodu"
+        const mainCode = it.mainProductCode || it.MainProductCode || undefined;
+        // Panelde "Ürün kodu" olarak sitedeki kcm kodu tutulur (Çiçeksepeti'nde arama/link bununla çalışır);
+        // bulunamazsa eskisi gibi mainProductCode kullanılır.
+        const siteCode = csFindSiteCode(it);
+        const productCode = siteCode || mainCode;
         if (!barcode) return;
         // Önek stok kodunda ya da ürün kodunda değilse, ürünün diğer düz metin alanlarına
         // (barkod, model kodu, satıcı kodu vb.) da bakılır — hangi alanın "kcm" ile başladığını bilmiyoruz.
         const otherValues = Object.values(it).filter((v) => typeof v === "string" || typeof v === "number");
-        if (!csCodeAllowed(barcode, productCode, ...otherValues)) {
+        if (!siteCode && !csCodeAllowed(barcode, mainCode, ...otherValues)) {
           if (!firstSkippedItem) firstSkippedItem = it;
           return;
         }
