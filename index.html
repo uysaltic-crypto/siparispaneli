@@ -58,10 +58,25 @@
   .pcard-code-input:focus { border-color:var(--border); background:var(--surface2); color:var(--text); outline:none; }
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
-  .pcard-compete { display:flex; flex-direction:column; gap:5px; min-width:250px; max-width:290px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--bg, transparent); }
+  .pcard-compete { display:flex; flex-direction:column; gap:5px; min-width:200px; max-width:260px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; }
   .pcard-compete .cmp-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; }
-  .pcard-compete textarea { width:100%; font-size:11px; }
-  .pcard-compete input[type=number] { width:64px; }
+  .cmodal-back { position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
+  .cmodal { background:var(--surface); border:1px solid var(--border); border-radius:8px; width:100%; max-width:540px; max-height:92vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .cmodal-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); font-size:15px; font-weight:600; }
+  .cmodal-x { background:transparent; color:var(--muted); font-size:18px; padding:0 4px; line-height:1; }
+  .cmodal-body { padding:16px 18px; }
+  .cfield { display:flex; align-items:stretch; border:1px solid var(--border); border-radius:4px; margin-bottom:10px; overflow:hidden; }
+  .cfield label { flex:0 0 190px; background:var(--surface2); padding:10px 12px; font-size:12px; font-weight:600; display:flex; align-items:center; }
+  .cfield label.opt { font-weight:400; color:var(--muted); }
+  .cfield input, .cfield textarea { flex:1; min-width:0; background:transparent; border:none; outline:none; color:var(--text); padding:10px 12px; font-size:13px; font-family:inherit; }
+  .cfield textarea { resize:vertical; font-size:12px; }
+  .cinfo { background:#1E88D4; color:#fff; border-radius:4px; padding:14px 16px; margin:14px 0; font-size:12px; line-height:1.55; }
+  .cinfo b.t { display:block; font-size:15px; margin-bottom:6px; }
+  .clist { font-size:11px; word-break:break-all; margin:0 0 10px; }
+  .clist div { padding:5px 0; border-bottom:1px solid var(--border); }
+  .cmodal-foot { display:flex; justify-content:flex-end; gap:8px; padding:12px 18px 16px; }
+  .cbtn-cancel { background:#F0662F; color:#fff; }
+  .cbtn-save { background:#2F80C0; color:#fff; }
   .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
   .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
   .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
@@ -689,64 +704,120 @@ async function mergeProducts(fromCode, toCode) {
   }
 }
 
-// Merkezi stoğun yanındaki "Rekabet Analizi" kutusu: rakip linkleri, min/maks fiyat,
-// otomatik fiyatlandırma ve en düşük rakip fiyatına göre kısa analiz. Rekabet
-// sekmesiyle aynı verileri (pricing / competitors) kullanır; id'ler çakışmasın diye
-// kart içindeki alanlar "c" önekiyle (cmin_, cmax_, curls_, cauto_) adlandırılır.
-function competeCardHtml(p) {
-  const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
+// Merkezi stoğun yanındaki "Rekabet Analizi" kutusu: kısa özet + tıklayınca açılır
+// pencere (modal). Ayarlar Rekabet sekmesiyle aynı verileri (pricing / competitors) kullanır.
+function competeSummary(p) {
+  const pricing = p.pricing || {};
   const competitors = p.competitors || [];
   const prices = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
   const lowest = prices.length ? Math.min(...prices) : null;
   const mine = pricing.myPrice != null ? Number(pricing.myPrice) : (p.prices?.ty != null && p.prices.ty !== '' ? Number(p.prices.ty) : null);
-  const errs = competitors.filter(c => c.lastError).length;
-  const lastChecked = competitors.map(c => c.lastCheckedAt).filter(Boolean).sort().pop();
-
-  let analysis = '<span class="muted">Rakip linki ekle, sonra “Kontrol et”.</span>';
-  if (competitors.length && lowest == null) {
-    analysis = `<span class="muted">${errs ? 'Fiyat okunamadı (' + errs + ' hata)' : 'Kontrol bekliyor'}</span>`;
-  } else if (lowest != null) {
-    let diff = '';
-    if (mine != null && mine > 0) {
-      const d = mine - lowest;
-      const pct = (d / lowest) * 100;
-      const cheaper = d <= 0;
-      diff = `<span class="badge ${cheaper ? 'ok' : 'fail'}">${cheaper ? 'en ucuzsun' : 'rakip ' + Math.abs(d).toFixed(2) + ' ₺ ucuz'} (${pct > 0 ? '+' : ''}${pct.toFixed(1)}%)</span>`;
-    }
-    analysis = `<span>En düşük rakip: <b>${lowest.toFixed(2)} ₺</b></span> ${mine != null ? `<span>Senin: <b>${mine.toFixed(2)} ₺</b></span>` : ''} ${diff}`;
+  if (!competitors.length) return { lowest, mine, html: '<span class="muted">Rakip tanımlı değil</span>' };
+  if (lowest == null) {
+    const errs = competitors.filter(c => c.lastError).length;
+    return { lowest, mine, html: `<span class="muted">${errs ? 'Fiyat okunamadı (' + errs + ' hata)' : 'Kontrol bekliyor'}</span>` };
   }
+  let diff = '';
+  if (mine != null && mine > 0) {
+    const d = mine - lowest, pct = (d / lowest) * 100, cheaper = d <= 0;
+    diff = `<span class="badge ${cheaper ? 'ok' : 'fail'}">${cheaper ? 'en ucuzsun' : 'rakip ' + Math.abs(d).toFixed(2) + ' ₺ ucuz'} (${pct > 0 ? '+' : ''}${pct.toFixed(1)}%)</span>`;
+  }
+  return { lowest, mine, html: `<span>En düşük rakip: <b>${lowest.toFixed(2)} ₺</b></span>${mine != null ? ` <span>Senin: <b>${mine.toFixed(2)} ₺</b></span>` : ''} ${diff}` };
+}
 
+function competeCardHtml(p) {
+  const pricing = p.pricing || {};
+  const has = (p.competitors || []).length > 0 || pricing.minPrice != null;
+  const sm = competeSummary(p);
   return `
     <div class="pcard-compete" onmousedown="event.stopPropagation()">
-      <div class="muted" style="font-size:10px;">REKABET ANALİZİ${competitors.length ? ` · ${competitors.length} rakip` : ''}</div>
-      <div class="cmp-row">${analysis}</div>
-      <textarea id="curls_${escAttr(p.code)}" rows="2" spellcheck="false" placeholder="Her satıra bir rakip ürün linki (Çiçeksepeti vb.)">${escAttr(competitors.map(c => c.url).join('\n'))}</textarea>
-      <div class="cmp-row">
-        <input type="number" step="0.01" placeholder="Min ₺" id="cmin_${escAttr(p.code)}" value="${pricing.minPrice ?? ''}">
-        <input type="number" step="0.01" placeholder="Maks ₺" id="cmax_${escAttr(p.code)}" value="${pricing.maxPrice ?? ''}">
-        <label style="display:flex; align-items:center; gap:3px;" title="Açıksa rakip fiyatına göre Trendyol fiyatı otomatik ayarlanır"><input type="checkbox" id="cauto_${escAttr(p.code)}" ${pricing.autoReprice ? 'checked' : ''}> otomatik</label>
-      </div>
-      <div class="cmp-row">
-        <button class="ghost small" onclick="saveCompeteCard('${p.code}')">Kaydet</button>
-        <button class="small" onclick="repriceNow('${p.code}')" title="Rakip fiyatlarını şimdi çek">Kontrol et</button>
-      </div>
-      ${lastChecked ? `<div class="muted" style="font-size:10px;">Son kontrol: ${new Date(lastChecked).toLocaleString('tr-TR')}</div>` : ''}
+      <div class="muted" style="font-size:10px;">REKABET ANALİZİ${pricing.autoReprice ? ' · <span style="color:var(--ok)">otomatik açık</span>' : ''}</div>
+      <div class="cmp-row">${sm.html}</div>
+      <div class="cmp-row"><button class="${has ? 'ghost ' : ''}small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">${has ? 'Rekabet Analizi · Düzenle' : '+ Rekabet Analizi Ekle'}</button></div>
     </div>`;
 }
 
-async function saveCompeteCard(code) {
-  const minPrice = document.getElementById('cmin_' + code).value;
-  const maxPrice = document.getElementById('cmax_' + code).value;
-  const autoReprice = document.getElementById('cauto_' + code).checked;
-  const competitorUrls = document.getElementById('curls_' + code).value.split('\n').map(s => s.trim()).filter(Boolean);
+let competeModalCode = null;
+
+function closeCompeteModal() {
+  document.getElementById('competeModal')?.remove();
+  document.removeEventListener('keydown', competeModalKey);
+  competeModalCode = null;
+}
+function competeModalKey(e) { if (e.key === 'Escape') closeCompeteModal(); }
+
+function openCompeteModal(code) {
+  const p = state.products.find(x => x.code === code);
+  if (!p) return;
+  closeCompeteModal();
+  competeModalCode = code;
+  const pricing = p.pricing || {};
+  const competitors = p.competitors || [];
+  const list = competitors.length ? `<div class="clist">${competitors.map(c => `<div>${escAttr(c.url)}<br>${c.lastError ? `<span style="color:var(--danger)">hata: ${escAttr(c.lastError)}</span>` : (c.lastPrice ? `<b>${Number(c.lastPrice).toFixed(2)} ₺</b>${c.sellerName ? ' · ' + escAttr(c.sellerName) : ''}` : '<span class="muted">kontrol bekliyor</span>')}${c.lastCheckedAt ? ` <span class="muted">· ${new Date(c.lastCheckedAt).toLocaleString('tr-TR')}</span>` : ''}</div>`).join('')}</div>` : '';
+
+  const wrap = document.createElement('div');
+  wrap.id = 'competeModal';
+  wrap.className = 'cmodal-back';
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeCompeteModal(); });
+  wrap.innerHTML = `
+    <div class="cmodal" role="dialog" aria-modal="true">
+      <div class="cmodal-head"><span>[${escAttr(p.name)}] Rekabet Analizi ${competitors.length || pricing.minPrice != null ? 'Düzenle' : 'Ekle'}</span><button class="cmodal-x" onclick="closeCompeteModal()" title="Kapat">×</button></div>
+      <div class="cmodal-body">
+        <div class="cfield"><label>Min Fiyat (KDV Dahil) <span style="color:var(--danger)">&nbsp;*</span></label><input type="number" step="0.01" id="cm_min" value="${pricing.minPrice ?? ''}"></div>
+        <div class="cfield"><label>Fiyat İndirim Basamağı <span style="color:var(--danger)">&nbsp;*</span></label><input type="number" step="0.01" id="cm_undercut" value="${pricing.undercut ?? 0.01}"></div>
+        <div class="cfield"><label class="opt">Max Fiyat (KDV Dahil)</label><input type="number" step="0.01" id="cm_max" value="${pricing.maxPrice ?? ''}"></div>
+        <div class="cfield"><label class="opt">Rakip Ürün Linkleri</label><textarea id="cm_urls" rows="3" spellcheck="false" placeholder="Her satıra bir rakip ürün linki">${escAttr(competitors.map(c => c.url).join('\n'))}</textarea></div>
+        <div class="cfield"><label class="opt">Otomatik Fiyatlandırma</label><label style="flex:1; background:transparent; font-weight:400; gap:8px;"><input type="checkbox" id="cm_auto" ${pricing.autoReprice ? 'checked' : ''} style="flex:0 0 auto;"> Açık</label></div>
+        <div class="cinfo">
+          <b class="t">Nasıl çalışır?</b>
+          1. En düşük rakip fiyatından <b>Fiyat İndirim Basamağı</b> kadar düşük bir fiyat hesaplanır.<br>
+          2. Bu fiyat <b>Min Fiyat</b>'ın altına inmez; <b>Max Fiyat</b> girildiyse onun üstüne de çıkmaz.<br>
+          3. Max Fiyat'ı <b>BOŞ BIRAKIRSAN</b> üst sınır uygulanmaz.
+        </div>
+        ${list}
+      </div>
+      <div class="cmodal-foot">
+        <button class="ghost" onclick="checkCompeteModal()" title="Önce kaydeder, sonra rakip fiyatlarını çeker" style="margin-right:auto;">Kontrol Et</button>
+        <button class="cbtn-cancel" onclick="closeCompeteModal()">✕ İptal</button>
+        <button class="cbtn-save" onclick="saveCompeteModal()">✓ Kaydet</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  document.addEventListener('keydown', competeModalKey);
+  document.getElementById('cm_min').focus();
+}
+
+async function saveCompeteModal(silent) {
+  const code = competeModalCode;
+  if (!code) return false;
+  const minPrice = document.getElementById('cm_min').value;
+  const undercut = document.getElementById('cm_undercut').value;
+  const maxPrice = document.getElementById('cm_max').value;
+  const autoReprice = document.getElementById('cm_auto').checked;
+  const competitorUrls = document.getElementById('cm_urls').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (minPrice === '' || Number(minPrice) <= 0) { toast('Min Fiyat zorunlu.'); return false; }
+  if (undercut === '' || Number(undercut) < 0) { toast('Fiyat İndirim Basamağı zorunlu.'); return false; }
   const resp = await fetch(`/api/products/${encodeURIComponent(code)}/pricing`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ minPrice, maxPrice, autoReprice, competitorUrls })
+    body: JSON.stringify({ minPrice, maxPrice, undercut, autoReprice, competitorUrls })
   });
   const data = await resp.json();
-  if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); return; }
-  toast('Rekabet ayarları kaydedildi.');
+  if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); return false; }
+  if (!silent) { toast('Rekabet analizi kaydedildi.'); closeCompeteModal(); }
   await loadProducts();
+  return true;
+}
+
+async function checkCompeteModal() {
+  const code = competeModalCode;
+  if (!(await saveCompeteModal(true))) return;
+  toast('Rakip fiyatları kontrol ediliyor…');
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/reprice-check`, { method: 'POST' });
+  const data = await resp.json();
+  await loadProducts();
+  if (!data.ok) { toast(data.error || 'Kontrol başarısız.'); return; }
+  toast(data.pushResult ? `Yeni fiyat gönderildi: ${data.pushResult.newPrice} ₺` : 'Kontrol tamamlandı.');
+  if (competeModalCode === code) openCompeteModal(code); // güncel rakip fiyatlarıyla yeniden aç
 }
 
 // Ürün kartında Ana Ürün Kodu'nun yanında gösterilen küçük rekabet özeti.
