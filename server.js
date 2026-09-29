@@ -1664,7 +1664,11 @@ function groupBlocked(roots) {
   return false;
 }
 
-function tryAutoMergeGroup(rootsIn, reason, out) {
+// allowSamePlatform: adlar birebir aynı değil ama aynı ürünü anlatıyorsa (marka/sözcük sırası
+// farkı), aynı ürünün aynı pazaryerinde İKİ ayrı SKU ile listelenmiş olması normaldir — birleştirme
+// ailesi tam bunun için var (stok her SKU'ya ayrı gönderilir). Birebir aynı adlarda ise
+// (büyük olasılıkla renk/beden varyantı) bu izin verilmez.
+function tryAutoMergeGroup(rootsIn, reason, out, allowSamePlatform) {
   const roots = [...new Set(rootsIn.map(resolveRoot))];
   if (roots.length < 2) return;
   const seen = new Set();
@@ -1672,7 +1676,7 @@ function tryAutoMergeGroup(rootsIn, reason, out) {
     const plats = familyPlatforms(r);
     if (!plats.size) return; // hiçbir platformda kaydı yok → kanıt yok
     for (const pl of plats) {
-      if (seen.has(pl)) return; // aynı platformda iki ayrı listeleme → farklı ürün olabilir
+      if (seen.has(pl) && !allowSamePlatform) return; // aynı platformda iki ayrı listeleme → farklı ürün olabilir
       seen.add(pl);
     }
   }
@@ -1741,7 +1745,27 @@ function autoMatchProducts() {
     if (list.length < 2) return;
     for (let i = 0; i < list.length; i++)
       for (let j = i + 1; j < list.length; j++) if (!sameCore(list[i].toks, list[j].toks)) return;
-    tryAutoMergeGroup(list.map((x) => x.root), "adın asıl kısmı aynı (marka/model farklı)", out);
+    const differentNames = new Set(list.map((x) => x.toks.join(" "))).size > 1;
+    tryAutoMergeGroup(list.map((x) => x.root), "adın asıl kısmı aynı (marka/model farklı)", out, differentNames);
+  });
+
+  // Kural 4: aynı sözcükler, farklı sıra — ör. "Vida Tapası Yapışkanlı Parlak Beyaz Yağmur"
+  // ile "Yapışkanlı Vida Tapası Parlak Beyaz Yağmur".
+  const bagBuckets = new Map();
+  Object.keys(products)
+    .filter((c) => !products[c].mergedInto)
+    .forEach((root) => {
+      const ordered = normName(products[root].name);
+      const toks = ordered.split(" ").filter(Boolean);
+      if (toks.length < 4 || toks[0] === "isimsiz") return;
+      const key = [...toks].sort().join(" ");
+      if (!bagBuckets.has(key)) bagBuckets.set(key, []);
+      bagBuckets.get(key).push({ root, ordered });
+    });
+  bagBuckets.forEach((list) => {
+    if (list.length < 2) return;
+    const differentOrders = new Set(list.map((x) => x.ordered)).size > 1;
+    tryAutoMergeGroup(list.map((x) => x.root), "aynı sözcükler, farklı sıra", out, differentOrders);
   });
 
   if (out.length) {
