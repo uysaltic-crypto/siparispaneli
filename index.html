@@ -58,7 +58,7 @@
   .pcard-code-input:focus { border-color:var(--border); background:var(--surface2); color:var(--text); outline:none; }
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
-  .pcard-compete { display:flex; flex-direction:column; gap:5px; min-width:200px; max-width:260px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; }
+  .pcard-compete { display:flex; align-items:center; }
   .pcard-compete .cmp-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; }
   .cmodal-back { position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
   .cmodal { background:var(--surface); border:1px solid var(--border); border-radius:8px; width:100%; max-width:540px; max-height:92vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
@@ -726,15 +726,7 @@ function competeSummary(p) {
 }
 
 function competeCardHtml(p) {
-  const pricing = p.pricing || {};
-  const has = (p.competitors || []).length > 0 || pricing.minPrice != null;
-  const sm = competeSummary(p);
-  return `
-    <div class="pcard-compete" onmousedown="event.stopPropagation()">
-      <div class="muted" style="font-size:10px;">REKABET ANALİZİ${pricing.autoReprice ? ' · <span style="color:var(--ok)">otomatik açık</span>' : ''}</div>
-      <div class="cmp-row">${sm.html}</div>
-      <div class="cmp-row"><button class="${has ? 'ghost ' : ''}small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">${has ? 'Rekabet Analizi · Düzenle' : '+ Rekabet Analizi Ekle'}</button></div>
-    </div>`;
+  return `<div class="pcard-compete" onmousedown="event.stopPropagation()"><button class="small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">+ Rekabet Analizi Ekle</button></div>`;
 }
 
 let competeModalCode = null;
