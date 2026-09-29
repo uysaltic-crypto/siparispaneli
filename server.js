@@ -601,7 +601,7 @@ async function repriceProduct(code) {
   const prices = (p.competitors || []).map((c) => c.lastPrice).filter((n) => typeof n === "number" && n > 0);
   const lowest = prices.length ? Math.min(...prices) : null;
 
-  if (p.pricing.autoReprice && p.pricing.minPrice != null && p.pricing.maxPrice != null && lowest != null) {
+  if (p.pricing.autoReprice && p.pricing.minPrice != null && lowest != null) {
     const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
     if (target !== p.pricing.myPrice) {
       const qty = p.stocks?.ty ?? p.centralStock ?? 0;
