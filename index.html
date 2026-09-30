@@ -79,6 +79,20 @@
   .cbtn-save { background:#2F80C0; color:#fff; }
   .pcard-platforms { display:flex; flex-wrap:wrap; gap:8px; }
   .pchip { border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-width:150px; }
+  /* Kompakt kutu: logo · durum · fiyat · ⋮ (diğer bilgiler ⋮ menüsünde) */
+  .pchip.compact { position:relative; min-width:0; padding:6px 10px; display:flex; align-items:center; gap:8px; }
+  .pchip.compact.off { opacity:.4; }
+  .plogo { width:22px; height:22px; border-radius:5px; flex:none; display:block; object-fit:contain; background:#fff; }
+  .pchip-state { font-size:11px; font-weight:700; }
+  .pchip-state.satista { color:var(--ok); }
+  .pchip-state.pasif { color:var(--danger); }
+  .pchip-price { font-size:13px; font-weight:700; white-space:nowrap; }
+  .pchip-price.empty { font-weight:400; opacity:.5; }
+  .pchip-more { background:none; border:none; color:var(--muted); cursor:pointer; font-size:16px; line-height:1; padding:2px 4px; border-radius:4px; }
+  .pchip-more:hover { background:#ffffff14; }
+  .pchip-pop { display:none; position:absolute; top:100%; left:0; z-index:30; margin-top:4px; min-width:230px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px; box-shadow:0 8px 24px #0009; }
+  .pchip.open .pchip-pop { display:block; }
+  .pchip.open { z-index:31; }
   .pchip-head { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; margin-bottom:6px; }
   .pchip-dot { width:8px; height:8px; border-radius:50%; }
   .pchip input[type=number] { width:70px; }
@@ -552,33 +566,66 @@ function getChildren(code) {
   return state.products.filter(p => p.mergedInto === code);
 }
 
-// Tek bir ürünün tek bir platformdaki kutusu (SKU/kod, satış durumu, fiyat, gönder).
+// Platform logoları. Kendi logo dosyanı koymak istersen proje klasörüne logos/<id>.png
+// (hb, ty, n11, cs, koctas) at — varsa o kullanılır; yoksa aşağıdaki marka renkli simge görünür.
+const PLATFORM_MARKS = { hb: 'h', ty: 't', n11: 'n', cs: 'ç', koctas: 'K' };
+function platformLogoHtml(pl) {
+  const mark = PLATFORM_MARKS[pl.id] || String(pl.name || '?').charAt(0).toLowerCase();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44"><rect width="44" height="44" rx="10" fill="${pl.color}"/><text x="22" y="31" font-family="Arial,Helvetica,sans-serif" font-size="26" font-weight="700" text-anchor="middle" fill="#fff">${mark}</text></svg>`;
+  const fallback = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  return `<img class="plogo" src="/logos/${pl.id}.png" alt="${pl.name}" title="${pl.name}" onerror="this.onerror=null;this.src='${fallback}'">`;
+}
+
+function fmtPrice(v) {
+  if (v === '' || v === null || v === undefined || isNaN(Number(v))) return null;
+  return Number(v).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ⋮ menüsünü aç/kapat (aynı anda tek menü açık kalır).
+function togglePchipMenu(btn, ev) {
+  ev.stopPropagation();
+  const chip = btn.closest('.pchip');
+  const wasOpen = chip.classList.contains('open');
+  document.querySelectorAll('.pchip.open').forEach(c => c.classList.remove('open'));
+  if (!wasOpen) chip.classList.add('open');
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.pchip-pop')) document.querySelectorAll('.pchip.open').forEach(c => c.classList.remove('open'));
+});
+
+// Tek bir ürünün tek bir platformdaki kutusu. Görünen: logo · durum · fiyat · ⋮
+// ⋮ ile açılan menüde: kod, satış durumu değiştirme, fiyat düzenleme, gönder, (birleşen ürünse) Ayır.
 // Hem ana kartta hem de birleşen ürün satırlarında aynı şekilde kullanılır.
 function platformChipHtml(p, pl, rootCode) {
   const priceVal = p.prices?.[pl.id] ?? '';
   const status = p.listingStatus?.[pl.id] || 'satista';
   const platformSku = p.skus?.[pl.id] || p.code;
   const cl = platformCodeInfo(pl.id, p, platformSku);
-  // Bu kutu, birleştirilmiş bir alt ürüne mi ait (ana ürünün kendisi değil)? Öyleyse
-  // ayrı bir "BİRLEŞEN ÜRÜNLER" bölümü yapmadan, kutunun içine küçük bir ad satırı ve
-  // "Ayır" bağlantısı ekleyerek hangi ürüne ait olduğunu göster — kutu görünüşte
-  // diğerlerinden farklı değil, sadece hangi ürüne ait olduğu küçük yazıyla belli.
-  const childHead = (rootCode && p.code !== rootCode) ? `
-      <div style="text-align:right; margin-bottom:4px;">
-        <a href="#" class="muted" style="font-size:10px;" onclick="event.preventDefault(); unmergeProduct('${p.code}');" title="Bu ürünü ana üründen ayır">Ayır</a>
-      </div>` : '';
+  const isChild = rootCode && p.code !== rootCode;
+  const priceTxt = fmtPrice(priceVal);
+  const childRows = isChild ? `
+        <div class="muted" style="font-size:11px; margin-bottom:6px;">Birleşen ürün: <b>${escAttr(p.name || p.code)}</b>
+          · <a href="#" onclick="event.preventDefault(); unmergeProduct('${p.code}');" title="Bu ürünü ana üründen ayır">Ayır</a></div>` : '';
   return `
-    <div class="pchip">
-      ${childHead}
-      <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><a href="${platformListingUrl(pl.id, cl.value)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
-        <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
+    <div class="pchip compact">
+      ${platformLogoHtml(pl)}
+      <span class="pchip-state ${status}">${status === 'pasif' ? 'Pasif' : 'Satışta'}</span>
+      <span class="muted">-</span>
+      <span class="pchip-price ${priceTxt ? '' : 'empty'}">${priceTxt ? priceTxt + ' ₺' : '— ₺'}</span>
+      <button class="pchip-more" title="Detaylar" onclick="togglePchipMenu(this, event)">⋮</button>
+      <div class="pchip-pop" onclick="event.stopPropagation()">
+        ${childRows}
+        <div class="pchip-head" style="margin-bottom:6px;">
+          <a href="${platformListingUrl(pl.id, cl.value)}" target="_blank" rel="noopener" class="pchip-link" title="${pl.name}'da bu ürünü aç" style="color:inherit; text-decoration:none; border-bottom:1px dotted currentColor;">${pl.name} ↗</a>
+          <button class="status-btn ${status}" onclick="toggleStatus('${p.code}','${pl.id}','${status}')" title="Satış durumunu değiştir">${status === 'pasif' ? 'Pasif' : 'Satışta'}</button>
+        </div>
+        <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:6px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
+        <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
+          <span class="muted">₺</span>
+          <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
+        </div>
+        <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
       </div>
-      <div class="muted" style="font-family:monospace; font-size:10px; margin-bottom:4px;">${cl.label}: ${cl.value}${cl.syncSku ? `<br><span style="opacity:.7">Gönderim kodu: ${cl.syncSku}</span>` : ''}</div>
-      <div style="display:flex; gap:6px; align-items:center; font-size:11px;">
-        <span class="muted">₺</span>
-        <input type="number" step="0.01" value="${priceVal}" onchange="updatePrice('${p.code}','${pl.id}',this.value)" placeholder="fiyat">
-      </div>
-      <button class="ghost small" style="margin-top:6px; width:100%;" onclick="pushPlatform('${p.code}','${pl.id}')" title="Bu kutudaki fiyatı ve merkezi stoğu ${pl.name}'a gönder">${pl.name}'a gönder</button>
     </div>`;
 }
 
@@ -591,6 +638,8 @@ function renderStock(force) {
   // sonrası (force=true) odak nerede olursa olsun ekran HER ZAMAN güncellenir.
   const active = document.activeElement;
   if (!force && active && active.closest && active.closest('#stockCards')) return;
+  // Açık bir ⋮ menüsü varken arka plan yenilemesi menüyü kapatmasın.
+  if (!force && document.querySelector('.pchip.open')) return;
 
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
   let list = state.products.filter(p => !p.mergedInto);
@@ -638,9 +687,9 @@ function renderStock(force) {
       const listedMembers = familyMembers.filter(m => m.skus?.[pl.id] || m.productCodes?.[pl.id]);
       if (familyHasAnyListing && !listedMembers.length) {
         return `
-        <div class="pchip" style="opacity:.45;">
-          <div class="pchip-head"><span class="pchip-dot" style="background:${pl.color}"></span><span>${pl.name}</span></div>
-          <div class="muted" style="font-size:11px; padding:6px 0;">Bu pazar yerinde yok</div>
+        <div class="pchip compact off" title="${pl.name}: bu pazar yerinde yok">
+          ${platformLogoHtml(pl)}
+          <span class="muted" style="font-size:11px;">Yok</span>
         </div>`;
       }
       // Hiçbir yerden hiç çekilmemiş (elle açılmış) ürünlerde eski davranış: sadece ana ürünün kutusu.
