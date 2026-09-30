@@ -1771,6 +1771,31 @@ function fuzzyMatchScore(a, b) {
   return { ok: sim >= need, sim, need, note: priceNote };
 }
 
+// Aynı platformda iki ayrı kayıt: GERÇEK varyant mı (aynı ürünün renk/beden seçeneği), yoksa aynı ürünün
+// iki ayrı listelemesi mi? Trendyol'da varyantlar aynı "Model Kodu"nu (productMainId) paylaşır; farklı model
+// koduna sahip iki kayıt ayrı listelemedir. Ortak her platformda iki tarafın da model kodu biliniyor ve
+// birbirinden FARKLI ise true döner; bilinmiyorsa ya da ortaksa false (güvenli taraf).
+function samePlatformSeparateListings(a, b) {
+  const codesOf = (root, pl) => {
+    const set = new Set();
+    getFamilyCodes(root).forEach((c) => {
+      const v = products[c]?.productCodes?.[pl];
+      if (v) set.add(String(v).trim().toLowerCase());
+    });
+    return set;
+  };
+  const ra = resolveRoot(a), rb = resolveRoot(b);
+  const pa = familyPlatforms(ra), pb = familyPlatforms(rb);
+  const shared = [...pa].filter((x) => pb.has(x));
+  if (!shared.length) return { ok: false, note: "ortak platform yok" };
+  for (const pl of shared) {
+    const ca = codesOf(ra, pl), cb = codesOf(rb, pl);
+    if (!ca.size || !cb.size) return { ok: false, note: `${pl}: model kodu bilinmiyor (varyant mı ayrı listeleme mi anlaşılamıyor)` };
+    if ([...ca].some((x) => cb.has(x))) return { ok: false, note: `${pl}: aynı model kodunu paylaşıyorlar → gerçek varyant` };
+  }
+  return { ok: true, note: "ortak platformlarda model kodları farklı → aynı ürünün ayrı listelemeleri" };
+}
+
 function autoMatchProducts() {
   const out = [];
   const roots = Object.keys(products).filter((c) => !products[c].mergedInto);
@@ -1883,6 +1908,31 @@ function autoMatchProducts() {
       }
   });
 
+  // Kural 7: birebir aynı ad + AYNI platformda iki ayrı listeleme (ör. "Catpower Eksantrik Zımpara 3380"
+  // iki farklı barkodla Trendyol'da). Varyant olmadığı kanıtlanırsa birleştirilir: model kodları farklı
+  // olmalı, fiyatlar (biliniyorsa) yakın olmalı, adda sayı (model no/ölçü) bulunmalı.
+  const exactBuckets = new Map();
+  Object.keys(products)
+    .filter((c) => !products[c].mergedInto)
+    .forEach((root) => {
+      const n = normName(products[root].name);
+      if (n.length < 12 || n.startsWith("isimsiz") || !/\d/.test(n)) return;
+      if (!exactBuckets.has(n)) exactBuckets.set(n, []);
+      exactBuckets.get(n).push(root);
+    });
+  exactBuckets.forEach((list) => {
+    if (list.length < 2 || list.length > 20) return;
+    for (let i = 0; i < list.length; i++)
+      for (let j = i + 1; j < list.length; j++) {
+        const a = resolveRoot(list[i]), b = resolveRoot(list[j]);
+        if (a === b) continue;
+        if (!samePlatformSeparateListings(a, b).ok) continue;
+        const pa = familyPrice(a), pb = familyPrice(b);
+        if (pa && pb && Math.min(pa, pb) / Math.max(pa, pb) < 0.75) continue;
+        tryAutoMergeGroup([a, b], "aynı ad, aynı platformda ayrı listeleme (model kodu farklı)", out, true);
+      }
+  });
+
   if (out.length) {
     persistProducts();
     matchLog.push(...out);
@@ -1931,6 +1981,7 @@ app.get("/api/products/match-explain", requireAuth, (req, res) => {
     if (!pb.size) notes.push(`${b} hiçbir platformda SKU kaydına sahip değil → otomatik eşleştirme kanıt bulamıyor ve atlıyor.`);
     const overlap = [...pa].filter((x) => pb.has(x));
     if (overlap.length) notes.push(`Ortak platform(lar): ${overlap.join(", ")} — adlar birebir aynıysa (varyant ihtimali) birleştirilmez; farklıysa izin verilir.`);
+    if (overlap.length) { const sp = samePlatformSeparateListings(a, b); notes.push(`Aynı platformda ikisi de var → ${sp.ok ? "ayrı listeleme, birleşebilir (ad birebir aynıysa)" : "birleşmez: " + sp.note}`); }
     const fz = fuzzyMatchScore(a, b);
     notes.push(`Bulanık ad benzerliği: ${(fz.sim * 100).toFixed(0)}%${fz.need ? ` (gereken ${(fz.need * 100).toFixed(0)}%)` : ""} · ${fz.note} → ${fz.ok ? "birleşir" : "birleşmez"}`);
     if (groupBlocked([ra, rb])) notes.push("Bu çift daha önce elle \"Ayır\" ile ayrılmış → otomatik eşleştirme bir daha birleştirmez.");
