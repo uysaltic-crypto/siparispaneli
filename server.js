@@ -1674,6 +1674,7 @@ const normName = (t) =>
     .replace(/[ışğüöçâîû]/g, (c) => FOLD[c] || c)
     .replace(/['’`´"]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
+    .replace(/(\d) (cm|mm|ml|lt|kg|gr|mt|li|lu|adet|cc|inc|[lgmnwv])(?= |$)/g, "$1$2") // "280 cm" = "280cm", "2 li" = "2li"
     .trim();
 
 function familyPlatforms(root) {
@@ -1720,6 +1721,54 @@ function sameCore(a, b) {
   let k = 0;
   while (k < a.length && k < b.length && a[a.length - 1 - k] === b[b.length - 1 - k]) k++;
   return k >= 4 && k / a.length >= 0.6 && k / b.length >= 0.6 && a.length - k <= 3 && b.length - k <= 3;
+}
+
+// Renk / yüzey / yön gibi VARYANT belirten sözcükler: iki adın ikisinde de "karşıda olmayan"
+// böyle bir sözcük varsa (ör. "mat siyah" / "parlak siyah", "gri" / "siyah") farklı ürün sayılır.
+const VARIANT_WORDS = new Set(("beyaz siyah gri kirmizi mavi yesil sari turuncu mor pembe kahverengi bej krom gumus altin antrasit " +
+  "seffaf lacivert bordo mat parlak saten ceviz mese naturel metalik sol sag erkek kadin cocuk buyuk kucuk orta").split(" "));
+
+// İki ürün adının benzerliği (0..1). Sayı içeren sözcükler (ölçü, adet, model no) BİREBİR aynı olmak
+// zorunda; geri kalan sözcüklerde marka/sıfat farkına ve sözcük sırasına tolerans var.
+function nameSimilarity(nameA, nameB) {
+  const ta = normName(nameA).split(" ").filter(Boolean);
+  const tb = normName(nameB).split(" ").filter(Boolean);
+  if (ta.length < 3 || tb.length < 3 || ta[0] === "isimsiz" || tb[0] === "isimsiz") return 0;
+  const A = new Set(ta), B = new Set(tb);
+  const numsA = [...A].filter((t) => /\d/.test(t)).sort().join("|");
+  const numsB = [...B].filter((t) => /\d/.test(t)).sort().join("|");
+  if (!numsA || numsA !== numsB) return 0;
+  const inter = [...A].filter((t) => B.has(t));
+  const onlyA = [...A].filter((t) => !B.has(t));
+  const onlyB = [...B].filter((t) => !A.has(t));
+  if (inter.length < 4) return 0;
+  if (onlyA.length > 3 || onlyB.length > 3) return 0;
+  if (onlyA.some((t) => VARIANT_WORDS.has(t)) && onlyB.some((t) => VARIANT_WORDS.has(t))) return 0;
+  return inter.length / (inter.length + onlyA.length + onlyB.length);
+}
+
+// Ailenin bilinen bir satış fiyatı (varsa) — fiyat da bir kanıt olarak kullanılır.
+function familyPrice(root) {
+  for (const c of getFamilyCodes(root)) {
+    for (const v of Object.values(products[c]?.prices || {})) if (Number(v) > 0) return Number(v);
+  }
+  return null;
+}
+
+// Bulanık eşleşme kararı: ad benzerliği + (varsa) fiyat. Fiyat çok farklıysa reddet,
+// fiyat aynıysa eşiği düşür.
+function fuzzyMatchScore(a, b) {
+  const sim = nameSimilarity(products[a]?.name, products[b]?.name);
+  if (!sim) return { ok: false, sim, note: "ad/ölçü uyuşmuyor" };
+  const pa = familyPrice(resolveRoot(a)), pb = familyPrice(resolveRoot(b));
+  let need = 0.7;
+  let priceNote = "fiyat bilgisi yok";
+  if (pa && pb) {
+    const ratio = Math.min(pa, pb) / Math.max(pa, pb);
+    if (ratio < 0.75) return { ok: false, sim, note: `fiyatlar çok farklı (${pa} / ${pb})` };
+    if (ratio >= 0.98) { need = 0.6; priceNote = "fiyat aynı"; } else priceNote = "fiyat yakın";
+  }
+  return { ok: sim >= need, sim, need, note: priceNote };
 }
 
 function autoMatchProducts() {
@@ -1798,6 +1847,42 @@ function autoMatchProducts() {
     tryAutoMergeGroup(list.map((x) => x.root), "aynı sözcükler, farklı sıra", out, differentOrders);
   });
 
+  // Kural 5: SKU/barkod "neredeyse" aynı — biri diğerinin son hanesi eksik hali
+  // (ör. 4530042482 / 45300424829) ve adlar da birbirine benziyor.
+  ids.forEach((set, id) => {
+    if (id.length < 11) return;
+    const other = ids.get(id.slice(0, -1));
+    if (!other) return;
+    for (const a of set) for (const b of other) {
+      if (resolveRoot(a) === resolveRoot(b)) continue;
+      if (nameSimilarity(products[a]?.name, products[b]?.name) >= 0.5) tryAutoMergeGroup([a, b], "SKU neredeyse aynı (son hane farkı) + benzer ad", out);
+    }
+  });
+
+  // Kural 6: bulanık ad eşleşmesi — marka/sıfat farkı ("NSP Taç Profil 280 cm Beyaz Damla" /
+  // "Profil Taç 280cm Parlak Beyaz Damla"), tek sözcük fazlası ("... 2li Paket Gri" / "... 2LI PAKET"),
+  // farklı sıra. Ölçü/adet sözcükleri birebir aynı olmalı; birleşen ürünlerin platformları AYRI olmalı;
+  // iki tarafta da farklı renk/yüzey sözcüğü varsa birleşmez; fiyat çok farklıysa birleşmez.
+  const fuzzyBuckets = new Map();
+  Object.keys(products)
+    .filter((c) => !products[c].mergedInto)
+    .forEach((root) => {
+      const toks = normName(products[root].name).split(" ").filter(Boolean);
+      if (toks.length < 3 || toks[0] === "isimsiz") return;
+      const key = toks.filter((t) => /\d/.test(t)).sort().join("|");
+      if (!key) return;
+      if (!fuzzyBuckets.has(key)) fuzzyBuckets.set(key, []);
+      fuzzyBuckets.get(key).push(root);
+    });
+  fuzzyBuckets.forEach((list) => {
+    if (list.length < 2 || list.length > 200) return;
+    for (let i = 0; i < list.length; i++)
+      for (let j = i + 1; j < list.length; j++) {
+        if (resolveRoot(list[i]) === resolveRoot(list[j])) continue;
+        if (fuzzyMatchScore(list[i], list[j]).ok) tryAutoMergeGroup([list[i], list[j]], "benzer ürün adı (bulanık eşleşme)", out);
+      }
+  });
+
   if (out.length) {
     persistProducts();
     matchLog.push(...out);
@@ -1846,6 +1931,8 @@ app.get("/api/products/match-explain", requireAuth, (req, res) => {
     if (!pb.size) notes.push(`${b} hiçbir platformda SKU kaydına sahip değil → otomatik eşleştirme kanıt bulamıyor ve atlıyor.`);
     const overlap = [...pa].filter((x) => pb.has(x));
     if (overlap.length) notes.push(`Ortak platform(lar): ${overlap.join(", ")} — adlar birebir aynıysa (varyant ihtimali) birleştirilmez; farklıysa izin verilir.`);
+    const fz = fuzzyMatchScore(a, b);
+    notes.push(`Bulanık ad benzerliği: ${(fz.sim * 100).toFixed(0)}%${fz.need ? ` (gereken ${(fz.need * 100).toFixed(0)}%)` : ""} · ${fz.note} → ${fz.ok ? "birleşir" : "birleşmez"}`);
     if (groupBlocked([ra, rb])) notes.push("Bu çift daha önce elle \"Ayır\" ile ayrılmış → otomatik eşleştirme bir daha birleştirmez.");
   }
   res.json({ ok: true, a: info(a), b: info(b), notes });
