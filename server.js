@@ -39,7 +39,9 @@ let processedPackages = new Set(loadJSON("processed.json", []));
 let pushLog = loadJSON("push-log.json", []);
 
 function persistProducts() {
-  saveJSON("products.json", products);
+  invalidateFamilies();
+  // Girintisiz (kompakt) yaz: binlerce üründe hem çok daha hızlı hem çok daha küçük.
+  fs.writeFileSync(path.join(DATA_DIR, "products.json"), JSON.stringify(products));
 }
 function persistProcessed() {
   saveJSON("processed.json", Array.from(processedPackages));
@@ -136,13 +138,24 @@ function resolveRoot(code, _hops = 0) {
   return resolveRoot(p.mergedInto, _hops + 1);
 }
 
+// Aile dizini önbelleği: kök kod -> [kök, ...alt ürünler]. Eskiden her çağrıda TÜM ürünler
+// taranıyordu; otomatik eşleştirme/eşleştirme sekmesi gibi döngülerde bu O(n²) olup sunucuyu
+// kilitliyordu. Birleştirme/ayırma/kaydetme (persistProducts, doMerge) önbelleği sıfırlar.
+let familyCache = null;
+function invalidateFamilies() {
+  familyCache = null;
+}
 function getFamilyCodes(anyCode) {
+  if (!familyCache) {
+    familyCache = new Map();
+    Object.keys(products).forEach((c) => {
+      const r = resolveRoot(c);
+      if (!familyCache.has(r)) familyCache.set(r, [r]);
+      if (c !== r) familyCache.get(r).push(c);
+    });
+  }
   const root = resolveRoot(anyCode);
-  const family = [root];
-  Object.keys(products).forEach((c) => {
-    if (c !== root && resolveRoot(c) === root) family.push(c);
-  });
-  return family;
+  return (familyCache.get(root) || [root]).filter((c) => products[c]);
 }
 
 // Merkezi stoğu ailenin tamamına (ana ürün + tüm alt ürünler) aynı değerle yazar.
@@ -1432,25 +1445,28 @@ app.post("/api/refresh", requireAuth, async (req, res) => {
 /* ------------------------------------------------------------------
    API — Stok / ürün yönetimi
 ------------------------------------------------------------------ */
+function serializeProduct(code) {
+  const p = products[code];
+  return {
+    code,
+    barcode: code, // geriye dönük uyumluluk için aynı alan iki isimle de dönüyor
+    name: p.name,
+    category: p.category || "",
+    stocks: p.stocks || {},
+    skus: p.skus || {},
+    prices: p.prices || {},
+    productCodes: p.productCodes || {},
+    listingStatus: p.listingStatus || {},
+    centralStock: p.centralStock,
+    image: p.image || null,
+    pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
+    competitors: p.competitors || [],
+    mergedInto: p.mergedInto || null,
+  };
+}
+
 app.get("/api/products", requireAuth, (req, res) => {
-  res.json({
-    products: Object.entries(products).map(([code, p]) => ({
-      code,
-      barcode: code, // geriye dönük uyumluluk için aynı alan iki isimle de dönüyor
-      name: p.name,
-      category: p.category || "",
-      stocks: p.stocks || {},
-      skus: p.skus || {},
-      prices: p.prices || {},
-      productCodes: p.productCodes || {},
-      listingStatus: p.listingStatus || {},
-      centralStock: p.centralStock,
-      image: p.image || null,
-      pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
-      competitors: p.competitors || [],
-      mergedInto: p.mergedInto || null,
-    })),
-  });
+  res.json({ products: Object.keys(products).map(serializeProduct) });
 });
 
 // Eşleştirme sekmesi için: her yapılandırılmış platformda, hangi ürünlerin o
@@ -1594,7 +1610,9 @@ app.post("/api/products/merge", requireAuth, (req, res) => {
   doMerge(from, to, "max");
 
   persistProducts();
-  res.json({ ok: true, product: { code: newRoot, ...products[newRoot] }, familyCodes: getFamilyCodes(newRoot) });
+  const familyCodes = getFamilyCodes(newRoot);
+  // İstemci tüm listeyi yeniden indirmesin diye güncellenen aile üyeleri de dönüyor.
+  res.json({ ok: true, product: { code: newRoot, ...products[newRoot] }, familyCodes, products: familyCodes.map(serializeProduct) });
 });
 
 // Birleştirme çekirdeği (elle birleştirme ve otomatik eşleştirme ortak kullanır).
@@ -1605,11 +1623,16 @@ function doMerge(from, to, stockMode) {
   const src = products[from];
   const dst = products[to];
   const newRoot = resolveRoot(to);
-  const combined = [...new Set([...getFamilyCodes(from), ...getFamilyCodes(newRoot)])];
+  const movedFamily = getFamilyCodes(from);
+  const combined = [...new Set([...movedFamily, ...getFamilyCodes(newRoot)])];
   const stocks = combined.map((c) => Number(products[c]?.centralStock) || 0);
   const unified = stockMode === "min" ? Math.min(...stocks) : Math.max(...stocks, 0);
 
   src.mergedInto = newRoot;
+  // `from`un kendi alt ürünleri de doğrudan yeni ana ürüne bağlansın; aksi halde
+  // panelde (yalnızca doğrudan çocukları gösterir) kartlardan kaybolurlardı.
+  movedFamily.forEach((c) => { if (c !== from && products[c]) products[c].mergedInto = newRoot; });
+  invalidateFamilies();
   if (!dst.image && src.image) dst.image = src.image;
   if ((!dst.competitors || !dst.competitors.length) && src.competitors?.length) dst.competitors = src.competitors;
   propagateCentralStock(newRoot, unified);
@@ -1754,7 +1777,7 @@ function autoMatchProducts() {
     tryAutoMergeGroup(list.map((x) => x.root), "adın asıl kısmı aynı (marka/model farklı)", out, differentNames);
   });
 
-  // Kural 4: aynı sözcükler, farklı sıra — ör. "Vida Tapası Yapışkanlı Parlak Beyaz Yağmur"
+  // Kural 4: aynı sözcükler (tekrarlar yok sayılır), farklı sıra — ör. "Vida Tapası Yapışkanlı Parlak Beyaz Yağmur"
   // ile "Yapışkanlı Vida Tapası Parlak Beyaz Yağmur".
   const bagBuckets = new Map();
   Object.keys(products)
@@ -1763,7 +1786,9 @@ function autoMatchProducts() {
       const ordered = normName(products[root].name);
       const toks = ordered.split(" ").filter(Boolean);
       if (toks.length < 4 || toks[0] === "isimsiz") return;
-      const key = [...toks].sort().join(" ");
+      // Tekrarlanan sözcükler tek sayılır: "... 526 Mat Siyah 526 - Mat Siyah" ile
+      // "... 526 Mat Siyah" aynı ürünü anlatıyor (başlık sonuna kod/renk tekrar eklenmiş).
+      const key = [...new Set(toks)].sort().join(" ");
       if (!bagBuckets.has(key)) bagBuckets.set(key, []);
       bagBuckets.get(key).push({ root, ordered });
     });
@@ -2387,6 +2412,9 @@ app.use(express.static(__dirname));
 // "*" joker rotası aynı şekilde çalışmayabiliyor, app.use ise her sürümde güvenli.)
 app.use((req, res, next) => {
   if (req.method !== "GET" || req.path.startsWith("/api/")) return next();
+  // /logos/ty.png gibi uzantılı ama bulunamayan istekler 70 KB'lık index.html ile
+  // cevaplanıyordu (her logo için!). Bunlar düz 404 olmalı.
+  if (path.extname(req.path)) return res.status(404).end();
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
