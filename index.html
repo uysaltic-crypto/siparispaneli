@@ -82,7 +82,7 @@
   /* Kompakt kutu: logo · durum · fiyat · ⋮ (diğer bilgiler ⋮ menüsünde) */
   .pchip.compact { position:relative; min-width:0; padding:6px 10px; display:flex; align-items:center; gap:8px; }
   .pchip.compact.off { opacity:.4; }
-  .plogo { width:22px; height:22px; border-radius:5px; flex:none; display:block; object-fit:contain; background:#fff; }
+  .plogo { width:22px; height:22px; border-radius:5px; flex:none; display:inline-block; }
   .pchip-state { font-size:11px; font-weight:700; }
   .pchip-state.satista { color:var(--ok); }
   .pchip-state.pasif { color:var(--danger); }
@@ -181,8 +181,8 @@
     <!-- STOK -->
     <div class="panel" id="panel-stock">
       <div class="toolbar">
-        <div class="search"><input type="text" id="stockSearch" placeholder="Barkod veya ürün adı ara..." oninput="renderStock()"></div>
-        <select id="stockSort" onchange="renderStock()">
+        <div class="search"><input type="text" id="stockSearch" placeholder="Barkod veya ürün adı ara..." oninput="stockSearchInput()"></div>
+        <select id="stockSort" onchange="stockResetRender()">
           <option value="name-asc">Ada göre A-Z</option>
           <option value="name-desc">Ada göre Z-A</option>
           <option value="code-asc">Ana ürün koduna göre A-Z</option>
@@ -210,6 +210,7 @@
       </div>
 
       <div id="stockCards"></div>
+      <div id="stockMore" style="text-align:center; margin:14px 0; display:none;"></div>
       <div id="stockEmpty" class="empty" style="display:none;">Henüz ürün yok. Excel yükle ya da elle ekle.</div>
     </div>
 
@@ -268,6 +269,7 @@
         <tbody id="competeRows"></tbody>
       </table>
       <div id="competeEmpty" class="empty" style="display:none;">Henüz ürün yok. Önce Stok sekmesinden ürün ekle.</div>
+      <div id="competeMore" style="text-align:center; margin:14px 0; display:none;"></div>
     </div>
   </div>
 </div>
@@ -312,7 +314,8 @@ function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'match') loadMatchStatus();
-  if (name === 'compete') renderCompete();
+  if (name === 'stock' && state.stockDirty) { state.stockDirty = false; renderStock(true); }
+  if (name === 'compete') { state.competeDirty = false; renderCompete(); }
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
 }
 
@@ -549,31 +552,104 @@ function renderOrders(data) {
   });
 }
 
+const tabActive = (name) => document.getElementById('panel-' + name)?.classList.contains('active');
 async function loadProducts(force = true) {
+  // Arka plan yenilemesi: tarayıcı sekmesi görünmüyorsa hiç çalışma.
+  if (!force && document.hidden) return;
   const r = await fetch('/api/products');
   if (r.status === 401) return;
   const data = await r.json();
-  state.products = data.products || [];
-  renderStock(force);
-  renderCompete(force);
+  const list = data.products || [];
+
+  // Ürün başına imza: hangi ürünlerin gerçekten değiştiğini bulup SADECE o kartları
+  // yeniden çizeriz. (Eskiden tek bir değişiklikte ekrandaki tüm kartlar sıfırdan
+  // çiziliyordu — birleştirme/fiyat/stok işlemlerindeki donmanın ana nedeni buydu.)
+  const oldSigs = state.productSigs;
+  const newSigs = new Map();
+  const changed = [];
+  for (const p of list) {
+    const sg = JSON.stringify(p);
+    newSigs.set(p.code, sg);
+    if (oldSigs && oldSigs.get(p.code) !== sg) changed.push(p.code);
+  }
+  const removed = oldSigs ? [...oldSigs.keys()].filter(c => !newSigs.has(c)) : [];
+  if (oldSigs && !changed.length && !removed.length) return; // hiçbir şey değişmedi
+
+  // Kullanıcı bir kartta yazıyorsa / ⋮ menüsü açıksa arka plan yenilemesi bekler
+  // (imzalar güncellenmediği için bir sonraki turda tekrar denenir).
+  const active = document.activeElement;
+  const busy = !force && ((active && active.closest && active.closest('#stockCards')) || document.querySelector('.pchip.open'));
+  if (busy && tabActive('stock')) return;
+
+  const prev = state.renderedByCode;
+  state.products = list;
+  state.productSigs = newSigs;
+  ensureLogoStyles();
+  if (force || tabActive('stock')) {
+    state.stockDirty = false;
+    const small = oldSigs && prev && state.stockRenderedOnce && !removed.length && changed.length <= 60;
+    if (small) patchStockCards(changed, prev); else renderStock(true);
+  } else state.stockDirty = true;
+  state.renderedByCode = new Map(list.map(p => [p.code, p]));
+  if (tabActive('compete')) { state.competeDirty = false; renderCompete(force); } else state.competeDirty = true;
+}
+
+// Sunucunun döndürdüğü güncel ürünleri (ör. birleştirme sonrası aile üyeleri) yerelde
+// uygular; tüm listeyi yeniden indirip çizmek yerine sadece ilgili kartlar güncellenir.
+function applyProductUpdates(updated) {
+  const prev = state.renderedByCode || new Map(state.products.map(p => [p.code, p]));
+  const pos = new Map(state.products.map((p, i) => [p.code, i]));
+  const next = state.products.slice();
+  updated.forEach(u => { if (pos.has(u.code)) next[pos.get(u.code)] = u; else next.push(u); });
+  state.products = next;
+  if (!state.productSigs) state.productSigs = new Map();
+  updated.forEach(u => state.productSigs.set(u.code, JSON.stringify(u)));
+  if (state.stockRenderedOnce) patchStockCards(updated.map(u => u.code), prev); else renderStock(true);
+  state.renderedByCode = new Map(next.map(p => [p.code, p]));
+  if (tabActive('compete')) renderCompete(true);
 }
 
 // Sürükle-bırak ile bir ürünün altına birleştirilen (mergedInto dolu) ürünler artık
 // silinmiyor; ana ürünün kartında "Birleşen ürünler" olarak, kendi platform stok
 // koduyla birlikte listelenmeye devam ediyor. Bu yüzden ana listede sadece bağımsız/
 // ana ürünler (mergedInto boş olanlar) ayrı bir kart olarak gösterilir.
+let _childMapFor = null, _childMap = null;
 function getChildren(code) {
-  return state.products.filter(p => p.mergedInto === code);
+  // Eskiden her çağrıda tüm ürünler taranıyordu (binlerce üründe O(n²) → donma).
+  if (_childMapFor !== state.products) {
+    _childMap = new Map();
+    state.products.forEach(p => {
+      if (!p.mergedInto) return;
+      if (!_childMap.has(p.mergedInto)) _childMap.set(p.mergedInto, []);
+      _childMap.get(p.mergedInto).push(p);
+    });
+    _childMapFor = state.products;
+  }
+  return _childMap.get(code) || [];
 }
 
-// Platform logoları. Kendi logo dosyanı koymak istersen proje klasörüne logos/<id>.png
-// (hb, ty, n11, cs, koctas) at — varsa o kullanılır; yoksa aşağıdaki marka renkli simge görünür.
+// Platform logoları: her kutuda ayrı <img>/istek YOK — platform başına bir kez CSS sınıfı
+// üretilir. Kendi logonu koymak istersen proje klasörüne logos/<id>.png (hb, ty, n11, cs,
+// koctas) at; dosya varsa (tek seferlik kontrolle) o kullanılır, yoksa renkli simge görünür.
 const PLATFORM_MARKS = { hb: 'h', ty: 't', n11: 'n', cs: 'ç', koctas: 'K' };
+let logoStyleEl = null;
+const logoReady = new Set();
+function ensureLogoStyles() {
+  if (!logoStyleEl) { logoStyleEl = document.createElement('style'); document.head.appendChild(logoStyleEl); }
+  (state.platforms || []).forEach(pl => {
+    if (logoReady.has(pl.id)) return;
+    logoReady.add(pl.id);
+    const mark = PLATFORM_MARKS[pl.id] || String(pl.name || '?').charAt(0).toLowerCase();
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44"><rect width="44" height="44" rx="10" fill="${pl.color}"/><text x="22" y="31" font-family="Arial,Helvetica,sans-serif" font-size="26" font-weight="700" text-anchor="middle" fill="#fff">${mark}</text></svg>`;
+    const rule = (url) => `.plogo.pl-${pl.id}{background:#fff url("${url}") center/contain no-repeat;}`;
+    logoStyleEl.appendChild(document.createTextNode(rule('data:image/svg+xml;utf8,' + encodeURIComponent(svg))));
+    const probe = new Image();
+    probe.onload = () => logoStyleEl.appendChild(document.createTextNode(rule(`/logos/${pl.id}.png`)));
+    probe.src = `/logos/${pl.id}.png`;
+  });
+}
 function platformLogoHtml(pl) {
-  const mark = PLATFORM_MARKS[pl.id] || String(pl.name || '?').charAt(0).toLowerCase();
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44"><rect width="44" height="44" rx="10" fill="${pl.color}"/><text x="22" y="31" font-family="Arial,Helvetica,sans-serif" font-size="26" font-weight="700" text-anchor="middle" fill="#fff">${mark}</text></svg>`;
-  const fallback = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
-  return `<img class="plogo" src="/logos/${pl.id}.png" alt="${pl.name}" title="${pl.name}" onerror="this.onerror=null;this.src='${fallback}'">`;
+  return `<span class="plogo pl-${pl.id}" title="${pl.name}"></span>`;
 }
 
 function fmtPrice(v) {
@@ -629,18 +705,8 @@ function platformChipHtml(p, pl, rootCode) {
     </div>`;
 }
 
-function renderStock(force) {
-  // Panelde her 30 saniyede bir arka planda otomatik yenileme (loadProducts) çalışıyor
-  // ve bu fonksiyonu tekrar çağırıyor. Kullanıcı o an bir ürün kartında bir alanı
-  // (fiyat/adet/ürün kodu) düzenliyorsa, henüz kaydetmediği yazı bu yenilemeyle
-  // sessizce silinmesin diye SADECE o arka plan döngüsünde kartları yeniden oluşturmayı
-  // atlıyoruz. Birleştirme/ayırma/silme gibi kullanıcının doğrudan tetiklediği bir işlem
-  // sonrası (force=true) odak nerede olursa olsun ekran HER ZAMAN güncellenir.
-  const active = document.activeElement;
-  if (!force && active && active.closest && active.closest('#stockCards')) return;
-  // Açık bir ⋮ menüsü varken arka plan yenilemesi menüyü kapatmasın.
-  if (!force && document.querySelector('.pchip.open')) return;
-
+// Arama + sıralamaya göre ekranda görünecek ana ürün listesi (DOM'a dokunmaz).
+function stockComputeView() {
   const q = (document.getElementById('stockSearch').value || '').trim().toLocaleLowerCase('tr');
   let list = state.products.filter(p => !p.mergedInto);
   if (q) {
@@ -667,13 +733,46 @@ function renderStock(force) {
       default: return collator.compare(a.name || '', b.name || '');
     }
   });
+  return list;
+}
+
+function renderStock(force) {
+  // Panelde her 30 saniyede bir arka planda otomatik yenileme (loadProducts) çalışıyor
+  // ve bu fonksiyonu tekrar çağırıyor. Kullanıcı o an bir ürün kartında bir alanı
+  // (fiyat/adet/ürün kodu) düzenliyorsa, henüz kaydetmediği yazı bu yenilemeyle
+  // sessizce silinmesin diye SADECE o arka plan döngüsünde kartları yeniden oluşturmayı
+  // atlıyoruz. Birleştirme/ayırma/silme gibi kullanıcının doğrudan tetiklediği bir işlem
+  // sonrası (force=true) odak nerede olursa olsun ekran HER ZAMAN güncellenir.
+  const active = document.activeElement;
+  if (!force && active && active.closest && active.closest('#stockCards')) return;
+  // Açık bir ⋮ menüsü varken arka plan yenilemesi menüyü kapatmasın.
+  if (!force && document.querySelector('.pchip.open')) return;
+
+  const list = stockComputeView();
 
   const activePlatforms = state.platforms.filter(p => p.configured);
   const wrap = document.getElementById('stockCards');
   wrap.innerHTML = '';
   document.getElementById('stockEmpty').style.display = list.length ? 'none' : 'block';
 
-  list.forEach(p => {
+  stockView = list;
+  stockActivePlatforms = activePlatforms;
+  stockRendered = 0;
+  initStockDnD();
+  initStockMoreObserver();
+  appendStockCards(Math.min(stockLimit, list.length));
+  updateStockMore();
+  state.stockRenderedOnce = true;
+}
+
+// Binlerce ürünün hepsini tek seferde çizmek sayfayı donduruyordu: ilk STOCK_PAGE kart
+// çizilir, kalanı aşağı kaydırdıkça / "Daha fazla göster" ile eklenir. Arama tüm listede çalışır.
+const STOCK_PAGE = 40;
+let stockView = [], stockActivePlatforms = [], stockRendered = 0, stockLimit = STOCK_PAGE, stockSearchT = null;
+function stockSearchInput() { clearTimeout(stockSearchT); stockSearchT = setTimeout(stockResetRender, 250); }
+function stockResetRender() { stockLimit = STOCK_PAGE; renderStock(true); }
+
+function buildStockCard(p, activePlatforms) {
     const c = Number(p.centralStock) || 0;
     const thumb = p.image
       ? `<img class="pcard-thumb" src="${p.image}" alt="">`
@@ -728,37 +827,124 @@ function renderStock(force) {
       </div>
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
     `;
-    attachDragHandlers(card);
-    wrap.appendChild(card);
-    card.querySelectorAll('textarea.pcard-title-input').forEach(autoGrow);
-  });
+    return card;
+}
+
+function appendStockCards(upTo) {
+  const wrap = document.getElementById('stockCards');
+  const frag = document.createDocumentFragment();
+  const areas = [];
+  for (let i = stockRendered; i < upTo; i++) {
+    const card = buildStockCard(stockView[i], stockActivePlatforms);
+    frag.appendChild(card);
+    card.querySelectorAll('textarea.pcard-title-input').forEach(t => areas.push(t));
+  }
+  wrap.appendChild(frag);
+  stockRendered = upTo;
+  // Yükseklik ayarı toplu: önce hepsini sıfırla, sonra hepsini oku, sonra hepsini yaz
+  // (her kart için ayrı ayrı yeniden yerleşim hesaplatmak donmanın ana nedenlerindendi).
+  areas.forEach(t => { t.style.height = 'auto'; });
+  const hs = areas.map(t => t.scrollHeight);
+  areas.forEach((t, i) => { t.style.height = (hs[i] + 2) + 'px'; });
+}
+
+// Değişen ürünlerin kartlarını yerinde günceller (tüm listeyi yeniden çizmez).
+// prevByCode: son çizimdeki ürünler — ayırma/yeniden bağlama durumunda eski ana kartı da yenilemek için.
+function patchStockCards(codes, prevByCode) {
+  const wrap = document.getElementById('stockCards');
+  const view = stockComputeView();
+  const pos = new Map(view.map((p, i) => [p.code, i]));
+  const byCode = new Map(state.products.map(p => [p.code, p]));
+  const cards = new Map();
+  wrap.querySelectorAll(':scope > .pcard').forEach(el => cards.set(el.dataset.code, el));
+  const rootOf = (c) => { let p = byCode.get(c), n = 0; while (p && p.mergedInto && byCode.get(p.mergedInto) && n++ < 10) p = byCode.get(p.mergedInto); return p ? p.code : c; };
+
+  const roots = new Set();
+  for (const c of codes) {
+    const p = byCode.get(c);
+    if (!p) return renderStock(true);                     // silinmiş ürün → güvenli yol
+    if (p.mergedInto) { const el = cards.get(c); if (el) { el.remove(); cards.delete(c); } }
+    roots.add(rootOf(c));
+    const old = prevByCode && prevByCode.get(c);
+    if (old && old.mergedInto && byCode.has(old.mergedInto)) roots.add(rootOf(old.mergedInto)); // eski ana kart
+  }
+  for (const r of roots) {
+    const p = byCode.get(r); if (!p) continue;
+    const el = cards.get(r);
+    const at = pos.get(r);
+    if (at === undefined) { if (el) { el.remove(); cards.delete(r); } continue; }   // aramaya uymuyor
+    if (!el) { if (at < cards.size) return renderStock(true); continue; }          // görünmesi gereken yeni kart
+    const fresh = buildStockCard(p, stockActivePlatforms);
+    el.replaceWith(fresh); cards.set(r, fresh);
+    fresh.querySelectorAll('textarea.pcard-title-input').forEach(t => { t.style.height = 'auto'; t.style.height = (t.scrollHeight + 2) + 'px'; });
+  }
+  stockView = view;
+  stockRendered = wrap.querySelectorAll(':scope > .pcard').length;
+  document.getElementById('stockEmpty').style.display = view.length ? 'none' : 'block';
+  updateStockMore();
+}
+
+function updateStockMore() {
+  const box = document.getElementById('stockMore');
+  const remaining = stockView.length - stockRendered;
+  if (remaining <= 0) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML = `<span class="muted" style="font-size:12px; margin-right:10px;">${stockRendered} / ${stockView.length} ürün gösteriliyor</span>
+    <button class="ghost small" onclick="showMoreStock(false)">Daha fazla göster</button>
+    <button class="ghost small" onclick="showMoreStock(true)">Tümünü göster</button>`;
+}
+
+function showMoreStock(all) {
+  if (stockRendered >= stockView.length) return;
+  stockLimit = all ? stockView.length : Math.min(stockView.length, stockRendered + STOCK_PAGE);
+  appendStockCards(stockLimit);
+  updateStockMore();
+}
+
+let stockMoreObserver = null;
+function initStockMoreObserver() {
+  if (stockMoreObserver || !('IntersectionObserver' in window)) return;
+  stockMoreObserver = new IntersectionObserver((entries) => {
+    if (entries.some(e => e.isIntersecting) && stockRendered < stockView.length) showMoreStock(false);
+  }, { rootMargin: '400px' });
+  stockMoreObserver.observe(document.getElementById('stockMore'));
 }
 
 /* --- Ürün kartlarını sürükleyerek birleştirme --- */
 let dragSourceCode = null;
 
-function attachDragHandlers(card) {
-  card.addEventListener('dragstart', (e) => {
+let dndReady = false;
+function initStockDnD() {
+  if (dndReady) return;
+  dndReady = true;
+  const wrap = document.getElementById('stockCards');
+  const cardOf = (e) => (e.target && e.target.closest) ? e.target.closest('.pcard') : null;
+  const clearOver = () => document.querySelectorAll('.pcard.drag-over').forEach(el => el.classList.remove('drag-over'));
+  wrap.addEventListener('dragstart', (e) => {
+    const card = cardOf(e); if (!card) return;
     dragSourceCode = card.dataset.code;
     card.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', card.dataset.code);
   });
-  card.addEventListener('dragend', () => {
-    card.classList.remove('dragging');
-    document.querySelectorAll('.pcard.drag-over').forEach(el => el.classList.remove('drag-over'));
+  wrap.addEventListener('dragend', (e) => {
+    const card = cardOf(e); if (card) card.classList.remove('dragging');
+    clearOver();
     dragSourceCode = null;
   });
-  card.addEventListener('dragover', (e) => {
-    if (!dragSourceCode || dragSourceCode === card.dataset.code) return;
+  wrap.addEventListener('dragover', (e) => {
+    const card = cardOf(e);
+    if (!card || !dragSourceCode || dragSourceCode === card.dataset.code) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    card.classList.add('drag-over');
+    if (!card.classList.contains('drag-over')) { clearOver(); card.classList.add('drag-over'); }
   });
-  card.addEventListener('dragleave', () => {
-    card.classList.remove('drag-over');
+  wrap.addEventListener('dragleave', (e) => {
+    const card = cardOf(e);
+    if (card && !card.contains(e.relatedTarget)) card.classList.remove('drag-over');
   });
-  card.addEventListener('drop', async (e) => {
+  wrap.addEventListener('drop', async (e) => {
+    const card = cardOf(e); if (!card) return;
     e.preventDefault();
     card.classList.remove('drag-over');
     const fromCode = dragSourceCode;
@@ -784,7 +970,8 @@ async function mergeProducts(fromCode, toCode) {
     const data = await resp.json();
     if (!data.ok) { toast(data.error || 'Birleştirilemedi.'); return; }
     toast('Ürünler birleştirildi.');
-    await loadProducts();
+    if (Array.isArray(data.products) && data.products.length) applyProductUpdates(data.products);
+    else await loadProducts();
   } catch (e) {
     toast('Birleştirme hatası: ' + e.message);
   }
@@ -1053,6 +1240,8 @@ async function pushProduct(barcode) {
   await loadProducts(); await loadLog();
 }
 
+const COMPETE_PAGE = 50;
+let competeLimit = COMPETE_PAGE;
 function renderCompete(force) {
   // Aynı sebep: rakip link kutusuna (ya da min/maks fiyat/otomatik fiyatlandırma
   // kutucuğuna) yazı yazarken 30 saniyelik arka plan yenilemesi araya girip henüz
@@ -1065,7 +1254,8 @@ function renderCompete(force) {
   const tbody = document.getElementById('competeRows');
   document.getElementById('competeEmpty').style.display = state.products.length ? 'none' : 'block';
   tbody.innerHTML = '';
-  state.products.forEach(p => {
+  const frag = document.createDocumentFragment();
+  state.products.slice(0, competeLimit).forEach(p => {
     const pricing = p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
     const competitors = p.competitors || [];
     const lowest = competitors.map(c => c.lastPrice).filter(n => typeof n === 'number' && n > 0);
@@ -1098,8 +1288,17 @@ function renderCompete(force) {
         <button class="ghost small" onclick="saveCompete('${p.code}')">Kaydet</button>
         <button class="small" onclick="repriceNow('${p.code}')">Şimdi Kontrol Et</button>
       </td>`;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.appendChild(frag);
+  const more = document.getElementById('competeMore');
+  const rest = state.products.length - competeLimit;
+  if (rest > 0) {
+    more.style.display = 'block';
+    more.innerHTML = `<span class="muted" style="font-size:12px; margin-right:10px;">${competeLimit} / ${state.products.length} ürün gösteriliyor</span>
+      <button class="ghost small" onclick="competeLimit += COMPETE_PAGE; renderCompete(true)">Daha fazla göster</button>
+      <button class="ghost small" onclick="competeLimit = state.products.length; renderCompete(true)">Tümünü göster</button>`;
+  } else { more.style.display = 'none'; more.innerHTML = ''; }
 }
 
 async function saveCompete(code) {
