@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Ticaret Paneli</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <style>
   :root {
     --bg: #0F1115; --surface: #171A21; --surface2: #1B212B; --border: #242832;
@@ -169,9 +171,14 @@
     <!-- SİPARİŞLER -->
     <div class="panel active" id="panel-orders">
       <div class="stats" id="orderStats"></div>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
+        <button onclick="printSelectedOrders()">Seçilenleri yazdır</button>
+        <button class="ghost" onclick="printAllOrders()">Tümünü yazdır</button>
+        <span class="muted" id="orderSelInfo"></span>
+      </div>
       <table>
         <thead><tr>
-          <th>Platform</th><th>Sipariş No</th><th>Müşteri / Şehir</th><th>Ürünler</th><th>Tutar</th><th>Durum</th><th>Tarih</th>
+          <th style="width:28px;"><input type="checkbox" id="orderSelAll" onchange="toggleAllOrders(this.checked)"></th><th>Platform</th><th>Sipariş No</th><th>Müşteri / Şehir</th><th>Ürünler</th><th>Tutar</th><th>Durum</th><th>Tarih</th><th></th>
         </tr></thead>
         <tbody id="orderRows"></tbody>
       </table>
@@ -510,6 +517,120 @@ function platformMeta(id) {
   return state.platforms.find(p => p.id === id) || { name: id.toUpperCase(), color: '#999' };
 }
 
+
+/* ---------------- Sipariş yazdırma (Barkod + QR) ---------------- */
+const selectedOrders = new Set();
+const orderKey = (o) => `${o.platform}:${o.packageId || o.orderNumber}`;
+function updateOrderSelInfo() {
+  const el = document.getElementById('orderSelInfo');
+  if (el) el.textContent = selectedOrders.size ? selectedOrders.size + ' sipariş seçili' : '';
+}
+function toggleOrder(key, on) { on ? selectedOrders.add(key) : selectedOrders.delete(key); updateOrderSelInfo(); }
+function toggleAllOrders(on) {
+  (window.__orders || []).forEach(o => on ? selectedOrders.add(orderKey(o)) : selectedOrders.delete(orderKey(o)));
+  document.querySelectorAll('#orderRows input[type=checkbox]').forEach(c => c.checked = on);
+  updateOrderSelInfo();
+}
+function printSelectedOrders() {
+  const list = (window.__orders || []).filter(o => selectedOrders.has(orderKey(o)));
+  if (!list.length) { alert('Önce yazdırılacak siparişleri seçin.'); return; }
+  printOrders(list);
+}
+function printAllOrders() {
+  const list = window.__orders || [];
+  if (!list.length) { alert('Yazdırılacak sipariş yok.'); return; }
+  printOrders(list);
+}
+function escHtml(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// Normal barkod (Code128) — SVG metni döner; geçersiz karakter varsa düz metne düşer.
+function barcodeSvg(text, height) {
+  try {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    JsBarcode(svg, String(text), { format: 'CODE128', displayValue: true, height: height || 50, margin: 0, fontSize: 12, width: 2 });
+    return svg.outerHTML;
+  } catch (e) {
+    return `<div class="nobc">${escHtml(text)}</div>`;
+  }
+}
+// Kare kod (QR) — img etiketi döner.
+function qrImg(text, cls) {
+  try {
+    const q = qrcode(0, 'M');
+    q.addData(String(text), 'Byte');
+    q.make();
+    return `<img class="${cls || 'qr'}" src="${q.createDataURL(6, 0)}">`;
+  } catch (e) {
+    return '';
+  }
+}
+function printOrders(orders) {
+  if (typeof JsBarcode === 'undefined' || typeof qrcode === 'undefined') {
+    alert('Barkod/QR kütüphaneleri yüklenemedi. İnternet bağlantısını kontrol edip sayfayı yenileyin.');
+    return;
+  }
+  const pages = orders.map(o => {
+    const pm = platformMeta(o.platform);
+    const lines = (o.lines || []).map(l => `
+      <tr>
+        <td class="qty">${escHtml(l.quantity)}x</td>
+        <td>${escHtml(l.name || '—')}</td>
+        <td class="lc">${l.barcode ? barcodeSvg(l.barcode, 32) : ''}</td>
+        <td class="lq">${l.barcode ? qrImg(l.barcode, 'qr sm') : ''}</td>
+      </tr>`).join('') || `<tr><td colspan="4">${escHtml(o.productSummary || '—')}</td></tr>`;
+    return `
+    <section class="order">
+      <div class="top">
+        <div>
+          <div class="plat">${escHtml(pm.name)}</div>
+          <div class="no">${escHtml(o.orderNumber)}</div>
+          <div class="meta"><b>${escHtml(o.customer)}</b>${o.city ? ' — ' + escHtml(o.city) : ''}</div>
+          <div class="meta">${escHtml(fmtDate(o.date))} · ${escHtml(o.status)}${o.amount ? ' · ' + o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : ''}</div>
+        </div>
+        <div class="codes">
+          <div class="bc">${barcodeSvg(o.orderNumber, 60)}</div>
+          ${qrImg(o.orderNumber, 'qr')}
+        </div>
+      </div>
+      <table class="lines">
+        <thead><tr><th>Adet</th><th>Ürün</th><th>Barkod</th><th>QR</th></tr></thead>
+        <tbody>${lines}</tbody>
+      </table>
+    </section>`;
+  }).join('');
+
+  const html = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Sipariş Yazdır</title>
+  <style>
+    @page { size: A4; margin: 10mm; }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; color:#000; margin:0; }
+    .order { break-inside: avoid; page-break-inside: avoid; border: 1px dashed #666; padding: 5mm; margin-bottom: 6mm; }
+    .top { display:flex; justify-content:space-between; gap:10px; border-bottom:2px solid #000; padding-bottom:8px; margin-bottom:8px; }
+    .plat { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+    .no { font-size:20px; font-weight:800; margin:2px 0 6px; word-break:break-all; }
+    .meta { font-size:12px; margin-bottom:2px; }
+    .codes { display:flex; flex-direction:column; align-items:center; gap:6px; }
+    .bc svg { max-width:70mm; height:auto; }
+    .qr { width:30mm; height:30mm; image-rendering:pixelated; }
+    .qr.sm { width:12mm; height:12mm; }
+    .lines { width:100%; border-collapse:collapse; font-size:12px; }
+    .lines th { text-align:left; font-size:10px; text-transform:uppercase; border-bottom:1px solid #000; padding:3px 4px; }
+    .lines td { border-bottom:1px solid #bbb; padding:4px; vertical-align:middle; }
+    .qty { font-weight:800; white-space:nowrap; }
+    .lc svg { max-width:45mm; height:auto; }
+    .nobc { font-family:monospace; font-size:11px; }
+  </style></head><body>${pages}</body></html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) { alert('Yazdırma penceresi açılamadı. Tarayıcıda bu site için açılır pencerelere izin verin.'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+  let printed = false;
+  const doPrint = () => { if (printed) return; printed = true; try { w.focus(); w.print(); } catch (e) {} };
+  w.onload = doPrint;
+  setTimeout(doPrint, 800);
+}
+
 function renderOrders(data) {
   const orders = data.orders || [];
   const activePlatforms = state.platforms.filter(p => p.configured);
@@ -537,19 +658,24 @@ function renderOrders(data) {
   const rows = document.getElementById('orderRows');
   rows.innerHTML = '';
   document.getElementById('ordersEmpty').style.display = orders.length ? 'none' : 'block';
-  orders.forEach(o => {
+  window.__orders = orders;
+  orders.forEach((o, idx) => {
     const pm = platformMeta(o.platform);
     const tr = document.createElement('tr');
+    const okey = orderKey(o);
     tr.innerHTML = `
+      <td><input type="checkbox" ${selectedOrders.has(okey) ? 'checked' : ''} onchange="toggleOrder('${escAttr(okey)}', this.checked)"></td>
       <td><span class="badge" style="color:${pm.color}; background:${pm.color}18;">${pm.name}</span></td>
       <td>${o.orderNumber}</td>
       <td>${o.customer}<div class="muted">${o.city || ''}</div></td>
       <td>${o.productSummary}</td>
       <td class="amount">${o.amount ? o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : '—'}</td>
       <td>${o.status}</td>
-      <td class="muted">${fmtDate(o.date)}</td>`;
+      <td class="muted">${fmtDate(o.date)}</td>
+      <td><button class="ghost" onclick="printOrders([window.__orders[${idx}]])">Yazdır</button></td>`;
     rows.appendChild(tr);
   });
+  updateOrderSelInfo();
 }
 
 const tabActive = (name) => document.getElementById('panel-' + name)?.classList.contains('active');
