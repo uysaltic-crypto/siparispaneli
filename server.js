@@ -1474,6 +1474,56 @@ app.post("/api/printed", requireAuth, (req, res) => {
 /* ------------------------------------------------------------------
    API — Stok / ürün yönetimi
 ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+   Ürün resmi değiştirme
+   Yüklenen resim data/images/ altına dosya olarak kaydedilir ve /product-images/
+   yolundan servis edilir (products.json şişmesin diye). İstemci resmi küçültüp
+   gönderir. Not: bu sadece PANELDEKİ resmi değiştirir; pazaryerlerindeki ürün
+   görsellerine dokunmaz. Siteden çekme (pull) elle verilen resmi ezmez.
+------------------------------------------------------------------ */
+const IMG_DIR = path.join(DATA_DIR, "images");
+if (!fs.existsSync(IMG_DIR)) fs.mkdirSync(IMG_DIR, { recursive: true });
+app.use("/product-images", express.static(IMG_DIR, { maxAge: "30d", index: false }));
+
+function removeCustomImageFile(p) {
+  if (!p || typeof p.image !== "string" || !p.image.startsWith("/product-images/")) return;
+  const file = path.join(IMG_DIR, path.basename(p.image));
+  try { fs.unlinkSync(file); } catch (_) {}
+}
+
+app.post("/api/products/:code/image", requireAuth, (req, res) => {
+  const p = products[req.params.code];
+  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  const { dataUrl, url, reset } = req.body || {};
+
+  if (reset) {
+    removeCustomImageFile(p);
+    p.image = p.platformImage || null;
+    p.imageCustom = false;
+  } else if (dataUrl) {
+    const m = /^data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=]+)$/i.exec(String(dataUrl));
+    if (!m) return res.status(400).json({ ok: false, error: "Geçersiz resim (png, jpg, webp veya gif olmalı)." });
+    const buf = Buffer.from(m[2], "base64");
+    if (!buf.length || buf.length > 3 * 1024 * 1024) return res.status(400).json({ ok: false, error: "Resim en fazla 3 MB olabilir." });
+    const ext = m[1].toLowerCase().replace("jpeg", "jpg");
+    const name = crypto.createHash("sha1").update(req.params.code + Date.now() + Math.random()).digest("hex").slice(0, 20) + "." + ext;
+    fs.writeFileSync(path.join(IMG_DIR, name), buf);
+    removeCustomImageFile(p);
+    p.image = "/product-images/" + name;
+    p.imageCustom = true;
+  } else if (url) {
+    const u = String(url).trim();
+    if (!/^https?:\/\/\S+$/i.test(u) || u.length > 1000) return res.status(400).json({ ok: false, error: "Geçerli bir resim adresi (http/https) girin." });
+    removeCustomImageFile(p);
+    p.image = u;
+    p.imageCustom = true;
+  } else {
+    return res.status(400).json({ ok: false, error: "Resim bilgisi gönderilmedi." });
+  }
+  persistProducts();
+  res.json({ ok: true, product: serializeProduct(req.params.code) });
+});
+
 function serializeProduct(code) {
   const p = products[code];
   return {
@@ -1488,6 +1538,7 @@ function serializeProduct(code) {
     listingStatus: p.listingStatus || {},
     centralStock: p.centralStock,
     image: p.image || null,
+    imageCustom: !!p.imageCustom,
     pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
     competitors: p.competitors || [],
     mergedInto: p.mergedInto || null,
@@ -1584,6 +1635,7 @@ app.delete("/api/products/:code", requireAuth, (req, res) => {
   Object.values(products).forEach((p) => {
     if (p.mergedInto === code) p.mergedInto = null;
   });
+  removeCustomImageFile(products[code]);
   delete products[code];
   persistProducts();
   res.json({ ok: true });
@@ -1662,7 +1714,8 @@ function doMerge(from, to, stockMode) {
   // panelde (yalnızca doğrudan çocukları gösterir) kartlardan kaybolurlardı.
   movedFamily.forEach((c) => { if (c !== from && products[c]) products[c].mergedInto = newRoot; });
   invalidateFamilies();
-  if (!dst.image && src.image) dst.image = src.image;
+  if (src.imageCustom && !dst.imageCustom) { dst.image = src.image; dst.imageCustom = true; }
+  else if (!dst.image && src.image) dst.image = src.image;
   if ((!dst.competitors || !dst.competitors.length) && src.competitors?.length) dst.competitors = src.competitors;
   propagateCentralStock(newRoot, unified);
   return newRoot;
@@ -2043,7 +2096,10 @@ function mergeStockRows(platform, rows) {
     // stok değeri merkezi stoğun ilk değeri olarak da kullanılır.
     if (!existed) p.centralStock = stock;
     if (r.name && (!p.name || p.name === "İsimsiz ürün")) p.name = r.name;
-    if (r.image) p.image = r.image;
+    if (r.image) {
+      p.platformImage = r.image; // "Platform görseline dön" için saklanır
+      if (!p.imageCustom) p.image = r.image; // elle değiştirilen resim siteden çekmede ezilmez
+    }
     const price = Number(r.price);
     if (price > 0) p.prices[platform] = price;
     if (r.productCode) p.productCodes[platform] = String(r.productCode).trim();
@@ -2159,6 +2215,164 @@ app.post("/api/products/:code/push-platform", requireAuth, async (req, res) => {
   });
   persistPushLog();
   res.json({ ok: true, results });
+});
+
+/* ------------------------------------------------------------------
+   API — Toplu fiyat değişikliği (platform bazında seçilebilir)
+   mode: "percent" (yüzde, + artırır / - indirir) | "amount" (₺ ekle / çıkar)
+   Önce önizleme (apply:false), sonra uygulama (apply:true). Son işlem geri alınabilir.
+------------------------------------------------------------------ */
+let lastBulkPrice = loadJSON("price-undo.json", null); // { time, platforms, mode, value, changes:[{code,platform,old,new}] }
+let bulkPushJob = { running: false, total: 0, done: 0, failed: 0, startedAt: null, finishedAt: null, errors: [], label: "" };
+
+function computeBulkPrice(old, mode, value) {
+  const n = mode === "percent" ? old * (1 + value / 100) : old + value;
+  return Math.round(n * 100) / 100;
+}
+
+function planBulkPrice(platformIds, mode, value) {
+  const changes = [];
+  let skippedAuto = 0, skippedNoPrice = 0, skippedInvalid = 0;
+  for (const [code, prod] of Object.entries(products)) {
+    for (const pid of platformIds) {
+      if (!isListedOn(code, pid)) continue;
+      const old = Number(prod.prices?.[pid]);
+      if (!(old > 0)) { skippedNoPrice++; continue; }
+      // Trendyol'da otomatik fiyatlandırma açıksa o ürünün fiyatını rekabet sistemi yönetir; ezilmesin diye atlanır.
+      if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
+      const nw = computeBulkPrice(old, mode, value);
+      if (!(nw > 0)) { skippedInvalid++; continue; }
+      if (nw === old) continue;
+      changes.push({ code, platform: pid, old, new: nw });
+    }
+  }
+  return { changes, skippedAuto, skippedNoPrice, skippedInvalid };
+}
+
+function summarizeChanges(plan, platformIds) {
+  const perPlatform = {};
+  platformIds.forEach((id) => (perPlatform[id] = 0));
+  plan.changes.forEach((c) => { perPlatform[c.platform] = (perPlatform[c.platform] || 0) + 1; });
+  return {
+    total: plan.changes.length,
+    perPlatform,
+    skippedAuto: plan.skippedAuto,
+    skippedNoPrice: plan.skippedNoPrice,
+    skippedInvalid: plan.skippedInvalid,
+    samples: plan.changes.slice(0, 6).map((c) => ({ code: c.code, name: products[c.code]?.name || "", platform: c.platform, old: c.old, new: c.new })),
+  };
+}
+
+// Değişen fiyatları platformlara arka planda, platform başına sıralı ve hız sınırına uygun gönderir.
+function startBulkPush(changes, label) {
+  if (bulkPushJob.running) return false;
+  const byPlatform = {};
+  changes.forEach((c) => {
+    const pl = PLATFORMS.find((x) => x.id === c.platform);
+    if (!pl || !pl.configured()) return;
+    (byPlatform[c.platform] = byPlatform[c.platform] || []).push(c);
+  });
+  const total = Object.values(byPlatform).reduce((s, a) => s + a.length, 0);
+  bulkPushJob = { running: true, total, done: 0, failed: 0, startedAt: new Date().toISOString(), finishedAt: null, errors: [], label: label || "", perPlatform: {} };
+  if (!total) { bulkPushJob.running = false; bulkPushJob.finishedAt = new Date().toISOString(); return true; }
+
+  const delayFor = (pid) => (pid === "koctas" ? 61000 : 400); // Koçtaş (Mirakl) dakikada 1 istek
+  (async () => {
+    await Promise.all(
+      Object.entries(byPlatform).map(async ([pid, list]) => {
+        const stat = (bulkPushJob.perPlatform[pid] = { ok: 0, fail: 0, total: list.length });
+        for (const c of list) {
+          try {
+            const prod = products[c.code];
+            const qty = Number(products[resolveRoot(c.code)]?.centralStock) || 0;
+            const r = await pushListingToPlatform(pid, skuForPlatform(c.code, pid), qty, c.new);
+            if (r && r.ok) stat.ok++;
+            else {
+              stat.fail++; bulkPushJob.failed++;
+              if (bulkPushJob.errors.length < 20) bulkPushJob.errors.push(`${pid} · ${prod?.name || c.code}: ${r?.message || "hata"}`);
+            }
+          } catch (e) {
+            stat.fail++; bulkPushJob.failed++;
+            if (bulkPushJob.errors.length < 20) bulkPushJob.errors.push(`${pid} · ${c.code}: ${e.message}`);
+          }
+          bulkPushJob.done++;
+          await sleep(delayFor(pid));
+        }
+      })
+    );
+    bulkPushJob.running = false;
+    bulkPushJob.finishedAt = new Date().toISOString();
+    pushLog.push({
+      time: bulkPushJob.finishedAt,
+      barcode: "—",
+      name: `Toplu fiyat gönderimi (${bulkPushJob.total} ürün)`,
+      centralStock: "—",
+      trigger: "toplu fiyat",
+      results: Object.fromEntries(Object.entries(bulkPushJob.perPlatform).map(([id, st]) => [id, st.fail ? { ok: false, message: `${st.ok} başarılı, ${st.fail} hatalı` } : { ok: true }])),
+    });
+    persistPushLog();
+  })().catch((e) => {
+    bulkPushJob.running = false;
+    bulkPushJob.finishedAt = new Date().toISOString();
+    bulkPushJob.errors.push("Beklenmeyen hata: " + e.message);
+  });
+  return true;
+}
+
+app.post("/api/prices/bulk", requireAuth, (req, res) => {
+  const { platforms, mode, value, apply, push } = req.body || {};
+  const validIds = PLATFORMS.map((x) => x.id);
+  const platformIds = (Array.isArray(platforms) ? platforms : []).filter((id) => validIds.includes(id));
+  if (!platformIds.length) return res.status(400).json({ ok: false, error: "En az bir platform seçin." });
+  if (mode !== "percent" && mode !== "amount") return res.status(400).json({ ok: false, error: "Geçersiz değişiklik türü." });
+  const v = Number(value);
+  if (!Number.isFinite(v) || v === 0) return res.status(400).json({ ok: false, error: "Geçerli bir değer girin (0 olamaz)." });
+  if (mode === "percent" && (v <= -90 || v > 1000)) return res.status(400).json({ ok: false, error: "Yüzde değeri -90 ile 1000 arasında olmalı." });
+
+  const plan = planBulkPrice(platformIds, mode, v);
+  const summary = summarizeChanges(plan, platformIds);
+  if (!apply) return res.json({ ok: true, preview: true, ...summary });
+
+  if (!plan.changes.length) return res.status(400).json({ ok: false, error: "Değiştirilecek fiyat bulunamadı." });
+  if (push && bulkPushJob.running) return res.status(409).json({ ok: false, error: "Önceki toplu gönderim hâlâ sürüyor, bitmesini bekleyin." });
+
+  plan.changes.forEach((c) => { products[c.code].prices[c.platform] = c.new; });
+  persistProducts();
+  lastBulkPrice = { time: new Date().toISOString(), platforms: platformIds, mode, value: v, changes: plan.changes };
+  saveJSON("price-undo.json", lastBulkPrice);
+
+  let pushStarted = false;
+  if (push) pushStarted = startBulkPush(plan.changes, `${mode === "percent" ? "%" + v : v + " ₺"}`);
+  res.json({ ok: true, applied: true, pushStarted, ...summary });
+});
+
+app.get("/api/prices/bulk/status", requireAuth, (req, res) => {
+  res.json({
+    job: bulkPushJob,
+    last: lastBulkPrice
+      ? { time: lastBulkPrice.time, platforms: lastBulkPrice.platforms, mode: lastBulkPrice.mode, value: lastBulkPrice.value, count: lastBulkPrice.changes.length }
+      : null,
+  });
+});
+
+// Son toplu değişikliği geri alır (sonradan elle değiştirilen fiyatlara dokunmaz).
+app.post("/api/prices/bulk/undo", requireAuth, (req, res) => {
+  if (!lastBulkPrice) return res.status(400).json({ ok: false, error: "Geri alınacak toplu işlem yok." });
+  if (req.body?.push && bulkPushJob.running) return res.status(409).json({ ok: false, error: "Toplu gönderim sürüyor, bitmesini bekleyin." });
+  const restored = [];
+  lastBulkPrice.changes.forEach((c) => {
+    const prod = products[c.code];
+    if (!prod || Number(prod.prices?.[c.platform]) !== c.new) return;
+    prod.prices[c.platform] = c.old;
+    restored.push({ code: c.code, platform: c.platform, old: c.new, new: c.old });
+  });
+  persistProducts();
+  const total = lastBulkPrice.changes.length;
+  lastBulkPrice = null;
+  saveJSON("price-undo.json", null);
+  let pushStarted = false;
+  if (req.body?.push) pushStarted = startBulkPush(restored, "geri alma");
+  res.json({ ok: true, restored: restored.length, skipped: total - restored.length, pushStarted });
 });
 
 app.get("/api/push-log", requireAuth, (req, res) => {
