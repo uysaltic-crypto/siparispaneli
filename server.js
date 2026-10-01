@@ -1443,6 +1443,35 @@ app.post("/api/refresh", requireAuth, async (req, res) => {
 });
 
 /* ------------------------------------------------------------------
+   API — Yazdırıldı işaretleri (sipariş çıktısı alınanlar)
+   printed.json: { "<platform>:<packageId|orderNumber>": yazdırmaZamanı(ms) }
+------------------------------------------------------------------ */
+let printedOrders = loadJSON("printed.json", {});
+
+app.get("/api/printed", requireAuth, (req, res) => {
+  res.json(printedOrders);
+});
+
+app.post("/api/printed", requireAuth, (req, res) => {
+  const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys : [];
+  const mark = !(req.body && req.body.printed === false);
+  const now = Date.now();
+  keys.slice(0, 500).forEach((k) => {
+    if (typeof k !== "string" || !k || k.length > 200) return;
+    if (mark) printedOrders[k] = now;
+    else delete printedOrders[k];
+  });
+  // Dosya şişmesin: en yeni 5000 kaydı tut
+  const entries = Object.entries(printedOrders);
+  if (entries.length > 5000) {
+    entries.sort((a, b) => b[1] - a[1]);
+    printedOrders = Object.fromEntries(entries.slice(0, 5000));
+  }
+  saveJSON("printed.json", printedOrders);
+  res.json(printedOrders);
+});
+
+/* ------------------------------------------------------------------
    API — Stok / ürün yönetimi
 ------------------------------------------------------------------ */
 function serializeProduct(code) {
