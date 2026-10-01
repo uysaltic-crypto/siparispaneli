@@ -173,7 +173,9 @@
       <div class="stats" id="orderStats"></div>
       <div style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
         <button onclick="printSelectedOrders()">Seçilenleri yazdır</button>
+        <button class="ghost" onclick="printUnprintedOrders()">Yazdırılmamışları yazdır</button>
         <button class="ghost" onclick="printAllOrders()">Tümünü yazdır</button>
+        <label class="muted" style="display:flex; align-items:center; gap:5px; cursor:pointer;"><input type="checkbox" id="hidePrinted" onchange="rerenderOrders()"> Yazdırılanları gizle</label>
         <span class="muted" id="orderSelInfo"></span>
       </div>
       <table>
@@ -520,6 +522,35 @@ function platformMeta(id) {
 
 /* ---------------- Sipariş yazdırma (Barkod + QR) ---------------- */
 const selectedOrders = new Set();
+let printedMap = {};
+let printedLoaded = false;
+async function loadPrinted() {
+  try {
+    const r = await fetch('/api/printed');
+    if (r.ok) { printedMap = await r.json(); printedLoaded = true; rerenderOrders(); }
+  } catch (e) {}
+}
+function rerenderOrders() { if (window.__ordersData) renderOrders(window.__ordersData); }
+async function markPrinted(orders, printed = true) {
+  const keys = orders.map(orderKey);
+  const now = Date.now();
+  keys.forEach(k => { if (printed) printedMap[k] = now; else delete printedMap[k]; });
+  rerenderOrders();
+  try {
+    const r = await fetch('/api/printed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys, printed }) });
+    if (r.ok) printedMap = await r.json();
+  } catch (e) {}
+  rerenderOrders();
+}
+function unmarkPrinted(key) {
+  const o = (window.__orders || []).find(x => orderKey(x) === key);
+  if (o) markPrinted([o], false);
+}
+function printUnprintedOrders() {
+  const list = (window.__orders || []).filter(o => !printedMap[orderKey(o)]);
+  if (!list.length) { alert('Yazdırılmamış sipariş yok.'); return; }
+  printOrders(list);
+}
 const orderKey = (o) => `${o.platform}:${o.packageId || o.orderNumber}`;
 function updateOrderSelInfo() {
   const el = document.getElementById('orderSelInfo');
@@ -625,13 +656,17 @@ function printOrders(orders) {
   const w = window.open('', '_blank');
   if (!w) { alert('Yazdırma penceresi açılamadı. Tarayıcıda bu site için açılır pencerelere izin verin.'); return; }
   w.document.open(); w.document.write(html); w.document.close();
-  let printed = false;
-  const doPrint = () => { if (printed) return; printed = true; try { w.focus(); w.print(); } catch (e) {} };
+  let printStarted = false, marked = false;
+  const doMark = () => { if (marked) return; marked = true; markPrinted(orders, true); };
+  const doPrint = () => { if (printStarted) return; printStarted = true; try { w.focus(); w.print(); } catch (e) {} doMark(); };
+  w.onafterprint = doMark;
   w.onload = doPrint;
   setTimeout(doPrint, 800);
 }
 
 function renderOrders(data) {
+  window.__ordersData = data;
+  if (!printedLoaded) { printedLoaded = true; loadPrinted(); }
   const orders = data.orders || [];
   const activePlatforms = state.platforms.filter(p => p.configured);
   document.getElementById('orderStats').innerHTML =
@@ -658,21 +693,26 @@ function renderOrders(data) {
   const rows = document.getElementById('orderRows');
   rows.innerHTML = '';
   document.getElementById('ordersEmpty').style.display = orders.length ? 'none' : 'block';
-  window.__orders = orders;
-  orders.forEach((o, idx) => {
+  const hide = document.getElementById('hidePrinted')?.checked;
+  const shown = hide ? orders.filter(o => !printedMap[orderKey(o)]) : orders;
+  window.__orders = shown;
+  document.getElementById('ordersEmpty').style.display = shown.length ? 'none' : 'block';
+  shown.forEach((o, idx) => {
     const pm = platformMeta(o.platform);
     const tr = document.createElement('tr');
+    const pAt = printedMap[orderKey(o)];
+    if (pAt) tr.style.opacity = '.6';
     const okey = orderKey(o);
     tr.innerHTML = `
       <td><input type="checkbox" ${selectedOrders.has(okey) ? 'checked' : ''} onchange="toggleOrder('${escAttr(okey)}', this.checked)"></td>
       <td><span class="badge" style="color:${pm.color}; background:${pm.color}18;">${pm.name}</span></td>
-      <td>${o.orderNumber}</td>
+      <td>${o.orderNumber}${pAt ? `<div style="color:var(--ok); font-size:11px; margin-top:3px;">✓ Yazdırıldı ${fmtDate(pAt)} <a href="#" style="color:var(--muted);" title="Yazdırıldı işaretini kaldır" onclick="unmarkPrinted('${escAttr(okey)}'); return false;">geri al</a></div>` : ''}</td>
       <td>${o.customer}<div class="muted">${o.city || ''}</div></td>
       <td>${o.productSummary}</td>
       <td class="amount">${o.amount ? o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : '—'}</td>
       <td>${o.status}</td>
       <td class="muted">${fmtDate(o.date)}</td>
-      <td><button class="ghost" onclick="printOrders([window.__orders[${idx}]])">Yazdır</button></td>`;
+      <td><button class="ghost" onclick="printOrders([window.__orders[${idx}]])">${pAt ? 'Tekrar yazdır' : 'Yazdır'}</button></td>`;
     rows.appendChild(tr);
   });
   updateOrderSelInfo();
