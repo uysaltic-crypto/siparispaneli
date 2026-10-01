@@ -49,6 +49,12 @@
   .pcard-drag-handle { color:var(--muted); font-size:13px; cursor:grab; padding:2px 4px; flex-shrink:0; }
   .pcard-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
   .pcard-thumb { width:44px; height:44px; object-fit:cover; border-radius:8px; background:#222; flex-shrink:0; }
+  .pcard-thumb-btn { position:relative; flex-shrink:0; cursor:pointer; display:block; line-height:0; border-radius:8px; }
+  .pcard-thumb-btn::after { content:'✎'; position:absolute; right:-4px; bottom:-4px; width:17px; height:17px; border-radius:50%; background:var(--surface2); border:1px solid var(--border); color:var(--text); font-size:10px; line-height:15px; text-align:center; opacity:0; transition:opacity .12s; }
+  .pcard-thumb-btn:hover::after { opacity:1; }
+  .imgm-preview { width:140px; height:140px; object-fit:contain; background:#222; border-radius:8px; display:block; margin:0 auto 12px; }
+  .imgm-drop { border:1px dashed var(--border); border-radius:8px; padding:14px; text-align:center; font-size:12px; color:var(--muted); cursor:pointer; margin-bottom:10px; }
+  .imgm-drop.over { border-color:var(--ok); background:#34D39912; }
   .pcard-title { font-weight:700; }
   .pcard-title-input { display:block; background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; line-height:1.35; color:var(--text); width:100%; resize:none; overflow:hidden; box-sizing:border-box; }
   .pcard-title-input:hover { border-color:var(--border); }
@@ -200,6 +206,7 @@
           <option value="stock-asc">Merkezi stok: azdan çoğa</option>
           <option value="category-asc">Kategoriye göre</option>
         </select>
+        <button class="ghost small" onclick="openBulkPrice()">Toplu fiyat</button>
         <button class="ghost small" onclick="toggleAddForm()">+ Ürün</button>
         <span id="importButtons"></span>
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(event)">
@@ -940,9 +947,10 @@ function stockResetRender() { stockLimit = STOCK_PAGE; renderStock(true); }
 
 function buildStockCard(p, activePlatforms) {
     const c = Number(p.centralStock) || 0;
-    const thumb = p.image
-      ? `<img class="pcard-thumb" src="${p.image}" alt="">`
+    const thumbInner = p.image
+      ? `<img class="pcard-thumb" src="${escAttr(p.image)}" alt="" draggable="false">`
       : `<div class="pcard-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`;
+    const thumb = `<span class="pcard-thumb-btn" title="Resmi değiştir" onmousedown="event.stopPropagation()" onclick="openImageModal('${p.code}')">${thumbInner}</span>`;
 
     const familyMembers = [p, ...getChildren(p.code)];
     const familyHasAnyListing = familyMembers.some(m => Object.keys(m.skus || {}).length || Object.keys(m.productCodes || {}).length);
@@ -1685,6 +1693,229 @@ async function restoreBackup(fileId, name) {
   await loadProducts();
   await loadLog();
 }
+
+
+/* ---------------- Toplu fiyat değişikliği ---------------- */
+let bpPoll = null;
+function closeBulkPrice() {
+  document.getElementById('bpModal')?.remove();
+  if (bpPoll) { clearInterval(bpPoll); bpPoll = null; }
+}
+function bpSelectedPlatforms() {
+  return [...document.querySelectorAll('#bpModal .bp-pl:checked')].map(c => c.value);
+}
+function bpToggleAll(on) {
+  document.querySelectorAll('#bpModal .bp-pl').forEach(c => c.checked = on);
+  bpInvalidate();
+}
+function bpInvalidate() {
+  const box = document.getElementById('bpPreview'); if (box) box.innerHTML = '';
+  const b = document.getElementById('bpApply'); if (b) b.disabled = true;
+}
+function bpBody(apply) {
+  return {
+    platforms: bpSelectedPlatforms(),
+    mode: document.getElementById('bpMode').value,
+    value: Number(String(document.getElementById('bpValue').value).replace(',', '.')),
+    push: document.getElementById('bpPush').checked,
+    apply
+  };
+}
+async function openBulkPrice() {
+  closeBulkPrice();
+  const pls = (state.platforms || []).filter(p => p.configured);
+  if (!pls.length) { toast('Yapılandırılmış platform yok.'); return; }
+  const wrap = document.createElement('div');
+  wrap.className = 'cmodal-back'; wrap.id = 'bpModal';
+  wrap.innerHTML = `
+    <div class="cmodal" role="dialog" aria-modal="true">
+      <div class="cmodal-head"><span>Toplu fiyat değişikliği</span><button class="cmodal-x" onclick="closeBulkPrice()" title="Kapat">×</button></div>
+      <div class="cmodal-body">
+        <div class="muted" style="margin-bottom:6px;">Hangi platformların fiyatı değişsin?</div>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer;"><input type="checkbox" onchange="bpToggleAll(this.checked)"> <b>Hepsi</b></label>
+        <div style="display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:14px;">
+          ${pls.map(p => `<label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" class="bp-pl" value="${escAttr(p.id)}" onchange="bpInvalidate()"> <span style="color:${p.color}; font-weight:600;">${escAttr(p.name)}</span></label>`).join('')}
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:6px;">
+          <select id="bpMode" onchange="bpInvalidate()"><option value="percent">Yüzde (%)</option><option value="amount">Tutar (₺)</option></select>
+          <input type="text" id="bpValue" placeholder="örn. 10 (artır) veya -5 (indir)" style="flex:1; min-width:0;" oninput="bpInvalidate()">
+        </div>
+        <div class="muted" style="margin-bottom:12px;">Artırmak için pozitif, indirmek için eksi değer yazın. Fiyatı olmayan ürünler değişmez; Trendyol'da otomatik fiyatlandırması açık ürünler atlanır.</div>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:12px; cursor:pointer;"><input type="checkbox" id="bpPush"> Yeni fiyatları platformlara da gönder</label>
+        <div id="bpPreview"></div>
+        <div id="bpStatus" style="margin-top:10px;"></div>
+      </div>
+      <div class="cmodal-foot">
+        <button class="ghost small" id="bpUndo" style="display:none; margin-right:auto;" onclick="bpUndo()">Son işlemi geri al</button>
+        <button class="ghost small" onclick="closeBulkPrice()">Kapat</button>
+        <button class="ghost small" onclick="bpRun(false)">Önizle</button>
+        <button class="small" id="bpApply" disabled onclick="bpRun(true)">Uygula</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  bpRefreshStatus();
+}
+async function bpRun(apply) {
+  const body = bpBody(apply);
+  if (!body.platforms.length) { toast('En az bir platform seçin.'); return; }
+  if (!Number.isFinite(body.value) || body.value === 0) { toast('Geçerli bir değer girin.'); return; }
+  const names = body.platforms.map(id => platformMeta(id).name).join(', ');
+  const box = document.getElementById('bpPreview');
+  let r, d;
+  try {
+    if (apply) {
+      const txt = (body.mode === 'percent' ? (body.value > 0 ? '%' + body.value + ' artış' : '%' + Math.abs(body.value) + ' indirim') : (body.value > 0 ? body.value + ' ₺ artış' : Math.abs(body.value) + ' ₺ indirim'));
+      if (!confirm(`${names} platformlarındaki tüm ürünlere ${txt} uygulanacak${body.push ? ' ve platformlara gönderilecek' : ''}. Devam edilsin mi?`)) return;
+    }
+    r = await fetch('/api/prices/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    d = await r.json();
+  } catch (e) { toast('İstek başarısız: ' + e.message); return; }
+  if (!r.ok || !d.ok) { toast(d.error || 'İşlem başarısız.'); return; }
+  const fmt = (n) => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 2 });
+  const perPl = Object.entries(d.perPlatform || {}).map(([id, n]) => `<span style="color:${platformMeta(id).color}; font-weight:600;">${escAttr(platformMeta(id).name)}</span>: ${n}`).join(' · ');
+  const skipped = [d.skippedAuto ? `${d.skippedAuto} ürün otomatik fiyatlandırma nedeniyle atlandı` : '', d.skippedNoPrice ? `${d.skippedNoPrice} kayıtta fiyat yok` : '', d.skippedInvalid ? `${d.skippedInvalid} kayıtta sonuç 0 veya eksi olacağı için atlandı` : ''].filter(Boolean).join(' · ');
+  box.innerHTML = `
+    <div class="${apply ? 'syncbox' : 'warnbox'}" style="margin-bottom:0;">
+      <div><b>${d.total}</b> fiyat ${apply ? 'güncellendi' : 'değişecek'} — ${perPl}</div>
+      ${skipped ? `<div style="margin-top:4px;">${skipped}</div>` : ''}
+      ${(d.samples || []).length ? `<div style="margin-top:6px; font-size:11px;">${d.samples.map(x => `${escAttr(x.name || x.code)} (${escAttr(platformMeta(x.platform).name)}): ${fmt(x.old)} → <b>${fmt(x.new)} ₺</b>`).join('<br>')}</div>` : ''}
+    </div>`;
+  if (apply) {
+    document.getElementById('bpApply').disabled = true;
+    if (typeof loadProducts === 'function') loadProducts(true);
+    bpRefreshStatus();
+    if (d.pushStarted) bpStartPolling();
+  } else {
+    document.getElementById('bpApply').disabled = d.total === 0;
+  }
+}
+async function bpRefreshStatus() {
+  try {
+    const r = await fetch('/api/prices/bulk/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const undo = document.getElementById('bpUndo');
+    if (undo) undo.style.display = d.last && !d.job.running ? '' : 'none';
+    if (undo && d.last) undo.title = `${d.last.count} fiyat — ${new Date(d.last.time).toLocaleString('tr-TR')}`;
+    const st = document.getElementById('bpStatus');
+    if (st) {
+      const j = d.job;
+      if (j.running) {
+        st.innerHTML = `<div class="warnbox" style="margin-bottom:0;">Platformlara gönderiliyor: ${j.done} / ${j.total}${j.failed ? ' · ' + j.failed + ' hata' : ''}</div>`;
+      } else if (j.finishedAt && j.total) {
+        st.innerHTML = `<div class="${j.failed ? 'errbox' : 'syncbox'}" style="margin-bottom:0;">Gönderim bitti: ${j.total - j.failed} başarılı${j.failed ? ', ' + j.failed + ' hatalı' : ''}.${(j.errors || []).length ? '<div style="margin-top:4px; font-size:11px;">' + j.errors.slice(0, 5).map(e => escAttr(e)).join('<br>') + '</div>' : ''}</div>`;
+      } else st.innerHTML = '';
+    }
+    return d.job;
+  } catch (e) {}
+}
+function bpStartPolling() {
+  if (bpPoll) clearInterval(bpPoll);
+  bpPoll = setInterval(async () => {
+    if (!document.getElementById('bpModal')) { clearInterval(bpPoll); bpPoll = null; return; }
+    const j = await bpRefreshStatus();
+    if (j && !j.running) { clearInterval(bpPoll); bpPoll = null; }
+  }, 2500);
+}
+async function bpUndo() {
+  const push = document.getElementById('bpPush').checked;
+  if (!confirm('Son toplu fiyat değişikliği geri alınacak' + (push ? ' ve eski fiyatlar platformlara gönderilecek' : '') + '. Devam edilsin mi?')) return;
+  const r = await fetch('/api/prices/bulk/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ push }) });
+  const d = await r.json();
+  if (!r.ok || !d.ok) { toast(d.error || 'Geri alınamadı.'); return; }
+  toast(`${d.restored} fiyat geri alındı${d.skipped ? ', ' + d.skipped + ' tanesi sonradan değiştirildiği için atlandı' : ''}.`);
+  bpInvalidate();
+  if (typeof loadProducts === 'function') loadProducts(true);
+  bpRefreshStatus();
+  if (d.pushStarted) bpStartPolling();
+}
+
+/* ---------------- Ürün resmi değiştirme ---------------- */
+let imgModalCode = null;
+function closeImageModal() {
+  document.getElementById('imgModal')?.remove();
+  document.removeEventListener('keydown', imgModalKey);
+  imgModalCode = null;
+}
+function imgModalKey(e) { if (e.key === 'Escape') closeImageModal(); }
+function openImageModal(code) {
+  closeImageModal();
+  const p = state.products.find(x => x.code === code);
+  if (!p) return;
+  imgModalCode = code;
+  const wrap = document.createElement('div');
+  wrap.className = 'cmodal-back'; wrap.id = 'imgModal';
+  wrap.addEventListener('mousedown', e => { if (e.target === wrap) closeImageModal(); });
+  wrap.innerHTML = `
+    <div class="cmodal" role="dialog" aria-modal="true" style="max-width:380px;">
+      <div class="cmodal-head"><span>Ürün resmi</span><button class="cmodal-x" onclick="closeImageModal()" title="Kapat">×</button></div>
+      <div class="cmodal-body">
+        ${p.image ? `<img class="imgm-preview" id="imgmPreview" src="${escAttr(p.image)}" alt="">` : `<div class="imgm-preview" id="imgmPreview" style="display:flex;align-items:center;justify-content:center;font-size:40px;">📦</div>`}
+        <div class="imgm-drop" id="imgmDrop" onclick="document.getElementById('imgmFile').click()">Resim seç ya da buraya sürükle<br><span style="font-size:11px;">png, jpg, webp — otomatik küçültülür</span></div>
+        <input type="file" id="imgmFile" accept="image/*" style="display:none" onchange="imgPickFile(this.files[0])">
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="imgmUrl" placeholder="veya resim adresi (https://...)" style="flex:1; min-width:0;" spellcheck="false" onkeydown="if(event.key==='Enter')imgApplyUrl()">
+          <button class="small" onclick="imgApplyUrl()">Uygula</button>
+        </div>
+        <div class="muted" style="margin-top:10px; font-size:11px;">Bu işlem yalnızca paneldeki resmi değiştirir; pazaryerlerindeki ürün görsellerine dokunmaz.</div>
+      </div>
+      <div class="cmodal-foot">
+        ${p.imageCustom ? `<button class="ghost small" style="margin-right:auto;" onclick="imgReset()">Platform resmine dön</button>` : ''}
+        <button class="ghost small" onclick="closeImageModal()">Kapat</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  document.addEventListener('keydown', imgModalKey);
+  const drop = document.getElementById('imgmDrop');
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => { const f = e.dataTransfer?.files?.[0]; if (f) imgPickFile(f); });
+}
+
+// Resmi tarayıcıda en fazla 600px'e küçültüp JPEG'e çevirir (şeffaf PNG'ler beyaz zemine oturur).
+function imgShrink(file, maxSide = 600) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * k));
+      c.height = Math.max(1, Math.round(img.height * k));
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Resim okunamadı.')); };
+    img.src = url;
+  });
+}
+async function imgSend(body) {
+  const code = imgModalCode;
+  if (!code) return;
+  let r, d;
+  try {
+    r = await fetch('/api/products/' + encodeURIComponent(code) + '/image', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    d = await r.json();
+  } catch (e) { toast('İstek başarısız: ' + e.message); return; }
+  if (!r.ok || !d.ok) { toast(d.error || 'Resim kaydedilemedi.'); return; }
+  closeImageModal();
+  applyProductUpdates([d.product]);
+  toast(body.reset ? 'Platform resmine dönüldü.' : 'Resim güncellendi.');
+}
+async function imgPickFile(file) {
+  if (!file) return;
+  if (!/^image\//.test(file.type)) { toast('Lütfen bir resim dosyası seçin.'); return; }
+  try { await imgSend({ dataUrl: await imgShrink(file) }); } catch (e) { toast(e.message); }
+}
+function imgApplyUrl() {
+  const url = (document.getElementById('imgmUrl')?.value || '').trim();
+  if (!/^https?:\/\/\S+$/i.test(url)) { toast('Geçerli bir resim adresi (http/https) girin.'); return; }
+  imgSend({ url });
+}
+function imgReset() { imgSend({ reset: true }); }
 
 function toast(msg) {
   const t = document.createElement('div');
