@@ -85,6 +85,9 @@ function ensureProduct(code, name) {
       listingStatus: {}, // { platformId: 'satista' | 'pasif' }
       pricing: { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
       competitors: [], // [{ url, label, lastPrice, lastCheckedAt, lastError, sellerName }]
+      // Sabit fiyat: rekabete bakmadan, platform bazında girilen fiyatı otomatik olarak sabit tutar.
+      // { enabled, prices: { platformId: sabitFiyat }, pushed: { platformId: sitede doğrulanan son gönderilen fiyat } }
+      fixedPricing: { enabled: false, prices: {}, pushed: {} },
       // Bu ürün sürükle-bırak ile başka bir ürünün altında birleştirildiyse, ana
       // ürünün kodu burada tutulur (aşağıdaki "Birleştirme ailesi" bölümüne bakın).
       // Birleştirilmemiş / bağımsız bir ürünse null'dur.
@@ -99,6 +102,9 @@ function ensureProduct(code, name) {
   if (products[code].category === undefined) products[code].category = "";
   if (!products[code].pricing) products[code].pricing = { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
   if (!products[code].competitors) products[code].competitors = [];
+  if (!products[code].fixedPricing) products[code].fixedPricing = { enabled: false, prices: {}, pushed: {} };
+  if (!products[code].fixedPricing.prices) products[code].fixedPricing.prices = {};
+  if (!products[code].fixedPricing.pushed) products[code].fixedPricing.pushed = {};
   if (products[code].mergedInto === undefined) products[code].mergedInto = null;
   return products[code];
 }
@@ -617,7 +623,7 @@ async function repriceProduct(code) {
   const prices = (p.competitors || []).map((c) => c.lastPrice).filter((n) => typeof n === "number" && n > 0);
   const lowest = prices.length ? Math.min(...prices) : null;
 
-  if (p.pricing.autoReprice && p.pricing.minPrice != null && lowest != null) {
+  if (p.pricing.autoReprice && !p.fixedPricing?.enabled && p.pricing.minPrice != null && lowest != null) {
     const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
     if (target !== p.pricing.myPrice) {
       const qty = p.stocks?.ty ?? p.centralStock ?? 0;
@@ -653,7 +659,91 @@ async function repriceAll() {
       console.error("Rekabet kontrolü hatası:", code, e.message);
     }
   }
+  fixedPriceSweep().catch((e) => console.error("Sabit fiyat taraması hatası:", e.message));
   return { checked: codes.length };
+}
+
+/* ------------------------------------------------------------------
+   SABİT FİYAT — ürün bazında, platform bazında sabit satış fiyatı.
+   Rekabet analizinden bağımsızdır: fiyat rakibe göre değişmez, girilen
+   değerde tutulur. Kaydedilince hemen ilgili platformlara gönderilir; ayrıca
+   düzenli tarama (fixedPriceSweep) sitedeki fiyat sapmışsa (ör. "Siteden Çek" ile
+   farklı bir fiyat geldiyse ya da elle değiştirildiyse) sabit fiyatı tekrar gönderir.
+   Aile (birleştirme) mantığı stok senkronuyla aynı: ana ürünün kendi kaydı + bu platformda
+   kendi SKU'su olan alt ürünler aynı sabit fiyatla güncellenir.
+------------------------------------------------------------------ */
+function fixedTargets(rootCode, pid) {
+  const out = [];
+  if (isListedOn(rootCode, pid)) out.push(rootCode);
+  getFamilyCodes(rootCode).forEach((c) => {
+    if (c !== rootCode && products[c]?.skus?.[pid]) out.push(c);
+  });
+  return out;
+}
+
+async function applyFixedPrices(code, opts) {
+  const { force = false, throttle = false } = opts || {};
+  const p = products[code];
+  const fp = p?.fixedPricing;
+  if (!fp?.enabled) return {};
+  const qty = Number(products[resolveRoot(code)]?.centralStock) || 0;
+  const results = {};
+
+  for (const [pid, raw] of Object.entries(fp.prices || {})) {
+    const price = Math.round(Number(raw) * 100) / 100;
+    if (!(price > 0)) continue;
+    const pl = PLATFORMS.find((x) => x.id === pid);
+    if (!pl || !pl.configured()) continue;
+    const targets = fixedTargets(code, pid);
+    if (!targets.length) continue;
+    const drift = targets.some((t) => Number(products[t]?.prices?.[pid]) !== price);
+    if (!force && fp.pushed[pid] === price && !drift) continue;
+
+    const outcomes = [];
+    for (const t of targets) {
+      const r = await pushListingToPlatform(pid, skuForPlatform(t, pid), qty, price);
+      outcomes.push(r);
+      if (r.ok && products[t]) products[t].prices[pid] = price;
+    }
+    const ok = outcomes.every((o) => o.ok);
+    if (ok) fp.pushed[pid] = price;
+    else delete fp.pushed[pid];
+    results[pid] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
+    if (throttle) await sleep(pid === "koctas" ? 61000 : 400);
+  }
+
+  if (Object.keys(results).length) {
+    pushLog.push({
+      time: new Date().toISOString(),
+      barcode: code,
+      name: p.name,
+      centralStock: products[resolveRoot(code)]?.centralStock ?? null,
+      trigger: "sabit fiyat",
+      results,
+    });
+    persistPushLog();
+    persistProducts();
+  }
+  return results;
+}
+
+let fixedSweepRunning = false;
+async function fixedPriceSweep() {
+  if (fixedSweepRunning) return;
+  fixedSweepRunning = true;
+  try {
+    for (const code of Object.keys(products)) {
+      const p = products[code];
+      if (!p || p.mergedInto || !p.fixedPricing?.enabled) continue;
+      try {
+        await applyFixedPrices(code, { throttle: true });
+      } catch (e) {
+        console.error("Sabit fiyat hatası:", code, e.message);
+      }
+    }
+  } finally {
+    fixedSweepRunning = false;
+  }
 }
 
 
@@ -1427,6 +1517,8 @@ async function refreshAll() {
   }
 
   cache = { fetchedAt: new Date().toISOString(), orders: merged, errors, sync };
+  // Sitedeki fiyat sabit fiyattan sapmışsa düzeltir (sapma yoksa hiçbir istek atmaz).
+  fixedPriceSweep().catch((e) => console.error("Sabit fiyat taraması hatası:", e.message));
   return cache;
 }
 
@@ -1541,6 +1633,7 @@ function serializeProduct(code) {
     imageCustom: !!p.imageCustom,
     pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
     competitors: p.competitors || [],
+    fixedPricing: p.fixedPricing || { enabled: false, prices: {}, pushed: {} },
     mergedInto: p.mergedInto || null,
   };
 }
@@ -2101,7 +2194,11 @@ function mergeStockRows(platform, rows) {
       if (!p.imageCustom) p.image = r.image; // elle değiştirilen resim siteden çekmede ezilmez
     }
     const price = Number(r.price);
-    if (price > 0) p.prices[platform] = price;
+    if (price > 0) {
+      p.prices[platform] = price;
+      const rootFp = products[resolveRoot(code)]?.fixedPricing;
+      if (rootFp?.enabled && rootFp.prices?.[platform] && Number(rootFp.prices[platform]) !== price) delete rootFp.pushed[platform];
+    }
     if (r.productCode) p.productCodes[platform] = String(r.productCode).trim();
     existed ? updated++ : created++;
   });
@@ -2240,6 +2337,8 @@ function planBulkPrice(platformIds, mode, value) {
       if (!(old > 0)) { skippedNoPrice++; continue; }
       // Trendyol'da otomatik fiyatlandırma açıksa o ürünün fiyatını rekabet sistemi yönetir; ezilmesin diye atlanır.
       if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
+      // Sabit fiyat tanımlı ürün/platform: fiyatı sabit fiyat yönetir, toplu değişiklik ezmesin.
+      if (prod.fixedPricing?.enabled && Number(prod.fixedPricing.prices?.[pid]) > 0) { skippedAuto++; continue; }
       const nw = computeBulkPrice(old, mode, value);
       if (!(nw > 0)) { skippedInvalid++; continue; }
       if (nw === old) continue;
@@ -2392,7 +2491,11 @@ app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
 
   if (minPrice !== undefined) p.pricing.minPrice = minPrice === "" || minPrice === null ? null : Number(minPrice);
   if (maxPrice !== undefined) p.pricing.maxPrice = maxPrice === "" || maxPrice === null ? null : Number(maxPrice);
-  if (autoReprice !== undefined) p.pricing.autoReprice = !!autoReprice;
+  if (autoReprice !== undefined) {
+    p.pricing.autoReprice = !!autoReprice;
+    // Rekabete göre otomatik fiyatlandırma ile sabit fiyat aynı fiyatı yönetemez: sonradan hangisi açıldıysa o geçerli olur.
+    if (p.pricing.autoReprice && p.fixedPricing) p.fixedPricing.enabled = false;
+  }
   if (undercut !== undefined && undercut !== "") p.pricing.undercut = Number(undercut);
 
   if (p.pricing.minPrice != null && p.pricing.maxPrice != null && p.pricing.minPrice > p.pricing.maxPrice) {
@@ -2409,6 +2512,44 @@ app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
 
   persistProducts();
   res.json({ ok: true, product: { code: req.params.code, ...p } });
+});
+
+// Sabit fiyat ayarı: body { enabled, prices: { platformId: fiyat | "" } }.
+// Boş bırakılan platform sabit fiyat dışında kalır. Açıkken kaydedilince fiyatlar hemen platformlara gönderilir.
+app.post("/api/products/:code/fixed-price", requireAuth, async (req, res) => {
+  const code = req.params.code;
+  const p = products[code];
+  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  ensureProduct(code);
+  const fp = p.fixedPricing;
+  const { enabled, prices } = req.body || {};
+  const validIds = PLATFORMS.map((x) => x.id);
+
+  if (prices && typeof prices === "object") {
+    for (const [pid, val] of Object.entries(prices)) {
+      if (!validIds.includes(pid)) continue;
+      if (val === "" || val === null || val === undefined) {
+        delete fp.prices[pid];
+        delete fp.pushed[pid];
+        continue;
+      }
+      const n = Number(val);
+      if (!Number.isFinite(n) || n <= 0) return res.status(400).json({ ok: false, error: "Sabit fiyat 0'dan büyük bir sayı olmalı." });
+      const rounded = Math.round(n * 100) / 100;
+      if (fp.prices[pid] !== rounded) delete fp.pushed[pid];
+      fp.prices[pid] = rounded;
+    }
+  }
+  if (enabled !== undefined) fp.enabled = !!enabled;
+  if (fp.enabled && !Object.keys(fp.prices).length) {
+    return res.status(400).json({ ok: false, error: "Sabit fiyatı açmak için en az bir platforma fiyat girin." });
+  }
+  if (fp.enabled) p.pricing.autoReprice = false; // rekabet otomatiği ile birlikte çalışmaz
+  persistProducts();
+
+  let results = {};
+  if (fp.enabled) results = await applyFixedPrices(code, { force: true });
+  res.json({ ok: true, results, product: serializeProduct(code) });
 });
 
 // Tek bir ürün için hemen kontrol et (rakip fiyatlarını çek + gerekiyorsa fiyatı güncelle)
