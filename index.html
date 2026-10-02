@@ -233,6 +233,7 @@
     <!-- YEDEKLEME -->
     <div class="panel" id="panel-backup">
       <div id="backupConfigWarn"></div>
+      <div id="backupSyncStatus" style="margin-bottom:10px;"></div>
       <div class="toolbar" style="justify-content:space-between;">
         <div>
           <div class="muted" id="backupStatusLine">—</div>
@@ -1679,19 +1680,70 @@ async function runBackupNow() {
   }
 }
 
-async function restoreBackup(fileId, name) {
-  const ok = confirm(`"${name}" yedeğini geri yüklemek istediğine emin misin?\n\nŞu anki tüm ürün, stok ve senkron günlüğü verisi bu yedekteki verilerle DEĞİŞTİRİLECEK. Bu işlem geri alınamaz.`);
-  if (!ok) return;
-  toast('Geri yükleniyor…');
-  const resp = await fetch('/api/backup/restore', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileId })
-  });
-  const data = await resp.json();
-  if (!data.ok) { toast(data.error || 'Geri yükleme başarısız.'); return; }
-  toast(`Geri yüklendi (${data.productCount} ürün).`);
-  await loadProducts();
-  await loadLog();
+function closeRestoreModal() { document.getElementById('rbModal')?.remove(); }
+
+// Geri yükleme penceresi: yedeği yükle + (isteğe bağlı) stok adetlerini platformlara senkronize et
+function restoreBackup(fileId, name) {
+  closeRestoreModal();
+  const wrap = document.createElement('div');
+  wrap.className = 'cmodal-back'; wrap.id = 'rbModal';
+  wrap.innerHTML = `
+    <div class="cmodal" role="dialog" aria-modal="true">
+      <div class="cmodal-head"><span>Yedeği geri yükle</span><button class="cmodal-x" onclick="closeRestoreModal()" title="Kapat">×</button></div>
+      <div class="cmodal-body">
+        <div style="margin-bottom:10px;"><b>${escAttr(name)}</b></div>
+        <div class="warnbox" style="margin-bottom:12px;">Şu anki tüm ürün, stok ve senkron günlüğü verisi bu yedekteki verilerle <b>DEĞİŞTİRİLECEK</b>. Bu işlem geri alınamaz.</div>
+        <label style="display:flex; align-items:flex-start; gap:6px; margin-bottom:8px; cursor:pointer;"><input type="checkbox" id="rbSync" checked onchange="document.getElementById('rbPrices').disabled = !this.checked"> <span><b>Geri yüklenen stok adetlerini platformlara gönder (senkronize et)</b><br><span class="muted">Yedekteki merkezi stok, ürünlerin kayıtlı olduğu tüm platformlara yazılır.</span></span></label>
+        <label style="display:flex; align-items:flex-start; gap:6px; cursor:pointer;"><input type="checkbox" id="rbPrices"> <span>Fiyatları da gönder<br><span class="muted">Yedekteki fiyatlar platformlardaki güncel fiyatların üzerine yazılır. Trendyol'da otomatik fiyatlandırması açık ürünlerin fiyatına dokunulmaz.</span></span></label>
+      </div>
+      <div class="cmodal-foot">
+        <button class="ghost small" onclick="closeRestoreModal()">Vazgeç</button>
+        <button class="small" id="rbGo" onclick="restoreBackupGo('${escAttr(fileId)}')">Geri Yükle</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+}
+
+async function restoreBackupGo(fileId) {
+  const sync = document.getElementById('rbSync').checked;
+  const syncPrices = sync && document.getElementById('rbPrices').checked;
+  const go = document.getElementById('rbGo');
+  go.disabled = true; go.textContent = 'Yükleniyor…';
+  try {
+    const resp = await fetch('/api/backup/restore', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileId, sync, syncPrices })
+    });
+    const data = await resp.json();
+    if (!data.ok) { toast(data.error || 'Geri yükleme başarısız.'); go.disabled = false; go.textContent = 'Geri Yükle'; return; }
+    closeRestoreModal();
+    toast(`Geri yüklendi (${data.productCount} ürün).` + (sync ? (data.syncStarted ? ` ${data.syncTotal} kayıt platformlara gönderiliyor…` : ' Platform gönderimi başlatılamadı (başka gönderim sürüyor).') : ''));
+    await loadProducts();
+    await loadLog();
+    if (sync && data.syncStarted) backupSyncPoll();
+  } catch (e) {
+    toast('Geri yükleme başarısız: ' + e.message);
+    go.disabled = false; go.textContent = 'Geri Yükle';
+  }
+}
+
+// Yedek senkronunun ilerlemesini Yedekleme sekmesinde gösterir
+let backupSyncTimer = null;
+async function backupSyncPoll() {
+  clearTimeout(backupSyncTimer);
+  const box = document.getElementById('backupSyncStatus');
+  try {
+    const r = await fetch('/api/prices/bulk/status');
+    const d = await r.json();
+    const j = d.job || {};
+    if (box) {
+      if (j.running) box.innerHTML = `<div class="warnbox" style="margin-bottom:0;">Platformlara gönderiliyor: ${j.done} / ${j.total}${j.failed ? ' · ' + j.failed + ' hata' : ''}</div>`;
+      else if (j.finishedAt && j.total) box.innerHTML = `<div class="${j.failed ? 'errbox' : 'syncbox'}" style="margin-bottom:0;">Senkron bitti: ${j.total - j.failed} başarılı${j.failed ? ', ' + j.failed + ' hatalı' : ''}.${(j.errors || []).length ? '<div style="margin-top:4px; font-size:11px;">' + j.errors.slice(0, 5).map(e => escAttr(e)).join('<br>') + '</div>' : ''}</div>`;
+      else box.innerHTML = '';
+    }
+    if (j.running) backupSyncTimer = setTimeout(backupSyncPoll, 2000);
+    else await loadLog();
+  } catch (e) {}
 }
 
 
