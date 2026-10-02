@@ -263,6 +263,10 @@
         <p class="muted" style="margin:0; max-width:760px;">Eşleştirme otomatik: ürün çekme/içe aktarma sonrası ve her yenilemede, aynı SKU/barkodu ya da aynı adı taşıyan ve farklı platformlardan gelen kayıtlar tek Ana Ürün altında birleştirilir. Aşağıda, bir platformda henüz karşılığı bulunamayanlar listelenir; istersen elle SKU girebilirsin.</p>
         <button class="small" id="autoMatchBtn" onclick="runAutoMatch()">Şimdi Otomatik Eşleştir</button>
       </div>
+      <div class="toolbar" style="gap:12px; align-items:center; margin-top:8px;">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="matchPushAuto" onchange="setMatchPushAuto(this.checked)"> Eşleştirme/birleştirme sonrası stok ve fiyatı platformlara otomatik gönder</label>
+        <button class="ghost small" onclick="pushMatchedAll()" title="Zaten eşleşmiş tüm ürünlerin merkezi stoğunu ve her platformdaki fiyatını ilgili platformlara gönderir">Eşleşenleri şimdi gönder</button>
+      </div>
       <div id="matchLogBox" style="display:none; margin:12px 0; border:1px solid var(--border); border-radius:8px; overflow:hidden;"></div>
       <div id="matchTabs" class="tabs" style="margin-bottom:14px;"></div>
       <table>
@@ -330,7 +334,7 @@ function startPolling() {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
-  if (name === 'match') loadMatchStatus();
+  if (name === 'match') { loadMatchStatus(); loadMatchPushSetting(); }
   if (name === 'stock' && state.stockDirty) { state.stockDirty = false; renderStock(true); }
   if (name === 'compete') { state.competeDirty = false; renderCompete(); }
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
@@ -372,13 +376,39 @@ async function loadMatchLog() {
   } catch (e) { box.style.display = 'none'; }
 }
 
+async function loadMatchPushSetting() {
+  try {
+    const r = await fetch('/api/match-push-settings');
+    if (!r.ok) return;
+    const d = await r.json();
+    const cb = document.getElementById('matchPushAuto');
+    if (cb) cb.checked = !!d.auto;
+  } catch (e) {}
+}
+
+async function setMatchPushAuto(on) {
+  try {
+    await fetch('/api/match-push-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto: on }) });
+    toast(on ? 'Eşleştirme sonrası otomatik gönderim açık.' : 'Eşleştirme sonrası otomatik gönderim kapalı.');
+  } catch (e) { toast('Ayar kaydedilemedi: ' + e.message); }
+}
+
+async function pushMatchedAll() {
+  if (!confirm('Eşleşmiş tüm ürünlerin merkezi stoğu ve fiyatları ilgili platformlara gönderilecek. Devam edilsin mi?')) return;
+  try {
+    const r = await fetch('/api/products/push-matched', { method: 'POST' });
+    const d = await r.json();
+    toast(d.ok ? `${d.families} ürün ailesi (${d.records} kayıt) platformlara gönderiliyor…` : (d.error || 'Gönderilemedi.'));
+  } catch (e) { toast('Gönderim hatası: ' + e.message); }
+}
+
 async function runAutoMatch() {
   const btn = document.getElementById('autoMatchBtn');
   btn.disabled = true;
   try {
     const r = await fetch('/api/products/auto-match', { method: 'POST' });
     const data = await r.json();
-    toast(data.count ? `${data.count} ürün otomatik eşleştirildi.` : 'Eşleştirilecek yeni ürün bulunamadı.');
+    toast(data.count ? `${data.count} ürün otomatik eşleştirildi; stok ve fiyat platformlara gönderilecek (ayar açıksa).` : 'Eşleştirilecek yeni ürün bulunamadı.');
     await loadProducts();
     await loadMatchStatus();
   } catch (e) {
@@ -1592,7 +1622,7 @@ function renderLog() {
       <div>
         <b>${entry.name || entry.barcode}</b>
         <span class="muted" style="font-family:monospace;"> ${entry.barcode}</span>
-        <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
+        <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : entry.trigger === 'eşleştirme' ? 'Eşleştirme sonrası' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
         ${failMsgs ? `<div class="muted" style="color:var(--danger)">${failMsgs}</div>` : ''}
       </div>
       <div style="text-align:right;">
