@@ -1621,7 +1621,9 @@ async function loadBackupStatus() {
   const connectBtn = document.getElementById('backupConnectBtn');
 
   // OAuth (kendi Google hesabın) yapılandırılmış ama henüz bağlanılmamışsa bağlan butonunu göster.
-  connectBtn.style.display = (data.oauthAvailable && !data.oauthConnected) ? 'inline-block' : 'none';
+  // Token kayıtlı olsa bile süresi dolmuş/iptal edilmiş olabilir; bu yüzden OAuth açıksa düğme HER ZAMAN görünür.
+  connectBtn.style.display = data.oauthAvailable ? 'inline-block' : 'none';
+  connectBtn.textContent = data.oauthConnected ? 'Google ile Yeniden Bağlan' : 'Google ile Bağlan';
 
   if (!data.configured) {
     if (data.oauthAvailable && !data.oauthConnected) {
@@ -1657,6 +1659,13 @@ async function loadBackupList() {
     // Liste alınamadı ≠ yedek yok: yedekler Drive'da durur, sadece bağlantı/yapılandırma sorunu olabilir.
     emptyEl.className = 'errbox';
     emptyEl.style.display = 'block';
+    if ((data.error || '').includes('invalid_grant')) {
+      emptyEl.innerHTML = `<b>Google Drive bağlantısının süresi dolmuş veya iptal edilmiş</b> — yedekleriniz silinmedi, Drive klasöründe duruyor.<br>
+        <span style="font-size:12px;"><b>1.</b> Sağ üstteki <b>Google ile Yeniden Bağlan</b> düğmesine basıp giriş yapın.<br>
+        <b>2.</b> Açılan sayfadaki <code>GOOGLE_OAUTH_REFRESH_TOKEN=…</code> değerini barındırma panelindeki ortam değişkeninin <b>üzerine yazın</b> (eski değer kalırsa yeniden başlatınca bozuk token geri gelir).<br>
+        <b>3.</b> Bu her ~7 günde bir tekrarlıyorsa: Google Cloud Console → OAuth consent screen'de uygulamanın durumu "Testing" olmasın; <b>"In production"</b> yapın (kişisel kullanım için doğrulama gerekmez, giriş ekranında "doğrulanmamış uygulama" uyarısı çıkar, Gelişmiş → devam edin). "Testing" modunda refresh token 7 günde sona erer.</span>`;
+      return;
+    }
     emptyEl.innerHTML = `Yedek listesi alınamadı — bu, yedeklerin silindiği anlamına GELMEZ; yedekler Google Drive klasöründe durur.<br><span style="font-size:12px;">${escAttr(data.error || '')}</span><br><span style="font-size:12px;">Çözüm: sağ üstteki <b>Google ile Bağlan</b> ile Drive'a yeniden bağlanın (düğme yoksa .env/ortam değişkenlerinde GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI ve GOOGLE_DRIVE_FOLDER_ID tanımlı olmalı).</span>`;
     return;
   }
