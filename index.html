@@ -67,7 +67,6 @@
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
   .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
   .pcard-compete { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-  .pcard-compete button.fx-on { background:#2E9E5B; color:#fff; }
   .pcard-compete .cmp-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; }
   .cmodal-back { position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
   .cmodal { background:var(--surface); border:1px solid var(--border); border-radius:8px; width:100%; max-width:540px; max-height:92vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
@@ -1174,102 +1173,7 @@ function competeSummary(p) {
 }
 
 function competeCardHtml(p) {
-  const fp = p.fixedPricing || {};
-  const fxOn = !!fp.enabled;
-  const fxCount = Object.keys(fp.prices || {}).length;
-  return `<div class="pcard-compete" onmousedown="event.stopPropagation()">
-    <button class="small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">+ Rekabet Analizi Ekle</button>
-    <button class="small ${fxOn ? 'fx-on' : 'ghost'}" onclick="openFixedModal(this.closest('.pcard').dataset.code)" title="${fxOn ? 'Sabit fiyat açık (' + fxCount + ' platform)' : 'Bu ürün için platform bazında sabit fiyat belirle'}">${fxOn ? '✓ Sabit Fiyat' : 'Sabit Fiyat'}</button>
-  </div>`;
-}
-
-/* ---------- Sabit Fiyat penceresi ---------- */
-let fixedModalCode = null;
-
-function closeFixedModal() {
-  document.getElementById('fixedModal')?.remove();
-  document.removeEventListener('keydown', fixedModalKey);
-  fixedModalCode = null;
-}
-function fixedModalKey(e) { if (e.key === 'Escape') closeFixedModal(); }
-
-function openFixedModal(code) {
-  const p = state.products.find(x => x.code === code);
-  if (!p) return;
-  closeFixedModal();
-  fixedModalCode = code;
-  const fp = p.fixedPricing || { enabled: false, prices: {} };
-  const familyMembers = [p, ...getChildren(p.code)];
-  const familyHasAnyListing = familyMembers.some(m => Object.keys(m.skus || {}).length || Object.keys(m.productCodes || {}).length);
-  const rows = state.platforms.filter(pl => pl.configured).map(pl => {
-    const listed = !familyHasAnyListing || familyMembers.some(m => m.skus?.[pl.id] || m.productCodes?.[pl.id]);
-    const cur = p.prices?.[pl.id];
-    const val = fp.prices?.[pl.id] ?? '';
-    return `<div class="cfield" ${listed ? '' : 'style="opacity:.5;"'}>
-      <label class="${listed ? '' : 'opt'}">${escAttr(pl.name)}${listed ? '' : ' (kayıt yok)'}</label>
-      <input type="number" step="0.01" min="0" id="fx_${pl.id}" value="${val}" ${listed ? '' : 'disabled'} placeholder="${cur ? 'şu an ' + Number(cur).toFixed(2) + ' ₺' : 'sabit fiyat (₺)'}">
-    </div>`;
-  }).join('');
-
-  const wrap = document.createElement('div');
-  wrap.id = 'fixedModal';
-  wrap.className = 'cmodal-back';
-  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeFixedModal(); });
-  wrap.innerHTML = `
-    <div class="cmodal" role="dialog" aria-modal="true">
-      <div class="cmodal-head"><span>[${escAttr(p.name)}] Sabit Fiyat</span><button class="cmodal-x" onclick="closeFixedModal()" title="Kapat">×</button></div>
-      <div class="cmodal-body">
-        <div class="cfield"><label class="opt">Sabit Fiyat</label><label style="flex:1; background:transparent; font-weight:400; gap:8px;"><input type="checkbox" id="fx_on" ${fp.enabled ? 'checked' : ''} style="flex:0 0 auto;"> Açık (fiyatı otomatik sabit tut)</label></div>
-        ${rows || '<div class="muted" style="font-size:12px; margin-bottom:10px;">Yapılandırılmış platform yok.</div>'}
-        <div class="cinfo">
-          <b class="t">Nasıl çalışır?</b>
-          1. Fiyat girdiğin platformlarda satış fiyatı hep o değerde tutulur; rakip fiyatına bakılmaz.<br>
-          2. Kaydedince fiyatlar hemen sitelere gönderilir. Sonrasında sitedeki fiyat değişirse (elle ya da “Siteden Çek” ile) sistem düzenli kontrolde sabit fiyatı tekrar gönderir.<br>
-          3. Boş bıraktığın platform sabit fiyat dışında kalır.<br>
-          4. <b>Rekabet Analizi</b>'ndeki otomatik fiyatlandırma ile birlikte çalışmaz: biri açılınca diğeri kapanır. Sabit fiyatlı ürünler toplu fiyat değişikliğinden de etkilenmez.
-        </div>
-      </div>
-      <div class="cmodal-foot">
-        <button class="cbtn-cancel" onclick="closeFixedModal()">✕ İptal</button>
-        <button class="cbtn-save" id="fx_save" onclick="saveFixedModal()">✓ Kaydet</button>
-      </div>
-    </div>`;
-  document.body.appendChild(wrap);
-  document.addEventListener('keydown', fixedModalKey);
-  const first = wrap.querySelector('input[type=number]:not([disabled])');
-  if (first) first.focus();
-}
-
-async function saveFixedModal() {
-  const code = fixedModalCode;
-  if (!code) return;
-  const enabled = document.getElementById('fx_on').checked;
-  const prices = {};
-  state.platforms.filter(pl => pl.configured).forEach(pl => {
-    const el = document.getElementById('fx_' + pl.id);
-    if (el && !el.disabled) prices[pl.id] = el.value;
-  });
-  if (enabled && !Object.values(prices).some(v => v !== '' && Number(v) > 0)) { toast('En az bir platforma sabit fiyat girin.'); return; }
-  const btn = document.getElementById('fx_save');
-  if (btn) { btn.disabled = true; btn.textContent = 'Kaydediliyor…'; }
-  try {
-    const resp = await fetch(`/api/products/${encodeURIComponent(code)}/fixed-price`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, prices })
-    });
-    const data = await resp.json();
-    if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); if (btn) { btn.disabled = false; btn.textContent = '✓ Kaydet'; } return; }
-    const fails = Object.entries(data.results || {}).filter(([, r]) => !r.ok);
-    const okCount = Object.values(data.results || {}).filter(r => r.ok).length;
-    if (!enabled) toast('Sabit fiyat kapatıldı.');
-    else if (fails.length) toast('Kaydedildi, ancak gönderilemeyen platform var: ' + fails.map(([id, r]) => id + ' (' + (r.message || 'hata') + ')').join(', '));
-    else toast(`Sabit fiyat kaydedildi${okCount ? ' ve ' + okCount + ' platforma gönderildi' : ''}.`);
-    closeFixedModal();
-    await loadProducts();
-  } catch (e) {
-    toast('Hata: ' + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = '✓ Kaydet'; }
-  }
+  return `<div class="pcard-compete" onmousedown="event.stopPropagation()"><button class="small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">+ Rekabet Analizi Ekle</button><button class="ghost small" onclick="openBulkPrice(this.closest('.pcard').dataset.code)" title="Bu ürünün fiyatını yüzde, tutar veya sabit fiyatla değiştir">Toplu fiyat</button></div>`;
 }
 
 let competeModalCode = null;
@@ -1549,7 +1453,7 @@ function renderCompete(force) {
         <input type="number" step="0.01" placeholder="Min" id="min_${p.code}" value="${pricing.minPrice ?? ''}" style="width:70px;">
         <input type="number" step="0.01" placeholder="Maks" id="max_${p.code}" value="${pricing.maxPrice ?? ''}" style="width:70px;">
       </td>
-      <td><input type="checkbox" id="auto_${p.code}" ${pricing.autoReprice ? 'checked' : ''}>${p.fixedPricing?.enabled ? '<div class="muted" style="font-size:10px;">sabit fiyat açık</div>' : ''}</td>
+      <td><input type="checkbox" id="auto_${p.code}" ${pricing.autoReprice ? 'checked' : ''}></td>
       <td style="min-width:220px;">
         <textarea id="urls_${p.code}" rows="2" style="width:100%; font-size:11px;" placeholder="Her satıra bir rakip ürün linki">${competitors.map(c => c.url).join('\n')}</textarea>
         <div>${linkList}</div>
@@ -1793,6 +1697,12 @@ async function restoreBackup(fileId, name) {
 
 /* ---------------- Toplu fiyat değişikliği ---------------- */
 let bpPoll = null;
+let bpScope = null; // null = tüm ürünler (üstteki düğme) · ürün kodu = sadece o ürün (kart üzerindeki düğme)
+function bpModeHint() {
+  const mode = document.getElementById('bpMode').value;
+  const inp = document.getElementById('bpValue');
+  if (inp) inp.placeholder = mode === 'fixed' ? 'örn. 249.90' : 'örn. 10 (artır) veya -5 (indir)';
+}
 function closeBulkPrice() {
   document.getElementById('bpModal')?.remove();
   if (bpPoll) { clearInterval(bpPoll); bpPoll = null; }
@@ -1814,29 +1724,48 @@ function bpBody(apply) {
     mode: document.getElementById('bpMode').value,
     value: Number(String(document.getElementById('bpValue').value).replace(',', '.')),
     push: document.getElementById('bpPush').checked,
+    codes: bpScope ? [bpScope] : undefined,
     apply
   };
 }
-async function openBulkPrice() {
+async function openBulkPrice(code) {
   closeBulkPrice();
-  const pls = (state.platforms || []).filter(p => p.configured);
-  if (!pls.length) { toast('Yapılandırılmış platform yok.'); return; }
+  bpScope = typeof code === 'string' && code ? code : null;
+  const prod = bpScope ? state.products.find(x => x.code === bpScope) : null;
+  if (bpScope && !prod) { bpScope = null; toast('Ürün bulunamadı.'); return; }
+  const fmt = (n) => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 2 });
+  let pls = (state.platforms || []).filter(p => p.configured);
+  const cur = {};
+  if (prod) {
+    // Kartta görünen platformlar: ana ürün + birleşen ürünlerin kayıtlı olduğu platformlar.
+    const members = [prod, ...getChildren(prod.code)];
+    const anyListing = members.some(m => Object.keys(m.skus || {}).length || Object.keys(m.productCodes || {}).length);
+    const listedOn = (m, id) => !anyListing || m.skus?.[id] || m.productCodes?.[id];
+    pls = pls.filter(pl => members.some(m => listedOn(m, pl.id)));
+    pls.forEach(pl => {
+      cur[pl.id] = [...new Set(members.filter(m => listedOn(m, pl.id)).map(m => Number(m.prices?.[pl.id])).filter(n => n > 0))];
+    });
+  }
+  if (!pls.length) { toast(prod ? 'Bu ürün için uygun platform yok.' : 'Yapılandırılmış platform yok.'); return; }
+  const checked = prod ? 'checked' : '';
   const wrap = document.createElement('div');
   wrap.className = 'cmodal-back'; wrap.id = 'bpModal';
   wrap.innerHTML = `
     <div class="cmodal" role="dialog" aria-modal="true">
-      <div class="cmodal-head"><span>Toplu fiyat değişikliği</span><button class="cmodal-x" onclick="closeBulkPrice()" title="Kapat">×</button></div>
+      <div class="cmodal-head"><span>${prod ? '[' + escAttr(prod.name) + '] Fiyat değişikliği' : 'Toplu fiyat değişikliği'}</span><button class="cmodal-x" onclick="closeBulkPrice()" title="Kapat">×</button></div>
       <div class="cmodal-body">
         <div class="muted" style="margin-bottom:6px;">Hangi platformların fiyatı değişsin?</div>
-        <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer;"><input type="checkbox" onchange="bpToggleAll(this.checked)"> <b>Hepsi</b></label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer;"><input type="checkbox" ${checked} onchange="bpToggleAll(this.checked)"> <b>Hepsi</b></label>
         <div style="display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:14px;">
-          ${pls.map(p => `<label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" class="bp-pl" value="${escAttr(p.id)}" onchange="bpInvalidate()"> <span style="color:${p.color}; font-weight:600;">${escAttr(p.name)}</span></label>`).join('')}
+          ${pls.map(p => `<label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" class="bp-pl" value="${escAttr(p.id)}" ${checked} onchange="bpInvalidate()"> <span style="color:${p.color}; font-weight:600;">${escAttr(p.name)}</span>${prod ? ` <span class="muted">${cur[p.id].length ? cur[p.id].map(fmt).join(' / ') + ' ₺' : 'fiyat yok'}</span>` : ''}</label>`).join('')}
         </div>
         <div style="display:flex; gap:8px; margin-bottom:6px;">
-          <select id="bpMode" onchange="bpInvalidate()"><option value="percent">Yüzde (%)</option><option value="amount">Tutar (₺)</option></select>
+          <select id="bpMode" onchange="bpInvalidate(); bpModeHint()"><option value="percent">Yüzde (%)</option><option value="amount">Tutar (₺)</option>${prod ? '<option value="fixed">Sabit fiyat (₺)</option>' : ''}</select>
           <input type="text" id="bpValue" placeholder="örn. 10 (artır) veya -5 (indir)" style="flex:1; min-width:0;" oninput="bpInvalidate()">
         </div>
-        <div class="muted" style="margin-bottom:12px;">Artırmak için pozitif, indirmek için eksi değer yazın. Fiyatı olmayan ürünler değişmez; Trendyol'da otomatik fiyatlandırması açık ürünler atlanır.</div>
+        <div class="muted" style="margin-bottom:12px;">${prod
+          ? 'Artırmak için pozitif, indirmek için eksi değer yazın. <b>Sabit fiyat</b> seçilirse seçili platformların hepsi tam bu fiyata ayarlanır (fiyatı olmayanlara da yazılır). Trendyol\'da otomatik fiyatlandırması açıksa o platform atlanır; önce Rekabet Analizi\'nden kapatın.'
+          : 'Artırmak için pozitif, indirmek için eksi değer yazın. Fiyatı olmayan ürünler değişmez; Trendyol\'da otomatik fiyatlandırması açık ürünler atlanır.'}</div>
         <label style="display:flex; align-items:center; gap:6px; margin-bottom:12px; cursor:pointer;"><input type="checkbox" id="bpPush"> Yeni fiyatları platformlara da gönder</label>
         <div id="bpPreview"></div>
         <div id="bpStatus" style="margin-top:10px;"></div>
@@ -1850,18 +1779,24 @@ async function openBulkPrice() {
     </div>`;
   document.body.appendChild(wrap);
   bpRefreshStatus();
+  document.getElementById('bpValue').focus();
 }
 async function bpRun(apply) {
   const body = bpBody(apply);
   if (!body.platforms.length) { toast('En az bir platform seçin.'); return; }
   if (!Number.isFinite(body.value) || body.value === 0) { toast('Geçerli bir değer girin.'); return; }
+  if (body.mode === 'fixed' && body.value <= 0) { toast('Sabit fiyat 0\'dan büyük olmalı.'); return; }
   const names = body.platforms.map(id => platformMeta(id).name).join(', ');
   const box = document.getElementById('bpPreview');
   let r, d;
   try {
     if (apply) {
-      const txt = (body.mode === 'percent' ? (body.value > 0 ? '%' + body.value + ' artış' : '%' + Math.abs(body.value) + ' indirim') : (body.value > 0 ? body.value + ' ₺ artış' : Math.abs(body.value) + ' ₺ indirim'));
-      if (!confirm(`${names} platformlarındaki tüm ürünlere ${txt} uygulanacak${body.push ? ' ve platformlara gönderilecek' : ''}. Devam edilsin mi?`)) return;
+      const pName = bpScope ? (state.products.find(x => x.code === bpScope)?.name || bpScope) : '';
+      const txt = body.mode === 'fixed' ? '' : (body.mode === 'percent' ? (body.value > 0 ? '%' + body.value + ' artış' : '%' + Math.abs(body.value) + ' indirim') : (body.value > 0 ? body.value + ' ₺ artış' : Math.abs(body.value) + ' ₺ indirim'));
+      const what = body.mode === 'fixed'
+        ? `${names} platformlarında "${pName}" ürününün fiyatı ${body.value.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺ olarak sabitlenecek`
+        : bpScope ? `${names} platformlarında "${pName}" ürününe ${txt} uygulanacak` : `${names} platformlarındaki tüm ürünlere ${txt} uygulanacak`;
+      if (!confirm(`${what}${body.push ? ' ve platformlara gönderilecek' : ''}. Devam edilsin mi?`)) return;
     }
     r = await fetch('/api/prices/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     d = await r.json();
@@ -1874,7 +1809,7 @@ async function bpRun(apply) {
     <div class="${apply ? 'syncbox' : 'warnbox'}" style="margin-bottom:0;">
       <div><b>${d.total}</b> fiyat ${apply ? 'güncellendi' : 'değişecek'} — ${perPl}</div>
       ${skipped ? `<div style="margin-top:4px;">${skipped}</div>` : ''}
-      ${(d.samples || []).length ? `<div style="margin-top:6px; font-size:11px;">${d.samples.map(x => `${escAttr(x.name || x.code)} (${escAttr(platformMeta(x.platform).name)}): ${fmt(x.old)} → <b>${fmt(x.new)} ₺</b>`).join('<br>')}</div>` : ''}
+      ${(d.samples || []).length ? `<div style="margin-top:6px; font-size:11px;">${d.samples.map(x => `${escAttr(x.name || x.code)} (${escAttr(platformMeta(x.platform).name)}): ${x.old ? fmt(x.old) : '—'} → <b>${fmt(x.new)} ₺</b>`).join('<br>')}</div>` : ''}
     </div>`;
   if (apply) {
     document.getElementById('bpApply').disabled = true;
@@ -1891,8 +1826,10 @@ async function bpRefreshStatus() {
     if (!r.ok) return;
     const d = await r.json();
     const undo = document.getElementById('bpUndo');
-    if (undo) undo.style.display = d.last && !d.job.running ? '' : 'none';
-    if (undo && d.last) undo.title = `${d.last.count} fiyat — ${new Date(d.last.time).toLocaleString('tr-TR')}`;
+    // Tek ürün penceresinde geri al düğmesi sadece o ürünün son işlemi için görünür.
+    const lastMatches = d.last && (!bpScope || (d.last.codes || []).includes(bpScope));
+    if (undo) undo.style.display = lastMatches && !d.job.running ? '' : 'none';
+    if (undo && d.last) undo.title = `${d.last.codes ? 'Tek ürün' : 'Tüm ürünler'} · ${d.last.count} fiyat — ${new Date(d.last.time).toLocaleString('tr-TR')}`;
     const st = document.getElementById('bpStatus');
     if (st) {
       const j = d.job;
