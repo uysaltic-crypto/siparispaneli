@@ -16,18 +16,36 @@ const REPRICE_HOURS = Number(process.env.REPRICE_INTERVAL_HOURS || 4);
 /* ------------------------------------------------------------------
    Basit dosya tabanlı kalıcı depo (data/*.json)
 ------------------------------------------------------------------ */
-const DATA_DIR = path.join(__dirname, "data");
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+// Barındırma (Render vb.) dosya sistemini her yeniden başlatmada/dağıtımda SIFIRLIYORSA veri
+// kaybolur. Kalıcı bir disk bağlayıp .env'e DATA_DIR=/o/diskin/yolu yazın (örn. DATA_DIR=/var/data).
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Önce asıl dosya, bozuksa (program yazarken kapanmış olabilir) .bak yedeği okunur.
+// Dosya hiç yoksa sessizce varsayılan döner; BOZUKSA sebebi loga yazılır.
 function loadJSON(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), "utf8"));
-  } catch (e) {
-    return fallback;
+  const full = path.join(DATA_DIR, file);
+  for (const candidate of [full, full + ".bak"]) {
+    try {
+      const v = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      if (candidate !== full) console.error(`UYARI: ${file} okunamadı, ${file}.bak yedeği kullanıldı.`);
+      return v;
+    } catch (e) {
+      if (e.code !== "ENOENT") console.error(`UYARI: ${candidate} okunamadı: ${e.message}`);
+    }
   }
+  return fallback;
+}
+// Atomik yazma: önce geçici dosyaya yaz, sonra yer değiştir. Program yazma sırasında
+// kapatılsa bile dosya yarım/boş kalmaz (eskiden kalıyordu → ürünler sıfırlanıyordu).
+function writeFileAtomic(full, text) {
+  const tmp = full + ".tmp";
+  fs.writeFileSync(tmp, text);
+  try { if (fs.existsSync(full)) fs.copyFileSync(full, full + ".bak"); } catch (_) {}
+  fs.renameSync(tmp, full);
 }
 function saveJSON(file, data) {
-  fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
+  writeFileAtomic(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,12 +54,17 @@ function sleep(ms) {
 // products: { [barcode]: { name, stocks: { hb, ty, n11, cs }, centralStock } }
 let products = loadJSON("products.json", {});
 let processedPackages = new Set(loadJSON("processed.json", []));
+// processed.json yoksa (ilk kurulum ya da veri klasörü sıfırlanmış) platformlardan gelen MEVCUT
+// siparişler stoğa zaten yansımış sayılır: ilk çekimde sadece "işlendi" diye işaretlenir, stok
+// düşülmez. Aksi halde her yeniden başlatmada son 1-7 günün siparişleri tekrar düşülürdü.
+const hadProcessedFile = fs.existsSync(path.join(DATA_DIR, "processed.json")) || fs.existsSync(path.join(DATA_DIR, "processed.json.bak"));
+let baselined = new Set(loadJSON("baselined.json", hadProcessedFile ? ["*"] : []));
 let pushLog = loadJSON("push-log.json", []);
 
 function persistProducts() {
   invalidateFamilies();
   // Girintisiz (kompakt) yaz: binlerce üründe hem çok daha hızlı hem çok daha küçük.
-  fs.writeFileSync(path.join(DATA_DIR, "products.json"), JSON.stringify(products));
+  writeFileAtomic(path.join(DATA_DIR, "products.json"), JSON.stringify(products));
 }
 function persistProcessed() {
   saveJSON("processed.json", Array.from(processedPackages));
@@ -85,9 +108,6 @@ function ensureProduct(code, name) {
       listingStatus: {}, // { platformId: 'satista' | 'pasif' }
       pricing: { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
       competitors: [], // [{ url, label, lastPrice, lastCheckedAt, lastError, sellerName }]
-      // Sabit fiyat: rekabete bakmadan, platform bazında girilen fiyatı otomatik olarak sabit tutar.
-      // { enabled, prices: { platformId: sabitFiyat }, pushed: { platformId: sitede doğrulanan son gönderilen fiyat } }
-      fixedPricing: { enabled: false, prices: {}, pushed: {} },
       // Bu ürün sürükle-bırak ile başka bir ürünün altında birleştirildiyse, ana
       // ürünün kodu burada tutulur (aşağıdaki "Birleştirme ailesi" bölümüne bakın).
       // Birleştirilmemiş / bağımsız bir ürünse null'dur.
@@ -102,9 +122,6 @@ function ensureProduct(code, name) {
   if (products[code].category === undefined) products[code].category = "";
   if (!products[code].pricing) products[code].pricing = { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
   if (!products[code].competitors) products[code].competitors = [];
-  if (!products[code].fixedPricing) products[code].fixedPricing = { enabled: false, prices: {}, pushed: {} };
-  if (!products[code].fixedPricing.prices) products[code].fixedPricing.prices = {};
-  if (!products[code].fixedPricing.pushed) products[code].fixedPricing.pushed = {};
   if (products[code].mergedInto === undefined) products[code].mergedInto = null;
   return products[code];
 }
@@ -623,7 +640,7 @@ async function repriceProduct(code) {
   const prices = (p.competitors || []).map((c) => c.lastPrice).filter((n) => typeof n === "number" && n > 0);
   const lowest = prices.length ? Math.min(...prices) : null;
 
-  if (p.pricing.autoReprice && !p.fixedPricing?.enabled && p.pricing.minPrice != null && lowest != null) {
+  if (p.pricing.autoReprice && p.pricing.minPrice != null && lowest != null) {
     const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
     if (target !== p.pricing.myPrice) {
       const qty = p.stocks?.ty ?? p.centralStock ?? 0;
@@ -659,91 +676,7 @@ async function repriceAll() {
       console.error("Rekabet kontrolü hatası:", code, e.message);
     }
   }
-  fixedPriceSweep().catch((e) => console.error("Sabit fiyat taraması hatası:", e.message));
   return { checked: codes.length };
-}
-
-/* ------------------------------------------------------------------
-   SABİT FİYAT — ürün bazında, platform bazında sabit satış fiyatı.
-   Rekabet analizinden bağımsızdır: fiyat rakibe göre değişmez, girilen
-   değerde tutulur. Kaydedilince hemen ilgili platformlara gönderilir; ayrıca
-   düzenli tarama (fixedPriceSweep) sitedeki fiyat sapmışsa (ör. "Siteden Çek" ile
-   farklı bir fiyat geldiyse ya da elle değiştirildiyse) sabit fiyatı tekrar gönderir.
-   Aile (birleştirme) mantığı stok senkronuyla aynı: ana ürünün kendi kaydı + bu platformda
-   kendi SKU'su olan alt ürünler aynı sabit fiyatla güncellenir.
------------------------------------------------------------------- */
-function fixedTargets(rootCode, pid) {
-  const out = [];
-  if (isListedOn(rootCode, pid)) out.push(rootCode);
-  getFamilyCodes(rootCode).forEach((c) => {
-    if (c !== rootCode && products[c]?.skus?.[pid]) out.push(c);
-  });
-  return out;
-}
-
-async function applyFixedPrices(code, opts) {
-  const { force = false, throttle = false } = opts || {};
-  const p = products[code];
-  const fp = p?.fixedPricing;
-  if (!fp?.enabled) return {};
-  const qty = Number(products[resolveRoot(code)]?.centralStock) || 0;
-  const results = {};
-
-  for (const [pid, raw] of Object.entries(fp.prices || {})) {
-    const price = Math.round(Number(raw) * 100) / 100;
-    if (!(price > 0)) continue;
-    const pl = PLATFORMS.find((x) => x.id === pid);
-    if (!pl || !pl.configured()) continue;
-    const targets = fixedTargets(code, pid);
-    if (!targets.length) continue;
-    const drift = targets.some((t) => Number(products[t]?.prices?.[pid]) !== price);
-    if (!force && fp.pushed[pid] === price && !drift) continue;
-
-    const outcomes = [];
-    for (const t of targets) {
-      const r = await pushListingToPlatform(pid, skuForPlatform(t, pid), qty, price);
-      outcomes.push(r);
-      if (r.ok && products[t]) products[t].prices[pid] = price;
-    }
-    const ok = outcomes.every((o) => o.ok);
-    if (ok) fp.pushed[pid] = price;
-    else delete fp.pushed[pid];
-    results[pid] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
-    if (throttle) await sleep(pid === "koctas" ? 61000 : 400);
-  }
-
-  if (Object.keys(results).length) {
-    pushLog.push({
-      time: new Date().toISOString(),
-      barcode: code,
-      name: p.name,
-      centralStock: products[resolveRoot(code)]?.centralStock ?? null,
-      trigger: "sabit fiyat",
-      results,
-    });
-    persistPushLog();
-    persistProducts();
-  }
-  return results;
-}
-
-let fixedSweepRunning = false;
-async function fixedPriceSweep() {
-  if (fixedSweepRunning) return;
-  fixedSweepRunning = true;
-  try {
-    for (const code of Object.keys(products)) {
-      const p = products[code];
-      if (!p || p.mergedInto || !p.fixedPricing?.enabled) continue;
-      try {
-        await applyFixedPrices(code, { throttle: true });
-      } catch (e) {
-        console.error("Sabit fiyat hatası:", code, e.message);
-      }
-    }
-  } finally {
-    fixedSweepRunning = false;
-  }
 }
 
 
@@ -1446,7 +1379,25 @@ async function processNewOrdersAndSync(ordersByPlatform) {
     newlyProcessed++;
   }
 
-  ordersByPlatform.forEach((orders) => orders.forEach(handleOrder));
+  let baselineChanged = false;
+  ordersByPlatform.forEach((orders, i) => {
+    const pid = PLATFORMS[i]?.id;
+    if (!baselined.has("*") && pid && !baselined.has(pid)) {
+      if (orders.length) {
+        orders.forEach((o) => {
+          if (o.packageId || o.orderNumber) processedPackages.add(`${o.platform}:${o.packageId || o.orderNumber}`);
+        });
+        baselined.add(pid);
+        baselineChanged = true;
+      }
+      return; // bu turda stok düşülmez
+    }
+    orders.forEach(handleOrder);
+  });
+  if (baselineChanged) {
+    saveJSON("baselined.json", Array.from(baselined));
+    persistProcessed();
+  }
 
   if (newlyProcessed) {
     persistProcessed();
@@ -1517,8 +1468,6 @@ async function refreshAll() {
   }
 
   cache = { fetchedAt: new Date().toISOString(), orders: merged, errors, sync };
-  // Sitedeki fiyat sabit fiyattan sapmışsa düzeltir (sapma yoksa hiçbir istek atmaz).
-  fixedPriceSweep().catch((e) => console.error("Sabit fiyat taraması hatası:", e.message));
   return cache;
 }
 
@@ -1633,7 +1582,6 @@ function serializeProduct(code) {
     imageCustom: !!p.imageCustom,
     pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
     competitors: p.competitors || [],
-    fixedPricing: p.fixedPricing || { enabled: false, prices: {}, pushed: {} },
     mergedInto: p.mergedInto || null,
   };
 }
@@ -2194,11 +2142,7 @@ function mergeStockRows(platform, rows) {
       if (!p.imageCustom) p.image = r.image; // elle değiştirilen resim siteden çekmede ezilmez
     }
     const price = Number(r.price);
-    if (price > 0) {
-      p.prices[platform] = price;
-      const rootFp = products[resolveRoot(code)]?.fixedPricing;
-      if (rootFp?.enabled && rootFp.prices?.[platform] && Number(rootFp.prices[platform]) !== price) delete rootFp.pushed[platform];
-    }
+    if (price > 0) p.prices[platform] = price;
     if (r.productCode) p.productCodes[platform] = String(r.productCode).trim();
     existed ? updated++ : created++;
   });
@@ -2323,32 +2267,36 @@ let lastBulkPrice = loadJSON("price-undo.json", null); // { time, platforms, mod
 let bulkPushJob = { running: false, total: 0, done: 0, failed: 0, startedAt: null, finishedAt: null, errors: [], label: "" };
 
 function computeBulkPrice(old, mode, value) {
+  if (mode === "fixed") return Math.round(value * 100) / 100; // sabit fiyat: eski fiyattan bağımsız
   const n = mode === "percent" ? old * (1 + value / 100) : old + value;
   return Math.round(n * 100) / 100;
 }
 
-function planBulkPrice(platformIds, mode, value) {
+// codes verilirse sadece o ürünlerin (ve birleştirilmiş ailelerinin) fiyatları değişir;
+// verilmezse tüm ürünler. Sabit fiyatta eski fiyat şart değil (fiyatı olmayan kayıtlara da yazılır).
+function planBulkPrice(platformIds, mode, value, codes) {
   const changes = [];
   let skippedAuto = 0, skippedNoPrice = 0, skippedInvalid = 0;
-  for (const [code, prod] of Object.entries(products)) {
+  const entries = codes
+    ? [...new Set(codes.flatMap((c) => getFamilyCodes(c)))].filter((c) => products[c]).map((c) => [c, products[c]])
+    : Object.entries(products);
+  for (const [code, prod] of entries) {
     for (const pid of platformIds) {
       if (!isListedOn(code, pid)) continue;
       const old = Number(prod.prices?.[pid]);
-      if (!(old > 0)) { skippedNoPrice++; continue; }
+      if (mode !== "fixed" && !(old > 0)) { skippedNoPrice++; continue; }
       // Trendyol'da otomatik fiyatlandırma açıksa o ürünün fiyatını rekabet sistemi yönetir; ezilmesin diye atlanır.
       if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
-      // Sabit fiyat tanımlı ürün/platform: fiyatı sabit fiyat yönetir, toplu değişiklik ezmesin.
-      if (prod.fixedPricing?.enabled && Number(prod.fixedPricing.prices?.[pid]) > 0) { skippedAuto++; continue; }
       const nw = computeBulkPrice(old, mode, value);
       if (!(nw > 0)) { skippedInvalid++; continue; }
-      if (nw === old) continue;
-      changes.push({ code, platform: pid, old, new: nw });
+      if (nw === (old > 0 ? old : null)) continue;
+      changes.push({ code, platform: pid, old: old > 0 ? old : null, new: nw });
     }
   }
   return { changes, skippedAuto, skippedNoPrice, skippedInvalid };
 }
 
-function summarizeChanges(plan, platformIds) {
+function summarizeChanges(plan, platformIds, sampleLimit = 6) {
   const perPlatform = {};
   platformIds.forEach((id) => (perPlatform[id] = 0));
   plan.changes.forEach((c) => { perPlatform[c.platform] = (perPlatform[c.platform] || 0) + 1; });
@@ -2358,7 +2306,7 @@ function summarizeChanges(plan, platformIds) {
     skippedAuto: plan.skippedAuto,
     skippedNoPrice: plan.skippedNoPrice,
     skippedInvalid: plan.skippedInvalid,
-    samples: plan.changes.slice(0, 6).map((c) => ({ code: c.code, name: products[c.code]?.name || "", platform: c.platform, old: c.old, new: c.new })),
+    samples: plan.changes.slice(0, sampleLimit).map((c) => ({ code: c.code, name: products[c.code]?.name || "", platform: c.platform, old: c.old, new: c.new })),
   };
 }
 
@@ -2420,16 +2368,22 @@ function startBulkPush(changes, label) {
 
 app.post("/api/prices/bulk", requireAuth, (req, res) => {
   const { platforms, mode, value, apply, push } = req.body || {};
+  // codes: tek ürün (kart) kapsamı. Verilmezse tüm ürünler (üstteki "Toplu fiyat" düğmesi).
+  const codes = Array.isArray(req.body?.codes) ? [...new Set(req.body.codes.map((c) => String(c)))].filter((c) => products[c]) : null;
+  if (Array.isArray(req.body?.codes) && !codes.length) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
   const validIds = PLATFORMS.map((x) => x.id);
   const platformIds = (Array.isArray(platforms) ? platforms : []).filter((id) => validIds.includes(id));
   if (!platformIds.length) return res.status(400).json({ ok: false, error: "En az bir platform seçin." });
-  if (mode !== "percent" && mode !== "amount") return res.status(400).json({ ok: false, error: "Geçersiz değişiklik türü." });
+  if (mode !== "percent" && mode !== "amount" && mode !== "fixed") return res.status(400).json({ ok: false, error: "Geçersiz değişiklik türü." });
+  // Sabit fiyat yanlışlıkla tüm kataloğa uygulanmasın diye yalnızca ürün bazında kullanılabilir.
+  if (mode === "fixed" && !codes) return res.status(400).json({ ok: false, error: "Sabit fiyat yalnızca tek ürün için kullanılabilir." });
   const v = Number(value);
   if (!Number.isFinite(v) || v === 0) return res.status(400).json({ ok: false, error: "Geçerli bir değer girin (0 olamaz)." });
+  if (mode === "fixed" && (v <= 0 || v > 10000000)) return res.status(400).json({ ok: false, error: "Sabit fiyat 0'dan büyük olmalı." });
   if (mode === "percent" && (v <= -90 || v > 1000)) return res.status(400).json({ ok: false, error: "Yüzde değeri -90 ile 1000 arasında olmalı." });
 
-  const plan = planBulkPrice(platformIds, mode, v);
-  const summary = summarizeChanges(plan, platformIds);
+  const plan = planBulkPrice(platformIds, mode, v, codes);
+  const summary = summarizeChanges(plan, platformIds, codes ? 40 : 6);
   if (!apply) return res.json({ ok: true, preview: true, ...summary });
 
   if (!plan.changes.length) return res.status(400).json({ ok: false, error: "Değiştirilecek fiyat bulunamadı." });
@@ -2437,11 +2391,11 @@ app.post("/api/prices/bulk", requireAuth, (req, res) => {
 
   plan.changes.forEach((c) => { products[c.code].prices[c.platform] = c.new; });
   persistProducts();
-  lastBulkPrice = { time: new Date().toISOString(), platforms: platformIds, mode, value: v, changes: plan.changes };
+  lastBulkPrice = { time: new Date().toISOString(), platforms: platformIds, mode, value: v, codes: codes || null, changes: plan.changes };
   saveJSON("price-undo.json", lastBulkPrice);
 
   let pushStarted = false;
-  if (push) pushStarted = startBulkPush(plan.changes, `${mode === "percent" ? "%" + v : v + " ₺"}`);
+  if (push) pushStarted = startBulkPush(plan.changes, mode === "fixed" ? `sabit ${v} ₺` : `${mode === "percent" ? "%" + v : v + " ₺"}`);
   res.json({ ok: true, applied: true, pushStarted, ...summary });
 });
 
@@ -2449,7 +2403,7 @@ app.get("/api/prices/bulk/status", requireAuth, (req, res) => {
   res.json({
     job: bulkPushJob,
     last: lastBulkPrice
-      ? { time: lastBulkPrice.time, platforms: lastBulkPrice.platforms, mode: lastBulkPrice.mode, value: lastBulkPrice.value, count: lastBulkPrice.changes.length }
+      ? { time: lastBulkPrice.time, platforms: lastBulkPrice.platforms, mode: lastBulkPrice.mode, value: lastBulkPrice.value, codes: lastBulkPrice.codes || null, count: lastBulkPrice.changes.length }
       : null,
   });
 });
@@ -2462,7 +2416,7 @@ app.post("/api/prices/bulk/undo", requireAuth, (req, res) => {
   lastBulkPrice.changes.forEach((c) => {
     const prod = products[c.code];
     if (!prod || Number(prod.prices?.[c.platform]) !== c.new) return;
-    prod.prices[c.platform] = c.old;
+    if (c.old > 0) prod.prices[c.platform] = c.old; else delete prod.prices[c.platform];
     restored.push({ code: c.code, platform: c.platform, old: c.new, new: c.old });
   });
   persistProducts();
@@ -2470,7 +2424,7 @@ app.post("/api/prices/bulk/undo", requireAuth, (req, res) => {
   lastBulkPrice = null;
   saveJSON("price-undo.json", null);
   let pushStarted = false;
-  if (req.body?.push) pushStarted = startBulkPush(restored, "geri alma");
+  if (req.body?.push) pushStarted = startBulkPush(restored.filter((r) => r.new > 0), "geri alma");
   res.json({ ok: true, restored: restored.length, skipped: total - restored.length, pushStarted });
 });
 
@@ -2491,11 +2445,7 @@ app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
 
   if (minPrice !== undefined) p.pricing.minPrice = minPrice === "" || minPrice === null ? null : Number(minPrice);
   if (maxPrice !== undefined) p.pricing.maxPrice = maxPrice === "" || maxPrice === null ? null : Number(maxPrice);
-  if (autoReprice !== undefined) {
-    p.pricing.autoReprice = !!autoReprice;
-    // Rekabete göre otomatik fiyatlandırma ile sabit fiyat aynı fiyatı yönetemez: sonradan hangisi açıldıysa o geçerli olur.
-    if (p.pricing.autoReprice && p.fixedPricing) p.fixedPricing.enabled = false;
-  }
+  if (autoReprice !== undefined) p.pricing.autoReprice = !!autoReprice;
   if (undercut !== undefined && undercut !== "") p.pricing.undercut = Number(undercut);
 
   if (p.pricing.minPrice != null && p.pricing.maxPrice != null && p.pricing.minPrice > p.pricing.maxPrice) {
@@ -2512,44 +2462,6 @@ app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
 
   persistProducts();
   res.json({ ok: true, product: { code: req.params.code, ...p } });
-});
-
-// Sabit fiyat ayarı: body { enabled, prices: { platformId: fiyat | "" } }.
-// Boş bırakılan platform sabit fiyat dışında kalır. Açıkken kaydedilince fiyatlar hemen platformlara gönderilir.
-app.post("/api/products/:code/fixed-price", requireAuth, async (req, res) => {
-  const code = req.params.code;
-  const p = products[code];
-  if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
-  ensureProduct(code);
-  const fp = p.fixedPricing;
-  const { enabled, prices } = req.body || {};
-  const validIds = PLATFORMS.map((x) => x.id);
-
-  if (prices && typeof prices === "object") {
-    for (const [pid, val] of Object.entries(prices)) {
-      if (!validIds.includes(pid)) continue;
-      if (val === "" || val === null || val === undefined) {
-        delete fp.prices[pid];
-        delete fp.pushed[pid];
-        continue;
-      }
-      const n = Number(val);
-      if (!Number.isFinite(n) || n <= 0) return res.status(400).json({ ok: false, error: "Sabit fiyat 0'dan büyük bir sayı olmalı." });
-      const rounded = Math.round(n * 100) / 100;
-      if (fp.prices[pid] !== rounded) delete fp.pushed[pid];
-      fp.prices[pid] = rounded;
-    }
-  }
-  if (enabled !== undefined) fp.enabled = !!enabled;
-  if (fp.enabled && !Object.keys(fp.prices).length) {
-    return res.status(400).json({ ok: false, error: "Sabit fiyatı açmak için en az bir platforma fiyat girin." });
-  }
-  if (fp.enabled) p.pricing.autoReprice = false; // rekabet otomatiği ile birlikte çalışmaz
-  persistProducts();
-
-  let results = {};
-  if (fp.enabled) results = await applyFixedPrices(code, { force: true });
-  res.json({ ok: true, results, product: serializeProduct(code) });
 });
 
 // Tek bir ürün için hemen kontrol et (rakip fiyatlarını çek + gerekiyorsa fiyatı güncelle)
@@ -2942,6 +2854,10 @@ app.use((req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Panel çalışıyor: http://localhost:${PORT}`);
+  console.log(`Veri klasörü: ${DATA_DIR} · ${Object.keys(products).length} ürün, ${processedPackages.size} işlenmiş sipariş yüklendi.`);
+  if (process.env.RENDER && !process.env.DATA_DIR) {
+    console.warn("UYARI: Render üzerinde DATA_DIR tanımlı değil — kalıcı disk bağlanmadıysa her yeniden başlatmada/dağıtımda veriler (stoklar dahil) sıfırlanır.");
+  }
   refreshAll().catch((e) => console.error("İlk veri çekme hatası:", e.message));
   setInterval(() => {
     refreshAll().catch((e) => console.error("Otomatik yenileme hatası:", e.message));
