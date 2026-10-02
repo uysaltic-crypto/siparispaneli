@@ -2311,7 +2311,7 @@ function summarizeChanges(plan, platformIds, sampleLimit = 6) {
 }
 
 // Değişen fiyatları platformlara arka planda, platform başına sıralı ve hız sınırına uygun gönderir.
-function startBulkPush(changes, label) {
+function startBulkPush(changes, label, opts = {}) {
   if (bulkPushJob.running) return false;
   const byPlatform = {};
   changes.forEach((c) => {
@@ -2352,9 +2352,9 @@ function startBulkPush(changes, label) {
     pushLog.push({
       time: bulkPushJob.finishedAt,
       barcode: "—",
-      name: `Toplu fiyat gönderimi (${bulkPushJob.total} ürün)`,
+      name: opts.name ? `${opts.name} (${bulkPushJob.total} kayıt)` : `Toplu fiyat gönderimi (${bulkPushJob.total} ürün)`,
       centralStock: "—",
-      trigger: "toplu fiyat",
+      trigger: opts.trigger || "toplu fiyat",
       results: Object.fromEntries(Object.entries(bulkPushJob.perPlatform).map(([id, st]) => [id, st.fail ? { ok: false, message: `${st.ok} başarılı, ${st.fail} hatalı` } : { ok: true }])),
     });
     persistPushLog();
@@ -2759,6 +2759,23 @@ async function cleanupOldBackups(token) {
   }
 }
 
+// Geri yüklenen ürünlerin MERKEZİ STOK adetlerini (ve istenirse fiyatlarını) kayıtlı oldukları
+// platformlara gönderir. Fiyat gönderilmezse sadece stok gider. Trendyol'da otomatik
+// fiyatlandırması açık ürünlerin fiyatı rekabet sistemine bırakılır (sadece stok gider).
+function startBackupSync(withPrices) {
+  const changes = [];
+  for (const [code, prod] of Object.entries(products)) {
+    for (const pl of PLATFORMS) {
+      if (!pl.configured() || !isListedOn(code, pl.id)) continue;
+      const price = Number(prod.prices?.[pl.id]);
+      const sendPrice = withPrices && price > 0 && !(pl.id === "ty" && prod.pricing?.autoReprice);
+      changes.push({ code, platform: pl.id, old: null, new: sendPrice ? price : null });
+    }
+  }
+  const started = startBulkPush(changes, "yedek senkronu", { name: "Yedek senkronu", trigger: "yedek senkronu" });
+  return { started, total: changes.length };
+}
+
 async function restoreBackupFromDrive(fileId) {
   const token = await getDriveAccessToken();
   const resp = await axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
@@ -2827,10 +2844,19 @@ app.get("/api/backup/list", requireAuth, async (req, res) => {
 
 app.post("/api/backup/restore", requireAuth, async (req, res) => {
   if (!driveConfigured()) return res.status(400).json({ ok: false, error: "Google Drive yedekleme yapılandırılmadı." });
-  const { fileId } = req.body || {};
+  const { fileId, sync, syncPrices } = req.body || {};
   if (!fileId) return res.status(400).json({ ok: false, error: "fileId gerekli." });
+  // Yedek geri yüklenmeden ÖNCE kontrol: sürmekte olan bir gönderim varsa yeni gönderim başlatılamaz.
+  if (sync && bulkPushJob.running) return res.status(409).json({ ok: false, error: "Sürmekte olan bir toplu gönderim var, bitmesini bekleyin." });
   try {
-    res.json({ ok: true, ...(await restoreBackupFromDrive(fileId)) });
+    const restored = await restoreBackupFromDrive(fileId);
+    const out = { ok: true, ...restored };
+    if (sync) {
+      const r = startBackupSync(!!syncPrices);
+      out.syncStarted = r.started;
+      out.syncTotal = r.total;
+    }
+    res.json(out);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message });
   }
