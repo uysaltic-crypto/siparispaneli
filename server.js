@@ -2593,6 +2593,7 @@ app.get("/api/backup/oauth/callback", async (req, res) => {
       <p style="color:#888; font-size:13px;">Not: Sunucu yeniden dağıtıldığında (redeploy) bu bağlantının kaybolmaması için,
       barındırma panelindeki (Render vb.) ortam değişkenlerine şunu da eklemen önerilir:</p>
       <pre style="background:#f2f2f2; padding:10px; border-radius:6px; white-space:pre-wrap; word-break:break-all;">GOOGLE_OAUTH_REFRESH_TOKEN=${refresh_token}</pre>
+      ${process.env.GOOGLE_OAUTH_REFRESH_TOKEN ? '<p style="color:#b00020; font-size:13px;"><b>Önemli:</b> Ortam değişkeninde zaten eski bir GOOGLE_OAUTH_REFRESH_TOKEN var. Onu yukarıdaki yeni değerle <b>değiştir</b>; aksi halde sunucu yeniden başladığında eski (süresi dolmuş) token tekrar kullanılır.</p>' : ''}
       </body></html>`);
   } catch (e) {
     const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 500) : e.message;
