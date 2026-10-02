@@ -1625,7 +1625,7 @@ async function loadBackupStatus() {
 
   if (!data.configured) {
     if (data.oauthAvailable && !data.oauthConnected) {
-      warn.innerHTML = `<div class="warnbox">Google OAuth bilgileri girilmiş ama henüz bağlanılmamış. Sağdaki "Google ile Bağlan" butonuyla kendi Google hesabınla bir kez giriş yap.</div>`;
+      warn.innerHTML = `<div class="warnbox">Google Drive bağlantısı yok (sunucu yeniden başlayınca/dağıtılınca kopmuş olabilir). Yedeklerin Drive'da duruyor; sağdaki "Google ile Bağlan" ile yeniden bağlanınca listelenir. Kalıcı olması için bağlandıktan sonra çıkan GOOGLE_OAUTH_REFRESH_TOKEN değerini barındırma panelindeki ortam değişkenlerine ekle.</div>`;
     } else {
       warn.innerHTML = `<div class="warnbox">Google Drive yedekleme henüz yapılandırılmadı. .env dosyasına GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI ve GOOGLE_DRIVE_FOLDER_ID eklenmeli.</div>`;
     }
@@ -1652,9 +1652,23 @@ async function loadBackupList() {
   const data = await r.json();
   const tbody = document.getElementById('backupRows');
   tbody.innerHTML = '';
-  if (!data.ok) { document.getElementById('backupEmpty').style.display = 'block'; return; }
+  const emptyEl = document.getElementById('backupEmpty');
+  if (!data.ok) {
+    // Liste alınamadı ≠ yedek yok: yedekler Drive'da durur, sadece bağlantı/yapılandırma sorunu olabilir.
+    emptyEl.className = 'errbox';
+    emptyEl.style.display = 'block';
+    emptyEl.innerHTML = `Yedek listesi alınamadı — bu, yedeklerin silindiği anlamına GELMEZ; yedekler Google Drive klasöründe durur.<br><span style="font-size:12px;">${escAttr(data.error || '')}</span><br><span style="font-size:12px;">Çözüm: sağ üstteki <b>Google ile Bağlan</b> ile Drive'a yeniden bağlanın (düğme yoksa .env/ortam değişkenlerinde GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI ve GOOGLE_DRIVE_FOLDER_ID tanımlı olmalı).</span>`;
+    return;
+  }
+  emptyEl.className = 'empty';
+  emptyEl.textContent = 'Drive klasöründe yedek bulunamadı.';
   const files = data.files || [];
-  document.getElementById('backupEmpty').style.display = files.length ? 'none' : 'block';
+  emptyEl.style.display = files.length ? 'none' : 'block';
+  // Sunucu yeniden başladığında "son yedek" bilgisi bellekten silinir; Drive'daki en yeniyi göster.
+  const line = document.getElementById('backupStatusLine');
+  if (files.length && line && line.textContent.includes('Henüz başarılı bir yedekleme yapılmadı.')) {
+    line.textContent = line.textContent.replace('Henüz başarılı bir yedekleme yapılmadı.', `Drive'daki en son yedek: ${fmtDate(new Date(files[0].createdTime).getTime())}.`);
+  }
   files.forEach(f => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
