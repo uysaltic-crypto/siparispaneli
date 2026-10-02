@@ -1732,6 +1732,7 @@ app.post("/api/products/merge", requireAuth, (req, res) => {
   doMerge(from, to, "max");
 
   persistProducts();
+  queueMatchPush([newRoot]);
   const familyCodes = getFamilyCodes(newRoot);
   // İstemci tüm listeyi yeniden indirmesin diye güncellenen aile üyeleri de dönüyor.
   res.json({ ok: true, product: { code: newRoot, ...products[newRoot] }, familyCodes, products: familyCodes.map(serializeProduct) });
@@ -2060,6 +2061,7 @@ function autoMatchProducts() {
     persistProducts();
     matchLog.push(...out);
     persistMatchLog();
+    queueMatchPush([...new Set(out.map((e) => e.to))]);
   }
   return out;
 }
@@ -2333,6 +2335,7 @@ function startBulkPush(changes, label, opts = {}) {
             const prod = products[c.code];
             const qty = Number(products[resolveRoot(c.code)]?.centralStock) || 0;
             const r = await pushListingToPlatform(pid, skuForPlatform(c.code, pid), qty, c.new);
+            if (r && r.ok && prod) { prod.stocks = prod.stocks || {}; prod.stocks[pid] = qty; }
             if (r && r.ok) stat.ok++;
             else {
               stat.fail++; bulkPushJob.failed++;
@@ -2349,6 +2352,7 @@ function startBulkPush(changes, label, opts = {}) {
     );
     bulkPushJob.running = false;
     bulkPushJob.finishedAt = new Date().toISOString();
+    persistProducts();
     pushLog.push({
       time: bulkPushJob.finishedAt,
       barcode: "—",
@@ -2365,6 +2369,75 @@ function startBulkPush(changes, label, opts = {}) {
   });
   return true;
 }
+
+/* ------------------------------------------------------------------
+   Eşleştirme sonrası STOK + FİYAT gönderimi
+   Otomatik eşleştirme ya da elle birleştirme olunca etkilenen ailelerin (ana ürün +
+   alt ürünler) merkezi stoğu ve her SKU'nun kendi platform fiyatı, o SKU'nun kayıtlı
+   olduğu platformlara gönderilir. Mevcut toplu gönderim kuyruğu (startBulkPush) kullanılır:
+   platform başına sıralı, hız sınırlarına (Çiçeksepeti kuyruğu, Koçtaş 1/dk) uygun.
+   Ayar: match-push-settings.json → { auto: true|false }
+------------------------------------------------------------------ */
+let matchPushSettings = loadJSON("match-push-settings.json", { auto: true });
+const matchPushPending = new Set(); // bekleyen ana ürün kodları
+let matchPushTimer = null;
+
+function buildFamilyPushChanges(rootCode) {
+  const changes = [];
+  if (!products[rootCode]) return changes;
+  const fam = getFamilyCodes(rootCode);
+  for (const pl of PLATFORMS) {
+    if (!pl.configured()) continue;
+    const targets = [];
+    if (isListedOn(rootCode, pl.id)) targets.push(rootCode);
+    fam.forEach((c) => { if (c !== rootCode && products[c]?.skus?.[pl.id]) targets.push(c); });
+    for (const c of targets) {
+      const prod = products[c];
+      let price = Number(prod.prices?.[pl.id]);
+      // Trendyol'da otomatik fiyatlandırma açıksa fiyatı rekabet sistemi yönetir: sadece stok gider.
+      if (pl.id === "ty" && prod.pricing?.autoReprice) price = NaN;
+      changes.push({ code: c, platform: pl.id, old: null, new: price > 0 ? price : undefined });
+    }
+  }
+  return changes;
+}
+
+function drainMatchPush() {
+  matchPushTimer = null;
+  if (!matchPushPending.size) return;
+  if (bulkPushJob.running) { matchPushTimer = setTimeout(drainMatchPush, 15000); return; }
+  const roots = [...new Set([...matchPushPending].map(resolveRoot))].filter((r) => products[r]);
+  matchPushPending.clear();
+  const changes = roots.flatMap(buildFamilyPushChanges);
+  if (!changes.length) return;
+  startBulkPush(changes, `eşleştirme sonrası (${roots.length} ürün)`, { trigger: "eşleştirme", name: "Eşleştirme sonrası stok+fiyat" });
+}
+
+function queueMatchPush(roots) {
+  if (!matchPushSettings.auto || !roots?.length) return;
+  roots.forEach((r) => matchPushPending.add(r));
+  if (!matchPushTimer) matchPushTimer = setTimeout(drainMatchPush, 3000); // peş peşe birleştirmeleri tek turda topla
+}
+
+app.get("/api/match-push-settings", requireAuth, (req, res) => {
+  res.json({ ok: true, auto: !!matchPushSettings.auto, pending: matchPushPending.size });
+});
+
+app.post("/api/match-push-settings", requireAuth, (req, res) => {
+  matchPushSettings = { auto: !!req.body?.auto };
+  saveJSON("match-push-settings.json", matchPushSettings);
+  res.json({ ok: true, auto: matchPushSettings.auto });
+});
+
+// Zaten eşleşmiş (birden fazla üyeli) tüm ailelerin stok+fiyatını elle platformlara gönderir.
+app.post("/api/products/push-matched", requireAuth, (req, res) => {
+  if (bulkPushJob.running) return res.status(409).json({ ok: false, error: "Önceki toplu gönderim hâlâ sürüyor, bitmesini bekleyin." });
+  const roots = [...new Set(Object.keys(products).map(resolveRoot))].filter((r) => products[r] && getFamilyCodes(r).length > 1);
+  if (!roots.length) return res.status(400).json({ ok: false, error: "Eşleşmiş ürün bulunamadı." });
+  const changes = roots.flatMap(buildFamilyPushChanges);
+  const started = startBulkPush(changes, `eşleşen ürünler (${roots.length})`, { trigger: "eşleştirme", name: "Eşleşen ürünlere stok+fiyat" });
+  res.json({ ok: true, families: roots.length, records: changes.length, started });
+});
 
 app.post("/api/prices/bulk", requireAuth, (req, res) => {
   const { platforms, mode, value, apply, push } = req.body || {};
