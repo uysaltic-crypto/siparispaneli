@@ -2787,6 +2787,9 @@ function buildBackupPayload() {
 }
 
 async function uploadBackupToDrive() {
+  // Ürün listesi boşsa (ör. Render diski sıfırlandıysa) yedek ALMA: boş yedek, saklama sınırı
+  // yüzünden iyi eski yedeklerin silinmesine yol açabilir.
+  if (!Object.keys(products).length) throw new Error("Ürün listesi boş — boş yedek alınmadı (önce Yedekleme sekmesinden geri yükleyin).");
   const token = await getDriveAccessToken();
   const content = buildBackupPayload();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2865,6 +2868,33 @@ async function restoreBackupFromDrive(fileId) {
   persistProcessed();
   persistPushLog();
   return { restoredAt: data.createdAt || null, productCount: Object.keys(products).length };
+}
+
+// Sunucu açılırken ürün listesi BOŞSA (ücretsiz Render planında disk her yeniden başlatmada/dağıtımda
+// sıfırlanır) Drive'daki en son geçerli yedeği otomatik geri yükler. Yalnızca ürün yokken çalışır;
+// dolu veriyi asla ezmez. Kapatmak için: AUTO_RESTORE=false
+async function autoRestoreIfEmpty() {
+  if (process.env.AUTO_RESTORE === "false") return false;
+  if (Object.keys(products).length) return false;
+  if (!driveConfigured()) { console.warn("Otomatik geri yükleme atlandı: Drive yapılandırılmamış."); return false; }
+  try {
+    const files = (await listBackupsFromDrive()).filter((f) => /\.json$/i.test(f.name || ""));
+    for (const f of files.slice(0, 5)) {
+      try {
+        const r = await restoreBackupFromDrive(f.id);
+        if (r.productCount > 0) {
+          console.log(`Otomatik geri yükleme tamam: ${f.name} · ${r.productCount} ürün.`);
+          return true;
+        }
+      } catch (e) {
+        console.error(`Yedek geri yüklenemedi (${f.name}):`, e.message);
+      }
+    }
+    console.warn("Otomatik geri yükleme: geçerli yedek bulunamadı.");
+  } catch (e) {
+    console.error("Otomatik geri yükleme başarısız:", e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message);
+  }
+  return false;
 }
 
 let lastBackup = { at: null, error: null, name: null };
@@ -2958,7 +2988,10 @@ app.listen(PORT, () => {
   if (process.env.RENDER && !process.env.DATA_DIR) {
     console.warn("UYARI: Render üzerinde DATA_DIR tanımlı değil — kalıcı disk bağlanmadıysa her yeniden başlatmada/dağıtımda veriler (stoklar dahil) sıfırlanır.");
   }
-  refreshAll().catch((e) => console.error("İlk veri çekme hatası:", e.message));
+  autoRestoreIfEmpty()
+    .catch((e) => console.error("Otomatik geri yükleme hatası:", e.message))
+    .then(() => refreshAll())
+    .catch((e) => console.error("İlk veri çekme hatası:", e.message));
   setInterval(() => {
     refreshAll().catch((e) => console.error("Otomatik yenileme hatası:", e.message));
   }, Math.max(REFRESH_MINUTES, 5) * 60 * 1000);
