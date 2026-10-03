@@ -2968,7 +2968,27 @@ app.post("/api/backup/restore", requireAuth, async (req, res) => {
 
 // index.html ve diğer statik dosyalar server.js ile AYNI klasörde duruyor
 // (ayrı bir "public" alt klasörü yok) — bu yüzden doğrudan __dirname servis edilir.
-app.use(express.static(__dirname));
+// GÜVENLİK: eskiden express.static(__dirname) kullanılıyordu; bu, server.js, package.json ve
+// data/ klasörünü (products.json vb.) şifresiz herkese açıyordu. Artık yalnızca gereken dosyalar sunulur.
+app.use("/logos", express.static(path.join(__dirname, "logos"), { index: false, dotfiles: "deny" }));
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
+app.get("/index.html", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
+
+// Google OAuth onay ekranı (yayına alma) için herkese açık gizlilik politikası sayfası.
+app.get("/gizlilik", (req, res) => {
+  res.type("html").send(`<!doctype html><html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Gizlilik Politikası – Ticaret Paneli</title>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6;color:#222}</style></head><body>
+<h1>Gizlilik Politikası</h1>
+<p>Ticaret Paneli, yalnızca sahibinin kendi mağaza stok ve sipariş yönetimi için kullandığı özel bir araçtır; kamuya açık bir hizmet değildir.</p>
+<h2>Google hesabı ve Drive erişimi</h2>
+<p>Uygulama, yalnızca sahibinin kendi Google Drive hesabına, panel verilerinin (ürün listesi ve sipariş kayıtları) yedeğini yüklemek ve gerektiğinde geri yüklemek amacıyla bağlanır. Google hesabından başka hiçbir kişisel veri okunmaz, üçüncü kişilerle paylaşılmaz ve satılmaz.</p>
+<h2>Saklanan veriler</h2>
+<p>Yedek dosyaları yalnızca sahibinin Drive klasöründe saklanır. Erişim izni, <a href="https://myaccount.google.com/permissions">Google hesap ayarlarından</a> istenildiği zaman kaldırılabilir.</p>
+<h2>İletişim</h2>
+<p>Sorularınız için uygulamanın sahibi ile Google Cloud projesinde kayıtlı e-posta adresi üzerinden iletişime geçebilirsiniz.</p>
+</body></html>`);
+});
 
 // Herhangi bir API/asset eşleşmesi olmayan GET isteklerinde (ör. tarayıcıdan
 // doğrudan "/" ziyareti) her zaman ana paneli (index.html) döndür.
