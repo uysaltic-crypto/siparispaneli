@@ -523,6 +523,37 @@ async function fetchStockTrendyol() {
   }
 }
 
+// Teşhis: Trendyol'un bu barkod için ne döndürdüğünü gösterir (adres alanları var mı?).
+// Tarayıcıdan, giriş yapmışken: /api/ty-debug?barcode=248500
+app.get("/api/ty-debug", requireAuth, async (req, res) => {
+  if (!tyConfigured()) return res.status(400).json({ ok: false, error: "Trendyol API bilgisi eksik." });
+  const barcode = String(req.query.barcode || "").trim();
+  if (!barcode) return res.status(400).json({ ok: false, error: "?barcode=... gerekli" });
+  const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+  const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
+  try {
+    const resp = await axios.get(`https://${host}/integration/product/sellers/${TY_SELLER_ID}/products/approved`, {
+      auth: { username: TY_API_KEY, password: TY_API_SECRET },
+      params: { barcode, size: 5 },
+      headers: { "User-Agent": `${TY_SELLER_ID} - SelfIntegration`, Accept: "application/json" },
+      timeout: 20000,
+    });
+    const content = resp.data?.content || [];
+    const slim = content.map((it) => ({
+      anaAlanlar: Object.keys(it),
+      productMainId: it.productMainId,
+      contentId: it.contentId,
+      productContentId: it.productContentId,
+      productUrl: it.productUrl,
+      varyantlar: (it.variants || []).map((v) => ({ alanlar: Object.keys(v), barcode: v.barcode, stockCode: v.stockCode, productUrl: v.productUrl, salePrice: v.salePrice })),
+    }));
+    const p = products[barcode];
+    res.json({ ok: true, bulunan: content.length, trendyol: slim, panelde: p ? { skus: p.skus, listingUrls: p.listingUrls || {} } : null });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 400) : err.message });
+  }
+});
+
 async function pushStockToTrendyol(barcode, quantity) {
   if (!tyConfigured()) return { ok: false, message: "Trendyol API bilgisi eksik." };
   const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
