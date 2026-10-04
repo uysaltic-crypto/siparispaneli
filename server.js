@@ -1581,6 +1581,7 @@ function serializeProduct(code) {
     skus: p.skus || {},
     prices: p.prices || {},
     productCodes: p.productCodes || {},
+    listingUrls: p.listingUrls || {},
     listingStatus: p.listingStatus || {},
     centralStock: p.centralStock,
     image: p.image || null,
