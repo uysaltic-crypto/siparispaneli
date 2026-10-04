@@ -118,6 +118,7 @@ function ensureProduct(code, name) {
   if (!products[code].skus) products[code].skus = {};
   if (!products[code].prices) products[code].prices = {};
   if (!products[code].productCodes) products[code].productCodes = {};
+  if (!products[code].listingUrls) products[code].listingUrls = {};
   if (!products[code].listingStatus) products[code].listingStatus = {};
   if (products[code].category === undefined) products[code].category = "";
   if (!products[code].pricing) products[code].pricing = { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 };
@@ -494,11 +495,15 @@ async function fetchStockTrendyol() {
         const name = item.title || item.productMainId || "";
         const image = resolveTyImage(item.images?.[0]?.url);
         const productCode = item.productMainId || undefined; // Trendyol'da "Model Kodu"
+        // Trendyol'un herkese açık araması satıcı stok kodunu indekslemiyor; bu yüzden ürünün
+        // gerçek sayfa adresi (API'de varsa productUrl, yoksa içerik numarasından) saklanır.
+        const tyContentId = item.productContentId || item.contentId || undefined;
+        const tyUrl = item.productUrl || (tyContentId ? `https://www.trendyol.com/brand/urun-p-${tyContentId}` : undefined);
         (item.variants || []).forEach((v) => {
           const barcode = String(v.barcode || v.stockCode || "").trim();
           if (!barcode) return;
           const price = Number(v.salePrice ?? v.listPrice ?? v.price ?? 0) || undefined;
-          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image, price, productCode });
+          rows.push({ barcode, stock: Number(v.stock?.quantity ?? v.quantity ?? 0), name, image, price, productCode, url: v.productUrl || tyUrl });
         });
       });
       nextPageToken = resp.data?.nextPageToken || null;
@@ -2146,6 +2151,10 @@ function mergeStockRows(platform, rows) {
     const price = Number(r.price);
     if (price > 0) p.prices[platform] = price;
     if (r.productCode) p.productCodes[platform] = String(r.productCode).trim();
+    if (r.url && /^https:\/\//i.test(String(r.url))) {
+      if (!p.listingUrls) p.listingUrls = {};
+      p.listingUrls[platform] = String(r.url).trim();
+    }
     existed ? updated++ : created++;
   });
   persistProducts();
