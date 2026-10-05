@@ -921,15 +921,18 @@ function platformChipHtml(p, pl, rootCode) {
   const cl = platformCodeInfo(pl.id, p, platformSku);
   const isChild = rootCode && p.code !== rootCode;
   const priceTxt = fmtPrice(priceVal);
-  const childRows = isChild ? `
-        <div class="muted" style="font-size:11px; margin-bottom:6px;">Birleşen ürün: <b>${escAttr(p.name || p.code)}</b>
-          · <a href="#" onclick="event.preventDefault(); unmergeProduct('${p.code}');" title="Bu ürünü ana üründen ayır">Ayır</a></div>` : '';
+  // Aile birden fazla üyeden oluşuyorsa HER kutuda (ana ürün dahil) görünür bir "Ayır" düğmesi var.
+  const inFamily = !!rootCode && getChildren(rootCode).length > 0;
+  const sepBtn = inFamily ? `<button class="ghost small pchip-sep" style="padding:2px 7px;" onclick="event.stopPropagation(); unmergeProduct('${p.code}')" title="${escAttr(p.name || p.code)} — bu ürünü diğerlerinden ayır">Ayır</button>` : '';
+  const childRows = inFamily ? `
+        <div class="muted" style="font-size:11px; margin-bottom:6px;"><b>${escAttr(p.name || p.code)}</b></div>` : '';
   return `
     <div class="pchip compact">
       ${platformLogoHtml(pl)}
       <span class="pchip-state ${status}">${status === 'pasif' ? 'Pasif' : 'Satışta'}</span>
       <span class="muted">-</span>
       <span class="pchip-price ${priceTxt ? '' : 'empty'}">${priceTxt ? priceTxt + ' ₺' : '— ₺'}</span>
+      ${sepBtn}
       <button class="pchip-more" title="Detaylar" onclick="togglePchipMenu(this, event)">⋮</button>
       <div class="pchip-pop" onclick="event.stopPropagation()">
         ${childRows}
@@ -1032,6 +1035,7 @@ function buildStockCard(p, activePlatforms) {
         <div class="pchip compact off" title="${pl.name}: bu pazar yerinde yok">
           ${platformLogoHtml(pl)}
           <span class="muted" style="font-size:11px;">Yok</span>
+          <button class="pchip-more" style="font-size:13px; font-weight:700;" title="${pl.name}'da yayında olan ürünü manuel ekle" onclick="event.stopPropagation(); openListingModal('${p.code}', '${pl.id}')">+</button>
         </div>`;
       }
       // Hiçbir yerden hiç çekilmemiş (elle açılmış) ürünlerde eski davranış: sadece ana ürünün kutusu.
@@ -1066,19 +1070,11 @@ function buildStockCard(p, activePlatforms) {
           <button class="ghost small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
           <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat+stok gönder</button>
           <button class="ghost small" onclick="openListingModal('${p.code}')" title="Platformda yayında olan bir ürünü manuel olarak bu ürüne ekle">+ Platform kaydı</button>
+          ${familyMembers.length > 1 ? `<button class="ghost small" onclick="unmergeFamily('${p.code}')" title="Bu kartın altındaki tüm ürünleri birbirinden ayırır">Hepsini ayır</button>` : ''}
           <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
         </div>
       </div>
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
-      ${getChildren(p.code).length ? `
-      <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;" onmousedown="event.stopPropagation()">
-        <div class="muted" style="font-size:10px; margin-bottom:4px;">BİRLEŞEN ÜRÜNLER</div>
-        ${getChildren(p.code).map(ch => `
-          <div style="display:flex; align-items:center; gap:8px; font-size:12px; padding:3px 0;">
-            <span style="flex:1; min-width:0;">${escAttr(ch.name || ch.code)} <span class="muted" style="font-family:monospace;">${escAttr(ch.code)}</span></span>
-            <button class="ghost small" onclick="unmergeProduct('${escAttr(ch.code)}')" title="Sadece bu ürünü ana üründen ayır">Ayır</button>
-          </div>`).join('')}
-      </div>` : ''}
     `;
     return card;
 }
@@ -1377,12 +1373,117 @@ async function renameProductName(code, nameRaw) {
 
 async function unmergeProduct(code) {
   const child = state.products.find(p => p.code === code);
-  if (!confirm(`"${child ? child.name : code}" ürününü ana üründen ayırmak istiyor musun?\n\nTekrar ayrı bir kart olacak, kendi platform kodları korunacak. Merkezi stokları ayrı takip edilir.`)) return;
+  if (!confirm(`"${child ? child.name : code}" ürününü diğerlerinden ayırmak istiyor musun?\n\nAyrı bir kart olacak, kendi platform kodları korunacak. Merkezi stokları ayrı takip edilir.`)) return;
   const resp = await fetch(`/api/products/${encodeURIComponent(code)}/unmerge`, { method: 'POST' });
   const data = await resp.json();
   if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
   toast('Ürün ayrıldı.');
-  await loadProducts();
+  await loadProducts(true);
+}
+
+// Bir kartın altındaki tüm ürünleri birbirinden ayırır.
+async function unmergeFamily(code) {
+  const p = state.products.find(x => x.code === code);
+  if (!confirm(`"${p ? p.name : code}" kartındaki tüm ürünler birbirinden ayrılacak ve her biri ayrı kart olacak.\n\nPlatform kodları korunur; merkezi stoklar ayrılma anındaki değerinde kalır. Devam edilsin mi?`)) return;
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/unmerge-family`, { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
+  toast(`${data.count} ürün ayrıldı.`);
+  await loadProducts(true);
+}
+
+/* ---------------- Manuel platform kaydı ekleme ---------------- */
+let listingModalCode = null;
+function closeListingModal() {
+  document.getElementById('listingModal')?.remove();
+  document.removeEventListener('keydown', listingModalKey);
+  listingModalCode = null;
+}
+function listingModalKey(e) { if (e.key === 'Escape') closeListingModal(); }
+
+function listingError(msg) {
+  const el = document.getElementById('lm_err');
+  if (!el) { toast(msg); return; }
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+function openListingModal(code, platformId) {
+  const p = state.products.find(x => x.code === code);
+  if (!p) { toast('Ürün bulunamadı, sayfayı yenileyip tekrar dene.'); return; }
+  const pls = state.platforms.filter(x => x.configured);
+  if (!pls.length) { toast('Yapılandırılmış platform yok.'); return; }
+  closeListingModal();
+  listingModalCode = code;
+  const wrap = document.createElement('div');
+  wrap.id = 'listingModal';
+  wrap.className = 'cmodal-back';
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) closeListingModal(); });
+  wrap.innerHTML = `
+    <div class="cmodal" role="dialog" aria-modal="true">
+      <div class="cmodal-head"><span>[${escAttr(p.name)}] Platform kaydı ekle</span><button class="cmodal-x" onclick="closeListingModal()" title="Kapat">×</button></div>
+      <div class="cmodal-body">
+        <div class="errbox" id="lm_err" style="display:none;"></div>
+        <div class="cfield"><label>Platform <span style="color:var(--danger)">&nbsp;*</span></label>
+          <select id="lm_platform" style="flex:1; border:none; border-radius:0;">${pls.map(x => `<option value="${escAttr(x.id)}" ${x.id === platformId ? 'selected' : ''}>${escAttr(x.name)}</option>`).join('')}</select></div>
+        <div class="cfield"><label>Stok kodu / SKU <span style="color:var(--danger)">&nbsp;*</span></label><input type="text" id="lm_sku" spellcheck="false" placeholder="Platformda kayıtlı stok kodu"></div>
+        <div class="cfield"><label class="opt">Ürün kodu</label><input type="text" id="lm_pcode" spellcheck="false" placeholder="Platformun ürün/model kodu"></div>
+        <div class="cfield"><label class="opt">Satış fiyatı (₺)</label><input type="number" step="0.01" id="lm_price"></div>
+        <div class="cfield"><label class="opt">Ürün linki</label><input type="text" id="lm_url" spellcheck="false" placeholder="https://..."></div>
+        <div class="cfield"><label class="opt">Durum</label>
+          <select id="lm_status" style="flex:1; border:none; border-radius:0;"><option value="satista">Satışta</option><option value="pasif">Pasif</option></select></div>
+        <div class="cinfo">
+          Stok kodu, ürünün o platformda <b>kayıtlı olduğu kodla birebir aynı</b> olmalı; stok güncellemeleri bu kodla gönderilir.
+          Ürünün o platformda zaten bir kaydı varsa yeni kayıt, ürüne bağlı ayrı bir <b>birleşen ürün</b> olarak eklenir.
+        </div>
+      </div>
+      <div class="cmodal-foot">
+        <button class="cbtn-cancel" onclick="closeListingModal()">✕ İptal</button>
+        <button class="cbtn-save" id="lm_save" onclick="saveListingModal()">✓ Ekle</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  document.addEventListener('keydown', listingModalKey);
+  document.getElementById('lm_sku').focus();
+}
+
+async function saveListingModal() {
+  const code = listingModalCode;
+  if (!code) return;
+  const body = {
+    platform: document.getElementById('lm_platform').value,
+    sku: document.getElementById('lm_sku').value.trim(),
+    productCode: document.getElementById('lm_pcode').value.trim(),
+    price: document.getElementById('lm_price').value,
+    url: document.getElementById('lm_url').value.trim(),
+    status: document.getElementById('lm_status').value,
+  };
+  listingError('');
+  if (!body.sku) { listingError('Stok kodu / SKU zorunlu.'); return; }
+  const btn = document.getElementById('lm_save');
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/api/products/${encodeURIComponent(code)}/listing`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (resp.status === 409 && data.conflict) {
+      btn.disabled = false;
+      listingError(data.error);
+      if (confirm(`${data.error}\n\n"${data.conflict.name}" ürününü bu ürünle birleştirmek ister misin?`)) {
+        closeListingModal();
+        await mergeProducts(data.conflict.code, code);
+      }
+      return;
+    }
+    if (!resp.ok || !data.ok) { listingError(data.error || 'Eklenemedi.'); btn.disabled = false; return; }
+    closeListingModal();
+    toast(data.how === 'child' ? 'Kayıt, birleşen ürün olarak eklendi.' : (data.how === 'updated' ? 'Mevcut kayıt güncellendi.' : 'Platform kaydı eklendi.'));
+    await loadProducts(true);
+  } catch (e) {
+    listingError('Sunucudan beklenmeyen cevap geldi (server.js güncel mi, yeniden başlatıldı mı?): ' + e.message);
+    btn.disabled = false;
+  }
 }
 
 // Birleştirilmiş TÜM ürünleri tek seferde ayırır (sunucuda "ayrıldı" olarak işaretlenir,
