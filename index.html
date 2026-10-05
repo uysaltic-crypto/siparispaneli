@@ -217,6 +217,7 @@
           <option value="category-asc">Kategoriye göre</option>
         </select>
         <button class="ghost small" onclick="openBulkPrice()">Toplu fiyat</button>
+        <button class="ghost small" id="unmergeAllBtn" onclick="unmergeAllProducts()" title="Birleştirilmiş tüm ürünleri tek seferde ayırır">Tümünü ayır</button>
         <button class="ghost small" onclick="toggleAddForm()">+ Ürün</button>
         <span id="importButtons"></span>
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleImportFile(event)">
@@ -1064,10 +1065,20 @@ function buildStockCard(p, activePlatforms) {
           </div>
           <button class="ghost small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
           <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat+stok gönder</button>
+          <button class="ghost small" onclick="openListingModal('${p.code}')" title="Platformda yayında olan bir ürünü manuel olarak bu ürüne ekle">+ Platform kaydı</button>
           <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
         </div>
       </div>
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
+      ${getChildren(p.code).length ? `
+      <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;" onmousedown="event.stopPropagation()">
+        <div class="muted" style="font-size:10px; margin-bottom:4px;">BİRLEŞEN ÜRÜNLER</div>
+        ${getChildren(p.code).map(ch => `
+          <div style="display:flex; align-items:center; gap:8px; font-size:12px; padding:3px 0;">
+            <span style="flex:1; min-width:0;">${escAttr(ch.name || ch.code)} <span class="muted" style="font-family:monospace;">${escAttr(ch.code)}</span></span>
+            <button class="ghost small" onclick="unmergeProduct('${escAttr(ch.code)}')" title="Sadece bu ürünü ana üründen ayır">Ayır</button>
+          </div>`).join('')}
+      </div>` : ''}
     `;
     return card;
 }
@@ -1372,6 +1383,28 @@ async function unmergeProduct(code) {
   if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
   toast('Ürün ayrıldı.');
   await loadProducts();
+}
+
+// Birleştirilmiş TÜM ürünleri tek seferde ayırır (sunucuda "ayrıldı" olarak işaretlenir,
+// otomatik eşleştirme bunları bir daha birleştirmez).
+async function unmergeAllProducts() {
+  const mergedCount = state.products.filter(p => p.mergedInto).length;
+  if (!mergedCount) { toast('Birleştirilmiş ürün yok.'); return; }
+  if (!confirm(`Birleştirilmiş ${mergedCount} ürün ana ürünlerinden ayrılacak ve tekrar ayrı kartlar olacak.\n\nPlatform kodları ve fiyatlar korunur; merkezi stoklar ayrılma anındaki değerinde kalır ve ayrı takip edilir. Otomatik eşleştirme bu ürünleri bir daha birleştirmez.\n\nDevam edilsin mi?`)) return;
+  const btn = document.getElementById('unmergeAllBtn');
+  if (btn) btn.disabled = true;
+  toast('Ürünler ayrılıyor…');
+  try {
+    const resp = await fetch('/api/products/unmerge-all', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
+    toast(`${data.count} ürün ayrıldı (${data.families} ana üründen).`);
+    await loadProducts(true);
+  } catch (e) {
+    toast('Ayırma hatası: ' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function renameProduct(oldCode, newCodeRaw) {
