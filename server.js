@@ -1887,6 +1887,92 @@ app.post("/api/products/:code/unmerge", requireAuth, (req, res) => {
   res.json({ ok: true, product: { code: req.params.code, ...p } });
 });
 
+// Birleştirilmiş TÜM ürünleri tek seferde ayırır. Her ailenin üyeleri birbirine karşı
+// "ayrıldı" listesine (matchBlocked) yazılır; böylece otomatik eşleştirme bir sonraki
+// yenilemede hepsini tekrar birleştirmez. Platform verileri zaten her ürünün kendi
+// kaydında durduğu için hiçbir şey kaybolmaz; merkezi stok ayrılma anındaki değerinde kalır.
+// Not: ayrılan çiftler Eşleştirme sekmesindeki günlükten bağımsızdır; tekrar birleştirmek
+// için ürünleri elle sürükleyip bırakmak (merge) yine mümkündür.
+app.post("/api/products/unmerge-all", requireAuth, (req, res) => {
+  const children = Object.keys(products).filter((c) => products[c].mergedInto);
+  if (!children.length) return res.json({ ok: true, count: 0, families: 0, products: [] });
+
+  // Aileleri ayırmadan ÖNCE hesapla (ayırınca aile bilgisi kaybolur).
+  const roots = [...new Set(children.map((c) => resolveRoot(c)))];
+  const families = roots.map((r) => getFamilyCodes(r));
+  families.forEach((fam) => {
+    for (let i = 0; i < fam.length; i++)
+      for (let j = i + 1; j < fam.length; j++) matchBlocked.add(pairKey(fam[i], fam[j]));
+  });
+  persistMatchBlocked();
+
+  children.forEach((c) => { products[c].mergedInto = null; });
+  persistProducts();
+
+  const touched = [...new Set(families.flat())];
+  res.json({ ok: true, count: children.length, families: roots.length, products: touched.map(serializeProduct) });
+});
+
+// Platformda yayında olan bir ürünü MANUEL olarak bir ürüne bağlar (siteden çekmeden).
+// body: { platform, sku (o platformdaki stok kodu), productCode?, price?, url?, status? }
+// - Ürünün o platformda henüz kaydı yoksa kayıt doğrudan ana ürüne yazılır.
+// - Zaten bir kaydı varsa (aynı platformda ikinci listeleme) yeni bir alt ürün
+//   oluşturulup aileye bağlanır; stok her SKU'ya ayrı gönderilir.
+// - Aynı SKU başka bir ailede kayıtlıysa 409 + conflict döner (arayüz birleştirmeyi önerir).
+app.post("/api/products/:code/listing", requireAuth, (req, res) => {
+  const rootCode = resolveRoot(req.params.code);
+  const root = products[rootCode];
+  if (!root) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+
+  const { platform, productCode, url, status } = req.body || {};
+  const pl = PLATFORMS.find((x) => x.id === platform);
+  if (!pl) return res.status(400).json({ ok: false, error: "Geçersiz platform." });
+  const sku = String(req.body?.sku || "").trim();
+  if (!sku) return res.status(400).json({ ok: false, error: "Platformdaki stok kodu / SKU gerekli." });
+  if (sku.length > 200) return res.status(400).json({ ok: false, error: "Stok kodu çok uzun." });
+  const priceRaw = String(req.body?.price ?? "").trim().replace(",", ".");
+  const price = priceRaw === "" ? null : Number(priceRaw);
+  if (price !== null && !(price > 0)) return res.status(400).json({ ok: false, error: "Fiyat 0'dan büyük olmalı." });
+  const link = String(url || "").trim();
+  if (link && !/^https:\/\/\S+$/i.test(link)) return res.status(400).json({ ok: false, error: "Ürün linki https:// ile başlamalı." });
+
+  const family = getFamilyCodes(rootCode);
+  const owner = buildSkuIndex()[pl.id].get(sku);
+  let target = null;
+  let how = "root";
+
+  if (owner && family.includes(owner)) {
+    target = owner; // bu SKU zaten bu ailede: kaydı güncelle
+    how = "updated";
+  } else if (owner) {
+    return res.status(409).json({ ok: false, error: `Bu SKU zaten "${products[owner]?.name || owner}" ürününde kayıtlı.`, conflict: { platform, sku, code: owner, name: products[owner]?.name || owner } });
+  } else if (!root.skus?.[pl.id]) {
+    target = rootCode; // bu platformda henüz kaydı olmayan ana ürün
+  } else {
+    // aynı platformda ikinci listeleme → alt ürün
+    if (products[sku]) {
+      return res.status(409).json({ ok: false, error: `"${sku}" kodu başka bir üründe ürün kodu olarak kullanılıyor.`, conflict: { platform, sku, code: sku, name: products[sku].name } });
+    }
+    const child = ensureProduct(sku, root.name);
+    child.category = root.category || "";
+    child.centralStock = Number(root.centralStock) || 0;
+    child.mergedInto = rootCode;
+    target = sku;
+    how = "child";
+  }
+
+  const t = products[target];
+  t.skus[pl.id] = sku;
+  if (productCode && String(productCode).trim()) t.productCodes[pl.id] = String(productCode).trim();
+  if (price !== null) t.prices[pl.id] = Math.round(price * 100) / 100;
+  if (link) t.listingUrls[pl.id] = link;
+  t.listingStatus[pl.id] = status === "pasif" ? "pasif" : "satista";
+  persistProducts();
+
+  const fam = getFamilyCodes(rootCode);
+  res.json({ ok: true, how, target, products: fam.map(serializeProduct) });
+});
+
 app.delete("/api/products/:code", requireAuth, (req, res) => {
   const code = req.params.code;
   // Silinen ürün başka ürünlerin ana ürünüyse (yani alt ürünleri varsa), o alt
