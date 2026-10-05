@@ -1875,7 +1875,19 @@ app.post("/api/products", requireAuth, (req, res) => {
 app.post("/api/products/:code/unmerge", requireAuth, (req, res) => {
   const p = products[req.params.code];
   if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
-  if (!p.mergedInto) return res.status(400).json({ ok: false, error: "Bu ürün zaten birleştirilmemiş." });
+  if (!p.mergedInto) {
+    // Ana ürünün kendisi ayrılıyor: aile içindeki ilk diğer üye yeni ana ürün olur,
+    // diğerleri ona bağlanır; bu ürün tek başına kalır.
+    const fam = getFamilyCodes(req.params.code);
+    if (fam.length <= 1) return res.status(400).json({ ok: false, error: "Bu ürün zaten tek başına." });
+    const others = fam.filter((c) => c !== req.params.code);
+    const newRoot = others[0];
+    others.forEach((c) => matchBlocked.add(pairKey(req.params.code, c)));
+    persistMatchBlocked();
+    others.forEach((c) => { if (products[c]) products[c].mergedInto = c === newRoot ? null : newRoot; });
+    persistProducts();
+    return res.json({ ok: true, product: { code: req.params.code, ...p }, products: fam.map(serializeProduct) });
+  }
   // Kullanıcı bilerek ayırdı → otomatik eşleştirme bu ürünü eski ailesiyle tekrar birleştirmesin.
   const oldRoot = resolveRoot(req.params.code);
   getFamilyCodes(oldRoot).forEach((c) => {
@@ -1885,6 +1897,19 @@ app.post("/api/products/:code/unmerge", requireAuth, (req, res) => {
   p.mergedInto = null;
   persistProducts();
   res.json({ ok: true, product: { code: req.params.code, ...p } });
+});
+
+// Bir kartın (ailenin) tüm üyelerini birbirinden ayırır.
+app.post("/api/products/:code/unmerge-family", requireAuth, (req, res) => {
+  if (!products[req.params.code]) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  const fam = getFamilyCodes(req.params.code);
+  if (fam.length <= 1) return res.status(400).json({ ok: false, error: "Bu ürün zaten tek başına." });
+  for (let i = 0; i < fam.length; i++)
+    for (let j = i + 1; j < fam.length; j++) matchBlocked.add(pairKey(fam[i], fam[j]));
+  persistMatchBlocked();
+  fam.forEach((c) => { if (products[c]) products[c].mergedInto = null; });
+  persistProducts();
+  res.json({ ok: true, count: fam.length, products: fam.map(serializeProduct) });
 });
 
 // Birleştirilmiş TÜM ürünleri tek seferde ayırır. Her ailenin üyeleri birbirine karşı
@@ -1961,7 +1986,7 @@ app.post("/api/products/:code/listing", requireAuth, (req, res) => {
     how = "child";
   }
 
-  const t = products[target];
+  const t = ensureProduct(target); // eski kayıtlarda eksik alanlar varsa tamamlar
   t.skus[pl.id] = sku;
   if (productCode && String(productCode).trim()) t.productCodes[pl.id] = String(productCode).trim();
   if (price !== null) t.prices[pl.id] = Math.round(price * 100) / 100;
