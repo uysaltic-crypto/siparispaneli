@@ -182,6 +182,7 @@
         <button class="ghost" onclick="printUnprintedOrders()">Yazdırılmamışları yazdır</button>
         <button class="ghost" onclick="printAllOrders()">Tümünü yazdır</button>
         <label class="muted" style="display:flex; align-items:center; gap:5px; cursor:pointer;"><input type="checkbox" id="hidePrinted" onchange="rerenderOrders()"> Yazdırılanları gizle</label>
+        <button class="ghost small" onclick="markAllPrinted()" title="Listedeki tüm siparişleri yazdırıldı olarak işaretler">Hepsini yazdırıldı say</button>
         <span class="muted" id="orderSelInfo"></span>
       </div>
       <table>
@@ -581,6 +582,12 @@ async function markPrinted(orders, printed = true) {
     if (r.ok) printedMap = await r.json();
   } catch (e) {}
   rerenderOrders();
+}
+function markAllPrinted() {
+  const list = window.__orders || [];
+  if (!list.length) return;
+  if (!confirm(`Listedeki ${list.length} sipariş yazdırıldı olarak işaretlensin mi?`)) return;
+  markPrinted(list, true);
 }
 function unmarkPrinted(key) {
   const o = (window.__orders || []).find(x => orderKey(x) === key);
