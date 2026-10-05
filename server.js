@@ -1365,6 +1365,186 @@ const PLATFORMS = [
   { id: "koctas", name: "Koçtaş", color: "#F58220", configured: koctasConfigured, fetchOrders: fetchKoctasOrders, pushStock: pushStockToKoctas, fetchStock: fetchStockKoctas, stockPullVerified: false, verified: false, panelUrl: `https://${koctasHost()}/` },
 ];
 
+/* ==================================================================
+   MÜŞTERİ MESAJLARI / SORULARI
+   Ortak mesaj biçimi:
+   { platform, id, customer, subject, image, text, date(ms), answered(bool), answerText, thread:[{from,text,date}] }
+   - Trendyol: Soru-Cevap API (qna) — "Müşteri Soruları". Doğrulandı (resmi doküman yapısına göre).
+   - Koçtaş: Mirakl Inbox API (/api/inbox/threads) — henüz bu hesapla canlı denenmedi (deneysel).
+   - Hepsiburada / N11 / Çiçeksepeti: mesaj uçları henüz eklenmedi (aşağıdaki MESSAGING kaydına bir satır eklenerek eklenir).
+================================================================== */
+async function fetchTrendyolMessages() {
+  if (!tyConfigured()) return { platform: "ty", error: "Trendyol API bilgileri .env dosyasında eksik.", messages: [] };
+  const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+  const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
+  const url = `https://${host}/integration/qna/sellers/${TY_SELLER_ID}/questions/filter`;
+  const endDate = Date.now();
+  const startDate = endDate - 13 * 24 * 60 * 60 * 1000; // API en fazla 2 haftalık aralık kabul ediyor
+  const messages = [];
+  try {
+    for (const status of ["WAITING_FOR_ANSWER", "ANSWERED"]) {
+      const resp = await axios.get(url, {
+        auth: { username: TY_API_KEY, password: TY_API_SECRET },
+        params: { status, page: 0, size: 50, startDate, endDate, orderByField: "CreatedDate", orderByDirection: "DESC" },
+        headers: { "User-Agent": `${TY_SELLER_ID} - SelfIntegration`, Accept: "application/json" },
+        timeout: 20000,
+      });
+      (resp.data?.content || []).forEach((q) => {
+        const answerText = q.answer?.text || "";
+        messages.push({
+          platform: "ty",
+          id: String(q.id),
+          customer: q.userName || "Müşteri",
+          subject: q.productName || "",
+          image: q.imageUrl || null,
+          text: q.text || "",
+          date: q.creationDate || null,
+          answered: status === "ANSWERED",
+          answerText,
+          thread: [],
+        });
+      });
+    }
+    return { platform: "ty", error: null, messages };
+  } catch (err) {
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? "Trendyol mesajları: kimlik doğrulama hatası (API key/secret veya yetki)."
+        : err.response?.data
+        ? `Trendyol mesajları hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
+        : `Trendyol mesajları bağlantı hatası: ${err.message}`;
+    return { platform: "ty", error: msg, messages };
+  }
+}
+
+async function replyTrendyol(id, text) {
+  if (!tyConfigured()) return { ok: false, message: "Trendyol API bilgisi eksik." };
+  const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+  const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
+  if (text.length < 10) return { ok: false, message: "Trendyol cevabı en az 10 karakter olmalı." };
+  if (text.length > 2000) return { ok: false, message: "Trendyol cevabı en fazla 2000 karakter olabilir." };
+  try {
+    await axios.post(
+      `https://${host}/integration/qna/sellers/${TY_SELLER_ID}/questions/${encodeURIComponent(id)}/answers`,
+      { text },
+      {
+        auth: { username: TY_API_KEY, password: TY_API_SECRET },
+        headers: { "User-Agent": `${TY_SELLER_ID} - SelfIntegration`, "Content-Type": "application/json" },
+        timeout: 15000,
+      }
+    );
+    return { ok: true, message: "Cevap gönderildi" };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+async function fetchKoctasMessages() {
+  if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", messages: [] };
+  const base = `https://${koctasHost()}/api/inbox/threads`;
+  try {
+    const list = await axios.get(base, { headers: koctasHeaders(), params: { ...koctasShopParams(), max: 50 }, timeout: 20000 });
+    const threads = (list.data?.data || list.data?.threads || []).slice(0, 40);
+    const messages = await Promise.all(
+      threads.map(async (t) => {
+        let detail = t;
+        try {
+          const d = await axios.get(`${base}/${encodeURIComponent(t.id)}`, { headers: koctasHeaders(), timeout: 20000 });
+          detail = d.data || t;
+        } catch (_) {}
+        const msgs = (detail.messages || []).map((m) => ({
+          from: m.from?.type === "CUSTOMER" ? "customer" : "shop",
+          text: m.body || "",
+          date: m.date_created ? new Date(m.date_created).getTime() : null,
+        }));
+        const last = msgs[msgs.length - 1];
+        const firstCustomer = msgs.find((m) => m.from === "customer");
+        const customerName =
+          (detail.current_participants || t.current_participants || []).find((p) => p.type === "CUSTOMER")?.display_name || "Müşteri";
+        return {
+          platform: "koctas",
+          id: String(t.id),
+          customer: customerName,
+          subject: detail.topic?.value || t.topic?.value || "",
+          image: null,
+          text: (last && last.from === "customer" ? last.text : firstCustomer?.text) || last?.text || "",
+          date: last?.date || (t.date_updated ? new Date(t.date_updated).getTime() : null),
+          answered: !last || last.from === "shop",
+          answerText: last && last.from === "shop" ? last.text : "",
+          thread: msgs,
+        };
+      })
+    );
+    return { platform: "koctas", error: null, messages };
+  } catch (err) {
+    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+    const msg =
+      err.response?.status === 401 || err.response?.status === 403
+        ? `Koçtaş mesajları: kimlik doğrulama hatası (${err.response.status})${detail}`
+        : `Koçtaş mesajları hata: ${err.response ? "HTTP " + err.response.status + detail : err.message}`;
+    return { platform: "koctas", error: msg, messages: [] };
+  }
+}
+
+async function replyKoctas(id, text) {
+  if (!koctasConfigured()) return { ok: false, message: "Koçtaş API bilgisi eksik." };
+  try {
+    await axios.post(
+      `https://${koctasHost()}/api/inbox/threads/${encodeURIComponent(id)}/message`,
+      { body: text, to: [{ type: "CUSTOMER" }] },
+      { headers: koctasHeaders({ "Content-Type": "application/json" }), params: koctasShopParams(), timeout: 15000 }
+    );
+    return { ok: true, message: "Mesaj gönderildi" };
+  } catch (err) {
+    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+  }
+}
+
+// Yeni bir platformun mesajlarını eklemek için buraya bir satır ekle.
+const MESSAGING = {
+  ty: { fetch: fetchTrendyolMessages, reply: replyTrendyol, verified: true },
+  koctas: { fetch: fetchKoctasMessages, reply: replyKoctas, verified: false },
+};
+
+let messagesCache = { fetchedAt: 0, messages: [], errors: [] };
+
+async function refreshMessages() {
+  const ids = Object.keys(MESSAGING).filter((id) => PLATFORMS.find((p) => p.id === id)?.configured());
+  const results = await Promise.all(ids.map((id) => MESSAGING[id].fetch()));
+  const messages = results.flatMap((r) => r.messages).sort((a, b) => (Number(b.date) || 0) - (Number(a.date) || 0));
+  const errors = results.map((r) => r.error).filter(Boolean);
+  messagesCache = { fetchedAt: Date.now(), messages, errors };
+  return messagesCache;
+}
+
+app.get("/api/messages", requireAuth, async (req, res) => {
+  if (req.query.force === "1" || Date.now() - messagesCache.fetchedAt > 60 * 1000) await refreshMessages();
+  const supported = Object.keys(MESSAGING).map((id) => ({
+    id,
+    configured: !!PLATFORMS.find((p) => p.id === id)?.configured(),
+    verified: MESSAGING[id].verified,
+  }));
+  res.json({ ok: true, ...messagesCache, supported });
+});
+
+app.post("/api/messages/reply", requireAuth, async (req, res) => {
+  const { platform, id } = req.body || {};
+  const text = String(req.body?.text || "").trim();
+  const m = MESSAGING[platform];
+  if (!m) return res.status(400).json({ ok: false, error: "Bu platform için mesaj cevaplama desteklenmiyor." });
+  if (!id || !text) return res.status(400).json({ ok: false, error: "Mesaj ve cevap metni gerekli." });
+  const r = await m.reply(String(id), text);
+  if (!r.ok) return res.status(502).json({ ok: false, error: r.message });
+  // Önbellekte yerel olarak "cevaplandı" işaretle; bir sonraki yenilemede platformdan gelen asıl durum geçerli olur.
+  const cached = messagesCache.messages.find((x) => x.platform === platform && x.id === String(id));
+  if (cached) {
+    cached.answered = true;
+    cached.answerText = text;
+    cached.thread = [...(cached.thread || []), { from: "shop", text, date: Date.now() }];
+  }
+  res.json({ ok: true, message: r.message });
+});
+
 app.get("/api/platforms", requireAuth, (req, res) => {
   res.json({
     platforms: PLATFORMS.map((p) => ({
