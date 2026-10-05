@@ -1899,6 +1899,46 @@ app.post("/api/products/:code/unmerge", requireAuth, (req, res) => {
   res.json({ ok: true, product: { code: req.params.code, ...p } });
 });
 
+// Tek bir üründe birden fazla platform kaydı varsa (elle eklenmiş ya da önceden birleşip
+// ayrılmış), seçilen platformun kaydını ayrı yeni bir ürün olarak ayırır.
+// body: { platform }. Yeni ürün: aynı ad/kategori/merkezi stok, o platformun SKU/fiyat/kod/link/durum verisi.
+// Çiftler "ayrıldı" listesine yazılır; otomatik eşleştirme bunları tekrar birleştirmez.
+app.post("/api/products/:code/split-listing", requireAuth, (req, res) => {
+  const code = req.params.code;
+  if (!products[code]) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  const p = ensureProduct(code);
+  const pid = req.body?.platform;
+  if (!PLATFORMS.some((x) => x.id === pid)) return res.status(400).json({ ok: false, error: "Geçersiz platform." });
+  const hasOn = (id) => !!(p.skus[id] || p.productCodes[id]);
+  if (!hasOn(pid)) return res.status(400).json({ ok: false, error: "Ürünün bu platformda kaydı yok." });
+  const listed = new Set([...Object.keys(p.skus), ...Object.keys(p.productCodes)]);
+  if (listed.size < 2) return res.status(400).json({ ok: false, error: "Bu ürünün tek platform kaydı var; ayrılacak başka kayıt yok." });
+
+  // O platformda gönderim yapılan gerçek kod: açık SKU yoksa ürün kodunun kendisi.
+  const sku = p.skus[pid] || code;
+  let newCode = sku === code ? `${code}-${pid}` : sku;
+  for (let n = 2; products[newCode]; n++) newCode = `${sku === code ? code : sku}-${pid}${n}`;
+
+  const np = ensureProduct(newCode, p.name);
+  np.category = p.category || "";
+  np.centralStock = Number(p.centralStock) || 0;
+  np.image = typeof p.image === "string" && p.image.startsWith("/product-images/") ? p.platformImage || null : p.image || null;
+  np.platformImage = p.platformImage || null;
+  np.imageCustom = false;
+  ["skus", "stocks", "prices", "productCodes", "listingUrls", "listingStatus"].forEach((f) => {
+    if (p[f] && pid in p[f]) {
+      np[f][pid] = p[f][pid];
+      delete p[f][pid];
+    }
+  });
+  np.skus[pid] = sku;
+  np.mergedInto = null;
+  matchBlocked.add(pairKey(code, newCode));
+  persistMatchBlocked();
+  persistProducts();
+  res.json({ ok: true, newCode, products: [serializeProduct(code), serializeProduct(newCode)] });
+});
+
 // Bir kartın (ailenin) tüm üyelerini birbirinden ayırır.
 app.post("/api/products/:code/unmerge-family", requireAuth, (req, res) => {
   if (!products[req.params.code]) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
