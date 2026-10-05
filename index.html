@@ -923,7 +923,13 @@ function platformChipHtml(p, pl, rootCode) {
   const priceTxt = fmtPrice(priceVal);
   // Aile birden fazla üyeden oluşuyorsa HER kutuda (ana ürün dahil) görünür bir "Ayır" düğmesi var.
   const inFamily = !!rootCode && getChildren(rootCode).length > 0;
-  const sepBtn = inFamily ? `<button class="ghost small pchip-sep" style="padding:2px 7px;" onclick="event.stopPropagation(); unmergeProduct('${p.code}')" title="${escAttr(p.name || p.code)} — bu ürünü diğerlerinden ayır">Ayır</button>` : '';
+  // Ürünün kendi kaydında birden fazla platform varsa "Ayır" bu platformun kaydını ayrı ürün yapar;
+  // yoksa ve ürün bir ailedeyse ürünü aileden ayırır.
+  const ownPlatforms = new Set([...Object.keys(p.skus || {}), ...Object.keys(p.productCodes || {})]);
+  const sepAction = ownPlatforms.has(pl.id) && ownPlatforms.size >= 2
+    ? `splitListing('${p.code}','${pl.id}')`
+    : (inFamily ? `unmergeProduct('${p.code}')` : '');
+  const sepBtn = sepAction ? `<button class="ghost small pchip-sep" style="padding:2px 7px;" onclick="event.stopPropagation(); ${sepAction}" title="${escAttr(p.name || p.code)} — ${pl.name} kaydını ayrı ürün yap / ayır">Ayır</button>` : '';
   const childRows = inFamily ? `
         <div class="muted" style="font-size:11px; margin-bottom:6px;"><b>${escAttr(p.name || p.code)}</b></div>` : '';
   return `
@@ -1071,6 +1077,7 @@ function buildStockCard(p, activePlatforms) {
           <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat+stok gönder</button>
           <button class="ghost small" onclick="openListingModal('${p.code}')" title="Platformda yayında olan bir ürünü manuel olarak bu ürüne ekle">+ Platform kaydı</button>
           ${familyMembers.length > 1 ? `<button class="ghost small" onclick="unmergeFamily('${p.code}')" title="Bu kartın altındaki tüm ürünleri birbirinden ayırır">Hepsini ayır</button>` : ''}
+          ${familyMembers.length === 1 && new Set([...Object.keys(p.skus || {}), ...Object.keys(p.productCodes || {})]).size >= 2 ? `<button class="ghost small" onclick="splitAllListings('${p.code}')" title="Bu üründeki platform kayıtlarını ayrı ürünlere böler">Platformları ayır</button>` : ''}
           <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
         </div>
       </div>
@@ -1378,6 +1385,37 @@ async function unmergeProduct(code) {
   const data = await resp.json();
   if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
   toast('Ürün ayrıldı.');
+  await loadProducts(true);
+}
+
+// Bir üründeki platform kaydını ayrı yeni bir ürün yapar.
+async function splitListing(code, platformId) {
+  const p = state.products.find(x => x.code === code);
+  if (!confirm(`"${p ? p.name : code}" ürününün ${platformMeta(platformId).name} kaydı ayrı bir ürün olarak ayrılacak.\n\nKaydın kodu, fiyatı ve linki yeni ürüne taşınır; merkezi stok kopyalanır ve ayrı takip edilir. Devam edilsin mi?`)) return;
+  const resp = await fetch(`/api/products/${encodeURIComponent(code)}/split-listing`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: platformId })
+  });
+  const data = await resp.json();
+  if (!data.ok) { toast(data.error || 'Ayrılamadı.'); return; }
+  toast('Kayıt ayrı ürün olarak ayrıldı.');
+  await loadProducts(true);
+}
+
+// Tek üründeki tüm platform kayıtlarını (ilki hariç) ayrı ürünlere böler.
+async function splitAllListings(code) {
+  const p = state.products.find(x => x.code === code);
+  if (!p) return;
+  const plats = [...new Set([...Object.keys(p.skus || {}), ...Object.keys(p.productCodes || {})])];
+  if (plats.length < 2) { toast('Ayrılacak ikinci bir platform kaydı yok.'); return; }
+  if (!confirm(`"${p.name}" ürününün ${plats.length} platform kaydı ayrı ürünlere bölünecek (${plats.map(id => platformMeta(id).name).join(', ')}).\n\nMerkezi stok her yeni ürüne kopyalanır. Devam edilsin mi?`)) return;
+  for (const id of plats.slice(1)) {
+    const resp = await fetch(`/api/products/${encodeURIComponent(code)}/split-listing`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: id })
+    });
+    const data = await resp.json();
+    if (!data.ok) { toast(data.error || 'Ayrılamadı.'); break; }
+  }
+  toast('Platform kayıtları ayrıldı.');
   await loadProducts(true);
 }
 
