@@ -1545,6 +1545,7 @@ app.post("/api/printed", requireAuth, (req, res) => {
     printedOrders = Object.fromEntries(entries.slice(0, 5000));
   }
   saveJSON("printed.json", printedOrders);
+  schedulePrintedDriveSave();
   res.json(printedOrders);
 });
 
@@ -2821,6 +2822,7 @@ function buildBackupPayload() {
       products,
       processedPackages: Array.from(processedPackages),
       pushLog,
+      printedOrders,
     },
     null,
     2
@@ -2852,6 +2854,73 @@ async function uploadBackupToDrive() {
   return resp.data;
 }
 
+// Yazdırıldı işaretleri printed.json'da tutulur; Render ücretsiz planda disk sıfırlanınca kaybolurdu.
+// Bu yüzden her değişiklikten ~20 sn sonra küçük bir dosya olarak Drive'a yazılır ve açılışta
+// (yerel liste boşsa) geri okunur. Tam yedekten bağımsızdır.
+const PRINTED_DRIVE_FILE = "yazdirilan-siparisler.json";
+let printedDriveTimer = null;
+
+async function findPrintedDriveFile(token) {
+  const q = encodeURIComponent(`name = '${PRINTED_DRIVE_FILE}' and '${GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false`);
+  const r = await axios.get(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, {
+    headers: { Authorization: `Bearer ${token}` }, timeout: 15000,
+  });
+  return (r.data.files || [])[0] || null;
+}
+
+async function savePrintedToDrive() {
+  if (!driveConfigured() || !Object.keys(printedOrders).length) return;
+  const token = await getDriveAccessToken();
+  const content = JSON.stringify(printedOrders);
+  const found = await findPrintedDriveFile(token);
+  if (found) {
+    await axios.patch(`https://www.googleapis.com/upload/drive/v3/files/${found.id}?uploadType=media`, content, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=UTF-8" },
+      timeout: 30000, maxBodyLength: Infinity,
+    });
+  } else {
+    const boundary = "yazdirilan" + crypto.randomBytes(8).toString("hex");
+    const metadata = { name: PRINTED_DRIVE_FILE, parents: [GOOGLE_DRIVE_FOLDER_ID], mimeType: "application/json" };
+    const body =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${content}\r\n--${boundary}--`;
+    await axios.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", body, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
+      timeout: 30000,
+    });
+  }
+}
+
+function schedulePrintedDriveSave() {
+  if (printedDriveTimer || !driveConfigured()) return;
+  printedDriveTimer = setTimeout(() => {
+    printedDriveTimer = null;
+    savePrintedToDrive().catch((e) => console.error("Yazdırılanlar Drive'a yazılamadı:", e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
+  }, 20000);
+}
+
+// Açılışta yerel liste boşsa Drive'dan geri yükle.
+async function autoRestorePrintedIfEmpty() {
+  if (Object.keys(printedOrders).length || !driveConfigured()) return false;
+  try {
+    const token = await getDriveAccessToken();
+    const found = await findPrintedDriveFile(token);
+    if (!found) return false;
+    const r = await axios.get(`https://www.googleapis.com/drive/v3/files/${found.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` }, timeout: 30000,
+    });
+    if (r.data && typeof r.data === "object" && !Array.isArray(r.data)) {
+      printedOrders = r.data;
+      saveJSON("printed.json", printedOrders);
+      console.log(`Yazdırılan siparişler Drive'dan geri yüklendi: ${Object.keys(printedOrders).length} kayıt.`);
+      return true;
+    }
+  } catch (e) {
+    console.error("Yazdırılanlar geri yüklenemedi:", e.message);
+  }
+  return false;
+}
+
 async function listBackupsFromDrive(token) {
   const t = token || (await getDriveAccessToken());
   const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false`);
@@ -2859,7 +2928,7 @@ async function listBackupsFromDrive(token) {
     `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&pageSize=100&fields=files(id,name,createdTime,size)`,
     { headers: { Authorization: `Bearer ${t}` }, timeout: 15000 }
   );
-  return resp.data.files || [];
+  return (resp.data.files || []).filter((f) => f.name !== PRINTED_DRIVE_FILE);
 }
 
 // BACKUP_KEEP_COUNT'tan fazla yedek varsa en eskilerini Drive'dan siler.
@@ -2905,6 +2974,10 @@ async function restoreBackupFromDrive(fileId) {
   products = data.products || {};
   processedPackages = new Set(data.processedPackages || []);
   pushLog = data.pushLog || [];
+  if (data.printedOrders && typeof data.printedOrders === "object") {
+    printedOrders = { ...printedOrders, ...data.printedOrders };
+    saveJSON("printed.json", printedOrders);
+  }
   persistProducts();
   persistProcessed();
   persistPushLog();
@@ -3051,6 +3124,8 @@ app.listen(PORT, () => {
   }
   autoRestoreIfEmpty()
     .catch((e) => console.error("Otomatik geri yükleme hatası:", e.message))
+    .then(() => autoRestorePrintedIfEmpty())
+    .catch((e) => console.error("Yazdırılanları geri yükleme hatası:", e.message))
     .then(() => refreshAll())
     .catch((e) => console.error("İlk veri çekme hatası:", e.message));
   setInterval(() => {
