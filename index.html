@@ -130,6 +130,14 @@
   .addform label { font-size:10px; color:var(--muted); text-transform:uppercase; display:block; margin-bottom:4px; }
   .logrow { padding:9px 10px; border-bottom:1px solid #1E222B; font-size:11px; display:flex; justify-content:space-between; gap:10px; }
   .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:9px 16px; font-size:12px; z-index:50; }
+  .msgcard { border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:10px; background:var(--surface); }
+  .msgcard.waiting { border-left:3px solid var(--warn); }
+  .msgcard.done { opacity:.85; border-left:3px solid var(--ok); }
+  .msghead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+  .msgthumb { width:40px; height:40px; object-fit:cover; border-radius:6px; background:#222; }
+  .msgbubble { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:9px 11px; font-size:13px; white-space:pre-wrap; word-break:break-word; margin-bottom:6px; }
+  .msgbubble.shop { background:#34D39912; border-color:#34D39944; margin-left:28px; }
+  .msgreply { width:100%; background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:8px 10px; color:var(--text); font-size:13px; font-family:inherit; resize:vertical; margin-top:6px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
 </style>
 </head>
@@ -161,6 +169,7 @@
       <div class="tabs">
         <div class="tab active" data-tab="orders" onclick="showTab('orders')">Siparişler</div>
         <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
+        <div class="tab" data-tab="messages" onclick="showTab('messages')">Mesajlar <span class="badge fail" id="msgBadge" style="display:none;"></span></div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
         <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
         <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
@@ -229,6 +238,23 @@
       <div id="stockCards"></div>
       <div id="stockMore" style="text-align:center; margin:14px 0; display:none;"></div>
       <div id="stockEmpty" class="empty" style="display:none;">Henüz ürün yok. Excel yükle ya da elle ekle.</div>
+    </div>
+
+    <!-- MESAJLAR -->
+    <div class="panel" id="panel-messages">
+      <div class="toolbar">
+        <select id="msgFilter" onchange="renderMessages()">
+          <option value="waiting">Cevap bekleyenler</option>
+          <option value="answered">Cevaplananlar</option>
+          <option value="all">Hepsi</option>
+        </select>
+        <select id="msgPlatform" onchange="renderMessages()"><option value="">Tüm platformlar</option></select>
+        <div class="search"><input type="text" id="msgSearch" placeholder="Müşteri, ürün veya mesajda ara..." oninput="renderMessages()"></div>
+        <button class="ghost small" id="msgRefreshBtn" onclick="loadMessages(true)">Mesajları Yenile</button>
+      </div>
+      <div id="msgNotes"></div>
+      <div id="msgList"></div>
+      <div id="msgEmpty" class="empty" style="display:none;">Gösterilecek mesaj yok.</div>
     </div>
 
     <!-- YEDEKLEME -->
@@ -328,6 +354,7 @@ async function login() {
 
 let polling = null;
 function startPolling() {
+  startMsgPolling();
   if (polling) return;
   polling = setInterval(async () => { await refresh(false); await loadProducts(false); await loadLog(); }, 30000);
 }
@@ -335,6 +362,7 @@ function startPolling() {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  if (name === 'messages') { renderMessages(); loadMessages(false); }
   if (name === 'match') { loadMatchStatus(); loadMatchPushSetting(); }
   if (name === 'stock' && state.stockDirty) { state.stockDirty = false; renderStock(true); }
   if (name === 'compete') { state.competeDirty = false; renderCompete(); }
@@ -2063,6 +2091,127 @@ function imgApplyUrl() {
   imgSend({ url });
 }
 function imgReset() { imgSend({ reset: true }); }
+
+/* ---------------- Müşteri mesajları ---------------- */
+let msgState = { messages: [], errors: [], supported: [], loaded: false };
+let msgTimer = null;
+
+async function loadMessages(force) {
+  const btn = document.getElementById('msgRefreshBtn');
+  if (force && btn) { btn.disabled = true; btn.textContent = 'Yükleniyor...'; }
+  try {
+    const r = await fetch('/api/messages' + (force ? '?force=1' : ''));
+    if (r.status === 401) return;
+    const d = await r.json();
+    msgState = { messages: d.messages || [], errors: d.errors || [], supported: d.supported || [], loaded: true };
+    updateMsgBadge();
+    const active = document.activeElement;
+    const typing = active && active.classList && active.classList.contains('msgreply');
+    if (tabActive('messages') && (force || !typing)) renderMessages();
+  } catch (e) {
+    if (force) toast('Mesajlar alınamadı: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Mesajları Yenile'; }
+  }
+}
+
+function updateMsgBadge() {
+  const n = msgState.messages.filter(m => !m.answered).length;
+  const el = document.getElementById('msgBadge');
+  if (!el) return;
+  el.textContent = n;
+  el.style.display = n ? 'inline-flex' : 'none';
+}
+
+function startMsgPolling() {
+  if (msgTimer) return;
+  loadMessages(false);
+  msgTimer = setInterval(() => { if (!document.hidden) loadMessages(false); }, 2 * 60 * 1000);
+}
+
+function renderMessages() {
+  const sel = document.getElementById('msgPlatform');
+  if (sel) {
+    const cur = sel.value;
+    const ids = (msgState.supported || []).filter(s => s.configured).map(s => s.id);
+    sel.innerHTML = '<option value="">Tüm platformlar</option>' + ids.map(id => `<option value="${escAttr(id)}">${escAttr(platformMeta(id).name)}</option>`).join('');
+    sel.value = ids.includes(cur) ? cur : '';
+  }
+
+  const notes = [];
+  (msgState.errors || []).forEach(e => notes.push(`<div class="errbox">${escAttr(e)}</div>`));
+  const unverified = (msgState.supported || []).filter(s => s.configured && !s.verified).map(s => platformMeta(s.id).name);
+  if (unverified.length) notes.push(`<div class="warnbox">${escAttr(unverified.join(', '))} mesaj entegrasyonu deneysel — hata çıkarsa mesajı ilet, birlikte düzeltelim.</div>`);
+  const missing = state.platforms.filter(p => p.configured && !(msgState.supported || []).some(s => s.id === p.id)).map(p => p.name);
+  if (missing.length) notes.push(`<div class="warnbox">${escAttr(missing.join(', '))} için mesaj/soru entegrasyonu henüz eklenmedi, bu yüzden o platformların mesajları burada görünmüyor.</div>`);
+  document.getElementById('msgNotes').innerHTML = notes.join('');
+
+  const filter = document.getElementById('msgFilter').value;
+  const plat = document.getElementById('msgPlatform').value;
+  const q = (document.getElementById('msgSearch').value || '').trim().toLocaleLowerCase('tr');
+  const list = msgState.messages.filter(m => {
+    if (filter === 'waiting' && m.answered) return false;
+    if (filter === 'answered' && !m.answered) return false;
+    if (plat && m.platform !== plat) return false;
+    if (q && ![m.customer, m.subject, m.text, m.answerText].join(' ').toLocaleLowerCase('tr').includes(q)) return false;
+    return true;
+  });
+
+  const box = document.getElementById('msgList');
+  box.innerHTML = '';
+  document.getElementById('msgEmpty').style.display = list.length ? 'none' : 'block';
+  document.getElementById('msgEmpty').textContent = msgState.loaded ? 'Gösterilecek mesaj yok.' : 'Mesajlar yükleniyor…';
+  list.forEach(m => {
+    const idx = msgState.messages.indexOf(m);
+    const pm = platformMeta(m.platform);
+    const thread = (m.thread && m.thread.length)
+      ? m.thread.map(t => `<div class="msgbubble ${t.from === 'shop' ? 'shop' : ''}">${escAttr(t.text)}<div class="muted" style="margin-top:4px;">${t.from === 'shop' ? 'Sen' : escAttr(m.customer)} · ${fmtDate(t.date)}</div></div>`).join('')
+      : `<div class="msgbubble">${escAttr(m.text)}</div>` + (m.answered && m.answerText ? `<div class="msgbubble shop">${escAttr(m.answerText)}<div class="muted" style="margin-top:4px;">Cevabın</div></div>` : '');
+    const div = document.createElement('div');
+    div.className = 'msgcard ' + (m.answered ? 'done' : 'waiting');
+    div.innerHTML = `
+      <div class="msghead">
+        <span class="badge" style="color:${pm.color}; background:${pm.color}18;">${escAttr(pm.name)}</span>
+        ${m.image ? `<img class="msgthumb" src="${escAttr(m.image)}" alt="" loading="lazy">` : ''}
+        <div style="flex:1; min-width:180px;"><b>${escAttr(m.customer)}</b>${m.subject ? `<div class="muted">${escAttr(m.subject)}</div>` : ''}</div>
+        <span class="muted">${fmtDate(m.date)}</span>
+        <span class="badge ${m.answered ? 'ok' : 'unverified'}">${m.answered ? 'Cevaplandı' : 'Cevap bekliyor'}</span>
+      </div>
+      ${thread}
+      ${m.answered && m.platform !== 'koctas' ? '' : `
+        <textarea class="msgreply" id="msgreply_${idx}" rows="3" placeholder="Cevabını yaz..."></textarea>
+        <div style="display:flex; justify-content:flex-end; margin-top:6px;"><button class="small" id="msgsend_${idx}" onclick="sendReply(${idx})">Cevapla</button></div>`}
+    `;
+    box.appendChild(div);
+  });
+}
+
+async function sendReply(idx) {
+  const m = msgState.messages[idx];
+  const ta = document.getElementById('msgreply_' + idx);
+  const btn = document.getElementById('msgsend_' + idx);
+  if (!m || !ta) return;
+  const text = ta.value.trim();
+  if (!text) { toast('Cevap metni boş olamaz.'); return; }
+  if (!confirm(`${platformMeta(m.platform).name} üzerinden ${m.customer} adlı müşteriye cevap gönderilecek. Gönderildikten sonra geri alınamaz. Devam edilsin mi?`)) return;
+  btn.disabled = true; btn.textContent = 'Gönderiliyor...';
+  try {
+    const r = await fetch('/api/messages/reply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: m.platform, id: m.id, text })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { toast(d.error || 'Cevap gönderilemedi.'); btn.disabled = false; btn.textContent = 'Cevapla'; return; }
+    toast('Cevap gönderildi.');
+    m.answered = true; m.answerText = text;
+    m.thread = [...(m.thread || []), { from: 'shop', text, date: Date.now() }];
+    updateMsgBadge();
+    renderMessages();
+  } catch (e) {
+    toast('Bağlantı hatası: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Cevapla';
+  }
+}
 
 function toast(msg) {
   const t = document.createElement('div');
