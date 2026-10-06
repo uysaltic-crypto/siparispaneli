@@ -759,7 +759,7 @@ function renderOrders(data) {
   const orders = data.orders || [];
   const activePlatforms = state.platforms.filter(p => p.configured);
   document.getElementById('orderStats').innerHTML =
-    `<div class="stat"><div class="label">TOPLAM (7 gün)</div><div class="value">${orders.length}</div></div>` +
+    `<div class="stat"><div class="label">TOPLAM</div><div class="value">${orders.length}</div></div>` +
     activePlatforms.map(p => `<div class="stat"><div class="label">${p.name.toUpperCase()}</div><div class="value" style="color:${p.color}">${orders.filter(o=>o.platform===p.id).length}</div></div>`).join('');
 
   document.getElementById('fetchedAt').textContent = data.fetchedAt ? 'Son güncelleme: ' + new Date(data.fetchedAt).toLocaleTimeString('tr-TR') : '';
