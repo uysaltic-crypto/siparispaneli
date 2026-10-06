@@ -1181,13 +1181,34 @@ async function fetchKoctasOrders() {
   if (!koctasConfigured()) return { platform: "koctas", error: "Koçtaş API bilgisi .env dosyasında eksik (KOCTAS_API_KEY).", orders: [] };
   const url = `https://${koctasHost()}/api/orders`;
   try {
-    const resp = await axios.get(url, {
-      headers: koctasHeaders(),
-      params: { ...koctasShopParams(), max: 100 },
-      timeout: 20000,
-    });
-    const orders = resp.data?.orders || [];
-    return { platform: "koctas", error: null, orders: orders.map(normalizeKoctasOrder) };
+    // Mirakl OR11 tek istekte en fazla 100 sipariş döndürür ve tarih filtresi yoksa eski siparişleri
+    // verebilir; bu yüzden son KOCTAS_ORDER_DAYS (varsayılan 30) gün içinde oluşturulan siparişleri
+    // sayfa sayfa (offset/max) toplam sayıya kadar çekiyoruz.
+    const days = Math.max(1, Number(process.env.KOCTAS_ORDER_DAYS) || 30);
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const max = 100;
+    const all = [];
+    const seen = new Set();
+    let offset = 0;
+    let total = Infinity;
+    for (let page = 0; page < 20 && offset < total; page++) {
+      const resp = await axios.get(url, {
+        headers: koctasHeaders(),
+        params: { ...koctasShopParams(), start_date: startDate, max, offset },
+        timeout: 20000,
+      });
+      const batch = resp.data?.orders || [];
+      total = Number(resp.data?.total_count ?? batch.length + offset);
+      batch.forEach((o) => {
+        const id = o.order_id || o.id;
+        if (id && seen.has(id)) return;
+        if (id) seen.add(id);
+        all.push(o);
+      });
+      if (batch.length < max) break;
+      offset += max;
+    }
+    return { platform: "koctas", error: null, orders: all.map(normalizeKoctasOrder) };
   } catch (err) {
     const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
     const msg =
@@ -1217,8 +1238,25 @@ function normalizeKoctasOrder(o) {
     status: o.order_state || o.status || "—",
     date: o.created_date ? new Date(o.created_date).getTime() : null,
     lines,
-    ...pickCargo(o),
+    ...koctasCargo(o),
   };
+}
+
+// Mirakl siparişinde kargo bilgisi shipping_company / shipping_tracking / shipping_carrier_code
+// alanlarındadır; mağaza özel ek alanlar (order_additional_fields) kullanıyorsa onlara da bakılır.
+function koctasCargo(o) {
+  const c = pickCargo(o, { tracking: ["shipping_tracking"], provider: ["shipping_company", "shipping_carrier_code"] });
+  const extras = [
+    ...(Array.isArray(o.order_additional_fields) ? o.order_additional_fields : []),
+    ...((o.order_lines || []).flatMap((l) => (Array.isArray(l.order_line_additional_fields) ? l.order_line_additional_fields : []))),
+  ].filter((f) => f && f.value != null && String(f.value).trim() !== "");
+  const findExtra = (re, not) => {
+    const f = extras.find((x) => re.test(String(x.code || "")) && !(not && not.test(String(x.code || ""))));
+    return f ? String(f.value).trim() : "";
+  };
+  if (!c.cargoProvider) c.cargoProvider = findExtra(/carrier|company|firma|provider/i);
+  if (!c.trackingNumber) c.trackingNumber = findExtra(/track|takip|barkod|barcode|kargo|cargo|shipment/i, /carrier|company|firma|provider|url|link/i);
+  return c;
 }
 
 // Ürün/teklif listesi — Mirakl OF21: GET /api/offers (offset/max sayfalama).
@@ -1642,6 +1680,19 @@ async function processNewOrdersAndSync(ordersByPlatform) {
   let baselineChanged = false;
   ordersByPlatform.forEach((orders, i) => {
     const pid = PLATFORMS[i]?.id;
+    // Koçtaş siparişleri artık sayfalanarak ve 30 günlük aralıkla çekiliyor; daha önce görünmeyen eski
+    // siparişlerin stoğu yanlışlıkla düşürmemesi için ilk çekimde hepsi "işlenmiş" sayılır (bir kereliğine).
+    if (pid === "koctas" && !baselined.has("koctas-full")) {
+      if (orders.length) {
+        orders.forEach((o) => {
+          if (o.packageId || o.orderNumber) processedPackages.add(`${o.platform}:${o.packageId || o.orderNumber}`);
+        });
+        baselined.add("koctas-full");
+        baselineChanged = true;
+        return; // bu turda Koçtaş siparişlerinden stok düşülmez
+      }
+      return;
+    }
     if (!baselined.has("*") && pid && !baselined.has(pid)) {
       if (orders.length) {
         orders.forEach((o) => {
@@ -1737,6 +1788,20 @@ async function refreshAll() {
 app.get("/api/orders", requireAuth, async (req, res) => {
   if (req.query.force === "1" || !cache.fetchedAt) await refreshAll();
   res.json(cache);
+});
+
+// Tanı: Koçtaş'tan gelen ham sipariş verisi (kargo/takip alanlarının adını görmek için).
+// Örn: /api/koctas/raw-orders?id=1105947214-A  ya da  /api/koctas/raw-orders?max=3
+app.get("/api/koctas/raw-orders", requireAuth, async (req, res) => {
+  if (!koctasConfigured()) return res.status(400).json({ ok: false, error: "KOCTAS_API_KEY eksik." });
+  try {
+    const id = String(req.query.id || "").trim();
+    const params = id ? { ...koctasShopParams(), order_ids: id } : { ...koctasShopParams(), max: Math.min(10, Number(req.query.max) || 3) };
+    const resp = await axios.get(`https://${koctasHost()}/api/orders`, { headers: koctasHeaders(), params, timeout: 20000 });
+    res.json({ ok: true, total_count: resp.data?.total_count, orders: resp.data?.orders || [] });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message });
+  }
 });
 
 app.post("/api/refresh", requireAuth, async (req, res) => {
