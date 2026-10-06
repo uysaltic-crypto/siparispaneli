@@ -683,9 +683,8 @@ function printOrders(orders) {
       <tr>
         <td class="qty">${escHtml(l.quantity)}x</td>
         <td>${escHtml(l.name || '—')}</td>
-        <td class="lc">${l.barcode ? barcodeSvg(l.barcode, 32) : ''}</td>
         <td class="lq">${l.barcode ? qrImg(l.barcode, 'qr sm') : ''}</td>
-      </tr>`).join('') || `<tr><td colspan="4">${escHtml(o.productSummary || '—')}</td></tr>`;
+      </tr>`).join('') || `<tr><td colspan="3">${escHtml(o.productSummary || '—')}</td></tr>`;
     // Barkod + karekod kargo takip numarasından üretilir; takip no yoksa sipariş numarasına düşer.
     const track = String(o.trackingNumber || '').trim();
     const codeText = track || String(o.orderNumber || '');
@@ -701,7 +700,7 @@ function printOrders(orders) {
           <div class="no"><span class="lbl">Sipariş</span> ${escHtml(o.orderNumber)}</div>
           <div class="meta"><b>${escHtml(o.customer)}</b>${o.city ? ' — ' + escHtml(o.city) : ''}</div>
           <div class="meta">${escHtml(fmtDate(o.date))} · ${escHtml(o.status)}${o.amount ? ' · ' + o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : ''}</div>
-          <div class="trk">${track ? `<span class="lbl">Kargo takip no</span> ${escHtml(track)}` : '<span class="lbl">Kargo takip no yok — kodlar sipariş numarasından</span>'}</div>
+          <div class="trk">${track ? `<span class="lbl">Kargo takip no</span> ${escHtml(track)}` : '<span class="lbl" style="word-break:normal;">Takip no yok · kodlar sipariş no\'dan</span>'}</div>
         </div>
         <div class="codes">
           <div class="bc">${barcodeSvg(codeText, 44)}</div>
@@ -709,7 +708,7 @@ function printOrders(orders) {
         </div>
       </div>
       <table class="lines">
-        <thead><tr><th>Adet</th><th>Ürün</th><th>Barkod</th><th>QR</th></tr></thead>
+        <thead><tr><th>Adet</th><th>Ürün</th><th>QR</th></tr></thead>
         <tbody>${lines}</tbody>
       </table>
     </section>`;
@@ -720,7 +719,7 @@ function printOrders(orders) {
     @page { size: A4; margin: 8mm; }
     * { box-sizing: border-box; }
     body { font-family: Arial, Helvetica, sans-serif; color:#000; margin:0; }
-    .order { break-inside: avoid; page-break-inside: avoid; border: 1px dashed #666; padding: 3mm; margin-bottom: 4mm; }
+    .order { break-inside: avoid; page-break-inside: avoid; border: 1px dashed #666; padding: 3mm; margin: 0 auto 4mm; width: 140mm; }
     /* En üst şerit: kargo firması ve platform, çıktının en büyük yazıları */
     .banner { display:flex; justify-content:space-between; align-items:center; gap:8px; background:#000; color:#fff; padding:2mm 3mm; margin:-3mm -3mm 2.5mm; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
     .carrier { font-size:19px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; }
@@ -731,15 +730,16 @@ function printOrders(orders) {
     .lbl { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:#444; margin-right:3px; }
     .meta { font-size:10.5px; margin-bottom:1px; }
     .trk { font-size:12px; font-weight:700; margin-top:4px; word-break:break-all; }
-    .codes { display:flex; flex-direction:column; align-items:center; gap:4px; flex:none; }
-    .bc svg { max-width:62mm; height:auto; }
-    .qr { width:24mm; height:24mm; image-rendering:pixelated; }
+    .codes { display:flex; flex-direction:row; align-items:center; gap:6px; flex:none; }
+    .bc svg { max-width:48mm; height:auto; display:block; }
+    .qr { width:20mm; height:20mm; image-rendering:pixelated; }
     .qr.sm { width:10mm; height:10mm; }
     .lines { width:100%; border-collapse:collapse; font-size:10.5px; }
     .lines th { text-align:left; font-size:9px; text-transform:uppercase; border-bottom:1px solid #000; padding:2px 3px; }
     .lines td { border-bottom:1px solid #bbb; padding:3px; vertical-align:middle; }
     .qty { font-weight:800; white-space:nowrap; }
-    .lc svg { max-width:38mm; height:auto; }
+    .lc svg { max-width:38mm; height:auto; display:block; overflow:visible; }
+    .lc { padding-bottom:5px !important; }
     .nobc { font-family:monospace; font-size:10px; }
   </style></head><body>${pages}</body></html>`;
 
