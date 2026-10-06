@@ -308,6 +308,45 @@ async function fetchHepsiburadaOrders() {
   }
 }
 
+// Paketten kargo firması + takip numarasını çıkarır. Platformlar bu alanları farklı adlarla
+// (ve bazen iç içe nesnelerde) döndürdüğü için aday alan adları büyük/küçük harf duyarsız aranır.
+// Bulunamazsa boş string döner; yazdırma çıktısı bu durumda sipariş numarasını kullanır.
+function pickCargo(pkg, extra = {}) {
+  const flat = {};
+  const add = (obj) => {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+    for (const [k, v] of Object.entries(obj)) {
+      if (v == null || typeof v === "object") continue;
+      const key = k.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (!(key in flat)) flat[key] = String(v).trim();
+    }
+  };
+  add(pkg);
+  ["shipmentinfo", "shipment", "shipping", "cargo", "cargoinfo", "delivery", "shippingInfo", "cargoDetail", "package"].forEach((n) => {
+    for (const [k, v] of Object.entries(pkg || {})) if (k.toLowerCase() === n.toLowerCase()) add(v);
+  });
+  const first = (names) => {
+    for (const n of names) {
+      const v = flat[n.toLowerCase().replace(/[^a-z0-9]/g, "")];
+      if (v) return v;
+    }
+    return "";
+  };
+  const provider = first([
+    ...(extra.provider || []),
+    "cargoProviderName", "cargoCompany", "cargoCompanyName", "cargoProvider", "cargoName", "shipmentCompanyName",
+    "shipmentCompany", "shippingCompany", "shippingCompanyName", "carrierName", "carrier", "logisticCompany",
+    "deliveryCompany", "shipping_carrier", "shipping_carrier_code", "cargoFirm", "shippingProvider",
+  ]);
+  const tracking = first([
+    ...(extra.tracking || []),
+    "cargoTrackingNumber", "trackingNumber", "cargoTrackingNo", "trackingNo", "trackingCode", "trackingInfoCode",
+    "cargoNumber", "cargoCode", "cargoBarcode", "shipmentTrackingNumber", "shippingTrackingNumber",
+    "shipping_tracking", "cargoTrackNumber", "trackNumber", "packageBarcode",
+  ]);
+  return { cargoProvider: provider, trackingNumber: tracking };
+}
+
 function normalizeHbPackage(pkg) {
   const items = pkg.Items || pkg.items || pkg.LineItems || pkg.lineItems || [];
   const lines = items.map((it) => ({
@@ -333,6 +372,7 @@ function normalizeHbPackage(pkg) {
     status: pkg.Status || pkg.status || "Open",
     date: pkg.OrderDate || pkg.orderDate || pkg.PackageDate || pkg.packageDate || null,
     lines,
+    ...pickCargo(pkg),
   };
 }
 
@@ -461,6 +501,7 @@ function normalizeTyPackage(pkg) {
     status: pkg.shipmentPackageStatus || pkg.status || "—",
     date: pkg.orderDate || null,
     lines,
+    ...pickCargo(pkg),
   };
 }
 
@@ -766,6 +807,7 @@ function normalizeN11Package(pkg) {
     status: pkg.shipmentPackageStatus || "—",
     date: pkg.lastModifiedDate || null,
     lines,
+    ...pickCargo(pkg),
   };
 }
 
@@ -927,6 +969,7 @@ function normalizeCsPackage(pkg) {
     status: pkg.status || pkg.orderStatus || "—",
     date: pkg.orderDate ? new Date(pkg.orderDate).getTime() : null,
     lines,
+    ...pickCargo(pkg),
   };
 }
 
@@ -1174,6 +1217,7 @@ function normalizeKoctasOrder(o) {
     status: o.order_state || o.status || "—",
     date: o.created_date ? new Date(o.created_date).getTime() : null,
     lines,
+    ...pickCargo(o),
   };
 }
 
