@@ -683,8 +683,7 @@ function printOrders(orders) {
       <tr>
         <td class="qty">${escHtml(l.quantity)}x</td>
         <td>${escHtml(l.name || '—')}</td>
-        <td class="lq">${l.barcode ? qrImg(l.barcode, 'qr sm') : ''}</td>
-      </tr>`).join('') || `<tr><td colspan="3">${escHtml(o.productSummary || '—')}</td></tr>`;
+      </tr>`).join('') || `<tr><td colspan="2">${escHtml(o.productSummary || '—')}</td></tr>`;
     // Barkod + karekod kargo takip numarasından üretilir; takip no yoksa sipariş numarasına düşer.
     const track = String(o.trackingNumber || '').trim();
     const codeText = track || String(o.orderNumber || '');
@@ -697,7 +696,6 @@ function printOrders(orders) {
       </div>
       <div class="top">
         <div class="info">
-          <div class="no"><span class="lbl">Sipariş</span> ${escHtml(o.orderNumber)}</div>
           <div class="meta"><b>${escHtml(o.customer)}</b>${o.city ? ' — ' + escHtml(o.city) : ''}</div>
           <div class="meta">${escHtml(fmtDate(o.date))} · ${escHtml(o.status)}${o.amount ? ' · ' + o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : ''}</div>
           <div class="trk">${track ? `<span class="lbl">Kargo takip no</span> ${escHtml(track)}` : '<span class="lbl" style="word-break:normal;">Takip no yok · kodlar sipariş no\'dan</span>'}</div>
@@ -708,7 +706,7 @@ function printOrders(orders) {
         </div>
       </div>
       <table class="lines">
-        <thead><tr><th>Adet</th><th>Ürün</th><th>QR</th></tr></thead>
+        <thead><tr><th>Adet</th><th>Ürün</th></tr></thead>
         <tbody>${lines}</tbody>
       </table>
     </section>`;
@@ -730,9 +728,10 @@ function printOrders(orders) {
     .lbl { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:#444; margin-right:3px; }
     .meta { font-size:10.5px; margin-bottom:1px; }
     .trk { font-size:12px; font-weight:700; margin-top:4px; word-break:break-all; }
-    .codes { display:flex; flex-direction:row; align-items:center; gap:6px; flex:none; }
-    .bc svg { max-width:48mm; height:auto; display:block; }
-    .qr { width:20mm; height:20mm; image-rendering:pixelated; }
+    .codes { display:flex; flex-direction:row; align-items:center; gap:10px; flex:none; }
+    .bc { flex:0 0 46mm; width:46mm; min-width:0; }
+    .bc svg { width:100%; max-width:100%; height:auto; display:block; }
+    .qr { flex:none; width:20mm; height:20mm; image-rendering:pixelated; }
     .qr.sm { width:10mm; height:10mm; }
     .lines { width:100%; border-collapse:collapse; font-size:10.5px; }
     .lines th { text-align:left; font-size:9px; text-transform:uppercase; border-bottom:1px solid #000; padding:2px 3px; }
