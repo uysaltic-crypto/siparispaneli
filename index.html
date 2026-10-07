@@ -162,6 +162,7 @@
           <div class="brand" id="brandLine"></div>
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
+          <a href="/magaza" target="_blank" rel="noopener" class="muted" style="font-size:12px;">Mağazayı aç ↗</a>
           <span class="fetchedAt" id="fetchedAt"></span>
           <button class="ghost" id="refreshBtn" onclick="refresh(true)">Yenile</button>
         </div>
@@ -586,6 +587,7 @@ function platformListingUrl(id, sku, p) {
 }
 
 function platformMeta(id) {
+  if (id === 'store') return { id: 'store', name: 'Mağaza', color: '#E85D04' };
   return state.platforms.find(p => p.id === id) || { name: id.toUpperCase(), color: '#999' };
 }
 
@@ -721,6 +723,7 @@ function printOrders(orders) {
       <div class="top">
         <div class="info">
           <div class="meta"><b>${escHtml(o.customer)}</b>${o.city ? ' — ' + escHtml(o.city) : ''}</div>
+          ${o.address ? `<div class="meta">${escHtml(o.address)}${o.phone ? ' · Tel: ' + escHtml(o.phone) : ''}</div>` : ''}
           <div class="meta">${escHtml(fmtDate(o.date))} · ${escHtml(o.status)}${o.amount ? ' · ' + o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : ''}</div>
           <div class="trk">${track ? `<span class="lbl">Kargo takip no</span> ${escHtml(track)}` : '<span class="lbl" style="word-break:normal;">Takip no yok · kodlar sipariş no\'dan</span>'}</div>
         </div>
@@ -820,10 +823,10 @@ function renderOrders(data) {
       <td><input type="checkbox" ${selectedOrders.has(okey) ? 'checked' : ''} onchange="toggleOrder('${escAttr(okey)}', this.checked)"></td>
       <td><span class="badge" style="color:${pm.color}; background:${pm.color}18;">${pm.name}</span></td>
       <td>${o.orderNumber}${pAt ? `<div style="color:var(--ok); font-size:11px; margin-top:3px;">✓ Yazdırıldı ${fmtDate(pAt)} <a href="#" style="color:var(--muted);" title="Yazdırıldı işaretini kaldır" onclick="unmarkPrinted('${escAttr(okey)}'); return false;">geri al</a></div>` : ''}</td>
-      <td>${o.customer}<div class="muted">${o.city || ''}</div></td>
+      <td>${o.customer}<div class="muted">${o.city || ''}</div>${o.platform === 'store' ? `<div class="muted">${o.phone || ''}</div><div class="muted" style="max-width:220px;">${o.address || ''}</div>` : ''}</td>
       <td>${o.productSummary}</td>
       <td class="amount">${o.amount ? o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : '—'}</td>
-      <td>${o.status}</td>
+      <td>${o.platform === 'store' ? storeStatusSelect(o) : o.status}</td>
       <td class="muted">${fmtDate(o.date)}</td>
       <td><button class="ghost" onclick="printOrders([window.__orders[${idx}]])">${pAt ? 'Tekrar yazdır' : 'Yazdır'}</button>${o.platform === 'koctas' ? ` <button class="ghost small" title="Koçtaş'tan gelen ham sipariş verisini göster (kargo/takip alanlarını görmek için)" onclick="showRawKoctasOrder('${escAttr(o.orderNumber)}')">Ham veri</button>` : ''}</td>`;
     rows.appendChild(tr);
@@ -1105,7 +1108,12 @@ function buildStockCard(p, activePlatforms) {
           </div>
         </div>
         ${competeCardHtml(p)}
-        <div class="pcard-central">
+        <div class="pcard-central" onmousedown="event.stopPropagation()">
+          <div style="text-align:right;">
+            <div class="muted" style="font-size:10px;">MAĞAZA FİYATI</div>
+            <input class="stockcell" style="width:80px; text-align:right;" type="number" step="0.01" value="${p.storePrice ?? ''}" placeholder="otomatik" title="Boş bırakırsan en düşük platform fiyatı kullanılır" onchange="updateStoreField('${p.code}', { storePrice: this.value })">
+            <label class="muted" style="display:block; font-size:10px; cursor:pointer;"><input type="checkbox" ${p.storeHidden ? '' : 'checked'} onchange="updateStoreField('${p.code}', { storeHidden: !this.checked })"> Mağazada göster</label>
+          </div>
           <div style="text-align:right;">
             <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
             <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
@@ -1653,6 +1661,26 @@ async function updateCentral(barcode, value) {
   await loadProducts();
 }
 
+async function updateStoreField(code, fields) {
+  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode: code, ...fields }) });
+  await loadProducts();
+}
+
+function storeStatusSelect(o) {
+  const opts = [['bekliyor', 'Bekliyor'], ['onaylandi', 'Onaylandı'], ['kargolandi', 'Kargolandı'], ['iptal', 'İptal (stok geri döner)']];
+  const locked = o.storeStatus === 'iptal';
+  return `<select ${locked ? 'disabled' : ''} onchange="setStoreStatus('${escAttr(o.orderNumber)}', this.value, '${escAttr(o.storeStatus)}', this)">${opts.map(([v, l]) => `<option value="${v}" ${o.storeStatus === v ? 'selected' : ''}>${l}</option>`).join('')}</select><div class="muted" style="margin-top:3px;">${o.status}</div>`;
+}
+
+async function setStoreStatus(orderNumber, status, prev, el) {
+  if (status === 'iptal' && !confirm(`${orderNumber} iptal edilecek: ürünler merkezi stoğa geri eklenir ve tüm platformlara gönderilir. Bu işlem geri alınamaz. Devam edilsin mi?`)) { el.value = prev; return; }
+  const r = await fetch('/api/store/orders/' + encodeURIComponent(orderNumber) + '/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+  const d = await r.json();
+  if (!r.ok || !d.ok) { toast(d.error || 'Durum değiştirilemedi.'); el.value = prev; return; }
+  toast('Sipariş durumu güncellendi.');
+  await refresh(true);
+}
+
 async function deleteProduct(barcode) {
   await fetch('/api/products/' + encodeURIComponent(barcode), { method:'DELETE' });
   await loadProducts();
@@ -1868,7 +1896,7 @@ function renderLog() {
       <div>
         <b>${entry.name || entry.barcode}</b>
         <span class="muted" style="font-family:monospace;"> ${entry.barcode}</span>
-        <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : entry.trigger === 'eşleştirme' ? 'Eşleştirme sonrası' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
+        <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : entry.trigger === 'eşleştirme' ? 'Eşleştirme sonrası' : entry.trigger === 'mağaza' ? 'Mağaza siparişi / iptali' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
         ${failMsgs ? `<div class="muted" style="color:var(--danger)">${failMsgs}</div>` : ''}
       </div>
       <div style="text-align:right;">
