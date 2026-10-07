@@ -3662,7 +3662,7 @@ app.get("/api/store/products", (req, res) => {
       const p = products[code];
       return { code, name: p.name, category: p.category || "", image: p.image || null, price: storePriceOf(code), stock: storeStockOf(code) };
     })
-    .filter((x) => x.price > 0 && x.name && !/^isimsiz/i.test(x.name));
+    .filter((x) => x.price > 0 && x.stock > 0 && x.name && !/^isimsiz/i.test(x.name)); // tükenenler mağazada gösterilmez
   res.json({ ok: true, products: list });
 });
 
