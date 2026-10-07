@@ -60,6 +60,7 @@ let processedPackages = new Set(loadJSON("processed.json", []));
 const hadProcessedFile = fs.existsSync(path.join(DATA_DIR, "processed.json")) || fs.existsSync(path.join(DATA_DIR, "processed.json.bak"));
 let baselined = new Set(loadJSON("baselined.json", hadProcessedFile ? ["*"] : []));
 let pushLog = loadJSON("push-log.json", []);
+let storeOrders = loadJSON("store-orders.json", []); // magaza.html üzerinden verilen siparişler
 
 function persistProducts() {
   invalidateFamilies();
@@ -1763,7 +1764,7 @@ let cache = { fetchedAt: null, orders: [], errors: [], sync: { changedCount: 0, 
 
 async function refreshAll() {
   const results = await Promise.all(PLATFORMS.map((p) => p.fetchOrders()));
-  const merged = results.flatMap((r) => r.orders).sort((a, b) => (b.date || 0) - (a.date || 0));
+  const merged = [...results.flatMap((r) => r.orders), ...storeOrdersNormalized()].sort((a, b) => (b.date || 0) - (a.date || 0));
   const errors = results.map((r) => r.error).filter(Boolean);
 
   let sync = { changedCount: 0, newOrders: 0 };
@@ -1910,6 +1911,8 @@ function serializeProduct(code) {
     pricing: p.pricing || { minPrice: null, maxPrice: null, myPrice: null, autoReprice: false, undercut: 0.01 },
     competitors: p.competitors || [],
     mergedInto: p.mergedInto || null,
+    storePrice: p.storePrice > 0 ? p.storePrice : null,
+    storeHidden: !!p.storeHidden,
   };
 }
 
@@ -1932,12 +1935,18 @@ app.get("/api/products/match-status", requireAuth, (req, res) => {
 });
 
 app.post("/api/products", requireAuth, (req, res) => {
-  const { code, barcode, name, category, centralStock, stocks, skus, prices, listingStatus } = req.body || {};
+  const { code, barcode, name, category, centralStock, stocks, skus, prices, listingStatus, storePrice, storeHidden } = req.body || {};
   const productCode = String(code || barcode || "").trim();
   if (!productCode) return res.status(400).json({ ok: false, error: "Ürün kodu gerekli." });
   const p = ensureProduct(productCode, name);
   if (name?.trim()) p.name = name.trim();
   if (category !== undefined) p.category = String(category || "").trim();
+  if (storePrice !== undefined) {
+    const sp = Number(String(storePrice).replace(",", "."));
+    if (storePrice === "" || storePrice === null || !(sp > 0)) delete p.storePrice;
+    else p.storePrice = Math.round(sp * 100) / 100;
+  }
+  if (storeHidden !== undefined) p.storeHidden = !!storeHidden;
   if (centralStock !== undefined && centralStock !== "") propagateCentralStock(productCode, Number(centralStock));
   if (stocks && typeof stocks === "object") {
     Object.entries(stocks).forEach(([platformId, val]) => {
@@ -3263,6 +3272,7 @@ function buildBackupPayload() {
       processedPackages: Array.from(processedPackages),
       pushLog,
       printedOrders,
+      storeOrders,
     },
     null,
     2
@@ -3414,6 +3424,10 @@ async function restoreBackupFromDrive(fileId) {
   products = data.products || {};
   processedPackages = new Set(data.processedPackages || []);
   pushLog = data.pushLog || [];
+  if (Array.isArray(data.storeOrders)) {
+    storeOrders = data.storeOrders;
+    saveJSON("store-orders.json", storeOrders);
+  }
   if (data.printedOrders && typeof data.printedOrders === "object") {
     printedOrders = { ...printedOrders, ...data.printedOrders };
     saveJSON("printed.json", printedOrders);
@@ -3519,6 +3533,237 @@ app.post("/api/backup/restore", requireAuth, async (req, res) => {
     res.status(500).json({ ok: false, error: e.response?.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message });
   }
 });
+
+/* ==================================================================
+   MAĞAZA (magaza.html) — panelin kendi e-ticaret sitesi
+   - Ürünler, panelin ürün kataloğundan (ana ürünler) gelir; stok = MERKEZİ stok.
+   - Fiyat: üründe "Mağaza fiyatı" girildiyse o; yoksa ailedeki en düşük platform fiyatı.
+   - Sipariş verilince merkezi stok anında düşer ve tüm pazaryerlerine otomatik gönderilir
+     (böylece mağazada satılan ürün Trendyol/Hepsiburada vb.'de de azalır). İptalde stok geri döner.
+   - Mağaza uçları (config, products, orders-POST) herkese açıktır; yönetim uçları giriş ister.
+   .env (hepsi isteğe bağlı): STORE_NAME, STORE_IBAN, STORE_IBAN_OWNER,
+   STORE_SHIPPING_FEE (₺), STORE_FREE_OVER (bu tutar ve üstü kargo ücretsiz), STORE_COD_FEE (kapıda ödeme bedeli)
+================================================================== */
+function storeConfig() {
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
+  const e = process.env;
+  return {
+    name: e.STORE_NAME || "Mağaza",
+    iban: e.STORE_IBAN || "",
+    ibanOwner: e.STORE_IBAN_OWNER || "",
+    shippingFee: n(e.STORE_SHIPPING_FEE),
+    freeOver: n(e.STORE_FREE_OVER),
+    codFee: n(e.STORE_COD_FEE),
+  };
+}
+
+// Herkese açık formdan gelen metinlerden panelde HTML olarak bozulabilecek karakterleri temizler.
+const cleanText = (v, max) => String(v == null ? "" : v).replace(/[<>&"`]/g, "").replace(/\s+/g, " ").trim().slice(0, max);
+
+function storePriceOf(root) {
+  const p = products[root];
+  if (!p) return 0;
+  const sp = Number(p.storePrice);
+  if (sp > 0) return sp;
+  let best = 0;
+  getFamilyCodes(root).forEach((c) =>
+    Object.values(products[c]?.prices || {}).forEach((v) => {
+      const n = Number(v);
+      if (n > 0 && (!best || n < best)) best = n;
+    })
+  );
+  return best;
+}
+
+function storeStockOf(root) {
+  return Math.max(0, Math.floor(Number(products[root]?.centralStock) || 0));
+}
+
+const STORE_STATUS_LABEL = {
+  bekliyor: (o) => (o.payment === "kapida" ? "Onay bekliyor (kapıda ödeme)" : "Ödeme bekleniyor (havale)"),
+  onaylandi: () => "Onaylandı",
+  kargolandi: () => "Kargolandı",
+  iptal: () => "İptal edildi",
+};
+
+// Mağaza siparişlerini panelin Siparişler sekmesinin beklediği ortak biçime çevirir.
+function storeOrdersNormalized() {
+  return storeOrders.slice(-500).map((o) => ({
+    platform: "store",
+    orderNumber: o.orderNumber,
+    packageId: o.orderNumber,
+    customer: o.customer?.name || "Müşteri",
+    city: o.customer?.city || "",
+    phone: o.customer?.phone || "",
+    address: o.customer?.address || "",
+    productSummary: (o.lines || []).map((l) => `${l.name || l.code} x${l.quantity}`).join(", ") || "—",
+    amount: Number(o.total) || 0,
+    status: (STORE_STATUS_LABEL[o.status] || (() => o.status))(o),
+    storeStatus: o.status,
+    date: Date.parse(o.createdAt) || null,
+    lines: (o.lines || []).map((l) => ({ barcode: l.code, quantity: l.quantity, name: l.name })),
+    cargoProvider: o.cargoProvider || "",
+    trackingNumber: o.trackingNumber || "",
+  }));
+}
+
+// Sipariş listesi önbelleğindeki mağaza kayıtlarını anında yeniler (30 sn beklemeden panelde görünsün).
+function refreshStoreInCache() {
+  cache.orders = [...(cache.orders || []).filter((o) => o.platform !== "store"), ...storeOrdersNormalized()].sort((a, b) => (b.date || 0) - (a.date || 0));
+}
+
+// Bir ürün ailesinin merkezi stoğunu tüm yapılandırılmış platformlara gönderir (siparişten stok düşme akışıyla aynı mantık).
+async function syncFamilyStock(rootCode, trigger) {
+  const root = products[rootCode];
+  if (!root) return;
+  const familyCodes = getFamilyCodes(rootCode);
+  const central = Number(root.centralStock) || 0;
+  const results = {};
+  await Promise.all(
+    PLATFORMS.filter((pl) => pl.configured()).map(async (pl) => {
+      const targets = isListedOn(rootCode, pl.id) ? [{ code: rootCode, sku: skuForPlatform(rootCode, pl.id) }] : [];
+      familyCodes.forEach((c) => {
+        if (c === rootCode) return;
+        const ownSku = products[c]?.skus?.[pl.id];
+        if (ownSku) targets.push({ code: c, sku: ownSku });
+      });
+      const outcomes = await Promise.all(
+        targets.map(async (t) => {
+          const r = await pl.pushStock(t.sku, central);
+          if (r.ok && products[t.code]) products[t.code].stocks[pl.id] = central;
+          return r;
+        })
+      );
+      if (!outcomes.length) return;
+      const ok = outcomes.every((o) => o.ok);
+      results[pl.id] = ok ? { ok: true } : { ok: false, message: outcomes.filter((o) => !o.ok).map((o) => o.message).join(" | ") };
+    })
+  );
+  persistProducts();
+  pushLog.push({ time: new Date().toISOString(), barcode: rootCode, name: root.name, centralStock: central, trigger, results });
+  persistPushLog();
+}
+
+function persistStoreOrders() {
+  storeOrders = storeOrders.slice(-3000);
+  saveJSON("store-orders.json", storeOrders);
+}
+
+app.get("/api/store/config", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json(storeConfig());
+});
+
+app.get("/api/store/products", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const list = Object.keys(products)
+    .filter((c) => !products[c].mergedInto && !products[c].storeHidden)
+    .map((code) => {
+      const p = products[code];
+      return { code, name: p.name, category: p.category || "", image: p.image || null, price: storePriceOf(code), stock: storeStockOf(code) };
+    })
+    .filter((x) => x.price > 0 && x.name && !/^isimsiz/i.test(x.name));
+  res.json({ ok: true, products: list });
+});
+
+// Basit hız sınırı: aynı IP'den 10 dakikada en fazla 5 sipariş.
+const storeRate = new Map();
+function storeRateLimited(req) {
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const now = Date.now();
+  const hits = (storeRate.get(ip) || []).filter((t) => now - t < 10 * 60 * 1000);
+  if (hits.length >= 5) return true;
+  hits.push(now);
+  storeRate.set(ip, hits);
+  if (storeRate.size > 5000) for (const [k, v] of storeRate) if (!v.some((t) => now - t < 10 * 60 * 1000)) storeRate.delete(k);
+  return false;
+}
+
+app.post("/api/store/orders", (req, res) => {
+  if (storeRateLimited(req)) return res.status(429).json({ ok: false, error: "Çok fazla sipariş denemesi, biraz sonra tekrar dene." });
+  const body = req.body || {};
+  const wanted = new Map(); // ana ürün kodu -> adet
+  (Array.isArray(body.items) ? body.items.slice(0, 50) : []).forEach((it) => {
+    const code = resolveRoot(String(it?.code || ""));
+    const q = Math.floor(Number(it?.quantity));
+    if (!products[code] || !(q > 0)) return;
+    wanted.set(code, (wanted.get(code) || 0) + q);
+  });
+  if (!wanted.size) return res.status(400).json({ ok: false, error: "Sepet boş." });
+
+  const c = body.customer || {};
+  const customer = { name: cleanText(c.name, 80), phone: cleanText(c.phone, 25), city: cleanText(c.city, 50), address: cleanText(c.address, 300) };
+  if (customer.name.length < 3) return res.status(400).json({ ok: false, error: "Ad soyad gerekli." });
+  if (customer.phone.replace(/\D/g, "").length < 10) return res.status(400).json({ ok: false, error: "Geçerli bir telefon numarası gir." });
+  if (!customer.city) return res.status(400).json({ ok: false, error: "Şehir gerekli." });
+  if (customer.address.length < 10) return res.status(400).json({ ok: false, error: "Açık adresi eksiksiz yaz." });
+  const payment = body.payment === "kapida" ? "kapida" : "havale";
+
+  // Tüm doğrulamalar stok düşmeden ÖNCE yapılır; sunucu tek iş parçacıklı olduğundan
+  // doğrulama ile düşme arasında başka bir sipariş araya giremez.
+  const lines = [];
+  let sub = 0;
+  for (const [code, qty] of wanted) {
+    const p = products[code];
+    const price = storePriceOf(code);
+    if (p.storeHidden || !(price > 0)) return res.status(409).json({ ok: false, error: `"${p.name}" şu an satışta değil.` });
+    if (qty > 20) return res.status(400).json({ ok: false, error: `"${p.name}" için en fazla 20 adet sipariş verilebilir.` });
+    const stock = storeStockOf(code);
+    if (qty > stock) return res.status(409).json({ ok: false, error: stock > 0 ? `"${p.name}" için en fazla ${stock} adet kaldı.` : `"${p.name}" tükendi.` });
+    lines.push({ code, name: p.name, quantity: qty, price });
+    sub += price * qty;
+  }
+  sub = Math.round(sub * 100) / 100;
+  const cfg = storeConfig();
+  const shipping = cfg.freeOver > 0 && sub >= cfg.freeOver ? 0 : cfg.shippingFee;
+  const cod = payment === "kapida" ? cfg.codFee : 0;
+  const total = Math.round((sub + shipping + cod) * 100) / 100;
+
+  lines.forEach((l) => propagateCentralStock(l.code, storeStockOf(l.code) - l.quantity));
+  persistProducts();
+
+  const d = new Date();
+  const stamp = String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+  let orderNumber;
+  do orderNumber = `MG-${stamp}-${crypto.randomInt(1000, 10000)}`;
+  while (storeOrders.some((o) => o.orderNumber === orderNumber));
+
+  storeOrders.push({
+    orderNumber, createdAt: d.toISOString(), status: "bekliyor", payment,
+    customer, note: cleanText(body.note, 300), lines, sub, shipping, cod, total,
+  });
+  persistStoreOrders();
+  refreshStoreInCache();
+
+  // Pazaryerlerine stok gönderimi arka planda; müşteri beklemez.
+  lines.forEach((l) => syncFamilyStock(l.code, "mağaza").catch((e) => console.error("Mağaza stok senkron hatası:", e.message)));
+
+  res.json({ ok: true, orderNumber, total, payment });
+});
+
+// Yönetim: mağaza siparişinin durumunu değiştirir. İptalde stok geri eklenir ve platformlara gönderilir.
+app.post("/api/store/orders/:no/status", requireAuth, (req, res) => {
+  const o = storeOrders.find((x) => x.orderNumber === req.params.no);
+  if (!o) return res.status(404).json({ ok: false, error: "Sipariş bulunamadı." });
+  const next = String(req.body?.status || "");
+  if (!["bekliyor", "onaylandi", "kargolandi", "iptal"].includes(next)) return res.status(400).json({ ok: false, error: "Geçersiz durum." });
+  if (o.status === "iptal") return res.status(400).json({ ok: false, error: "İptal edilen sipariş yeniden açılamaz (stok zaten geri eklendi). Müşteri yeni sipariş vermeli." });
+  if (next === "iptal") {
+    o.lines.forEach((l) => {
+      if (!products[l.code]) return;
+      propagateCentralStock(l.code, storeStockOf(l.code) + l.quantity);
+      syncFamilyStock(l.code, "mağaza").catch((e) => console.error("Mağaza stok senkron hatası:", e.message));
+    });
+    persistProducts();
+  }
+  o.status = next;
+  persistStoreOrders();
+  refreshStoreInCache();
+  res.json({ ok: true, status: next });
+});
+
+app.get("/magaza", (req, res) => res.sendFile(path.join(__dirname, "magaza.html")));
+app.get("/magaza.html", (req, res) => res.sendFile(path.join(__dirname, "magaza.html")));
 
 // index.html ve diğer statik dosyalar server.js ile AYNI klasörde duruyor
 // (ayrı bir "public" alt klasörü yok) — bu yüzden doğrudan __dirname servis edilir.
