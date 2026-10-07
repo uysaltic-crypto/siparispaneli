@@ -672,6 +672,30 @@ function qrImg(text, cls) {
     return '';
   }
 }
+// Koçtaş'tan gelen ham sipariş verisini pencerede gösterir (kargo/takip alan adlarını görmek için).
+async function showRawKoctasOrder(orderNumber) {
+  document.getElementById('rawModal')?.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'rawModal';
+  wrap.className = 'cmodal-back';
+  wrap.addEventListener('mousedown', (e) => { if (e.target === wrap) wrap.remove(); });
+  wrap.innerHTML = `<div class="cmodal" role="dialog" aria-modal="true" style="max-width:760px; width:92vw;">
+      <div class="cmodal-head"><span>Koçtaş ham sipariş verisi — ${escHtml(orderNumber)}</span><button class="cmodal-x" onclick="document.getElementById('rawModal').remove()" title="Kapat">×</button></div>
+      <div class="cmodal-body"><pre id="rawBody" style="white-space:pre-wrap; word-break:break-all; max-height:60vh; overflow:auto; font-size:12px; margin:0;">Yükleniyor…</pre></div>
+      <div class="cmodal-foot"><button class="cbtn-cancel" onclick="document.getElementById('rawModal').remove()">Kapat</button><button class="cbtn-save" id="rawCopy">Kopyala</button></div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const pre = document.getElementById('rawBody');
+  document.getElementById('rawCopy').onclick = () => { navigator.clipboard?.writeText(pre.textContent).then(() => toast('Kopyalandı.')).catch(() => toast('Kopyalanamadı, metni elle seçip kopyala.')); };
+  try {
+    const r = await fetch('/api/koctas/raw-orders?id=' + encodeURIComponent(orderNumber));
+    const d = await r.json();
+    pre.textContent = JSON.stringify(d, null, 2);
+  } catch (e) {
+    pre.textContent = 'Alınamadı: ' + e.message;
+  }
+}
+
 function printOrders(orders) {
   if (typeof JsBarcode === 'undefined' || typeof qrcode === 'undefined') {
     alert('Barkod/QR kütüphaneleri yüklenemedi. İnternet bağlantısını kontrol edip sayfayı yenileyin.');
@@ -801,7 +825,7 @@ function renderOrders(data) {
       <td class="amount">${o.amount ? o.amount.toLocaleString('tr-TR', {minimumFractionDigits:2}) + ' ₺' : '—'}</td>
       <td>${o.status}</td>
       <td class="muted">${fmtDate(o.date)}</td>
-      <td><button class="ghost" onclick="printOrders([window.__orders[${idx}]])">${pAt ? 'Tekrar yazdır' : 'Yazdır'}</button></td>`;
+      <td><button class="ghost" onclick="printOrders([window.__orders[${idx}]])">${pAt ? 'Tekrar yazdır' : 'Yazdır'}</button>${o.platform === 'koctas' ? ` <button class="ghost small" title="Koçtaş'tan gelen ham sipariş verisini göster (kargo/takip alanlarını görmek için)" onclick="showRawKoctasOrder('${escAttr(o.orderNumber)}')">Ham veri</button>` : ''}</td>`;
     rows.appendChild(tr);
   });
   updateOrderSelInfo();
