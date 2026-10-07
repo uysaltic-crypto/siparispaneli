@@ -19,8 +19,8 @@
   main { max-width:1160px; margin:0 auto; padding:18px 16px 60px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:14px; }
   .card { background:var(--paper); border:1px solid var(--line); border-radius:8px; display:flex; flex-direction:column; overflow:hidden; }
-  .card .img { aspect-ratio:1; background:#fff; display:flex; align-items:center; justify-content:center; font-size:40px; border-bottom:1px solid var(--line); }
-  .card img { width:100%; height:100%; object-fit:contain; }
+  .card .img { position:relative; width:100%; aspect-ratio:1; flex:none; overflow:hidden; background:#fff; display:flex; align-items:center; justify-content:center; font-size:40px; border-bottom:1px solid var(--line); }
+  .card img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
   .card .body { padding:12px; display:flex; flex-direction:column; gap:6px; flex:1; }
   .card .name { font-weight:600; line-height:1.3; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
   .price { font-size:19px; font-weight:800; }
@@ -118,7 +118,7 @@ function renderGrid() {
   grid.replaceChildren(...list.map((p) => {
     const out = p.stock <= 0;
     return h('div', { class: 'card' },
-      h('div', { class: 'img' }, p.image ? h('img', { src: p.image, alt: '', loading: 'lazy' }) : '📦'),
+      h('div', { class: 'img' }, p.image ? h('img', { src: p.image, alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : '📦'),
       h('div', { class: 'body' },
         h('div', { class: 'name' }, p.name),
         h('div', { class: 'price' }, money(p.price)),
