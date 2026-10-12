@@ -741,24 +741,25 @@ function printOrders(orders) {
 
   const html = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Sipariş Yazdır</title>
   <style>
-    @page { size: A4; margin: 8mm; }
+    @page { size: 100mm 140mm; margin: 0; }
     * { box-sizing: border-box; }
-    body { font-family: Arial, Helvetica, sans-serif; color:#000; margin:0; }
-    .order { break-inside: avoid; page-break-inside: avoid; border: 1px dashed #666; padding: 3mm; margin: 0 auto 4mm; width: 140mm; }
+    body { font-family: Arial, Helvetica, sans-serif; color:#000; margin:0; width:100mm; }
+    .order { width:100mm; min-height:139mm; border:0; padding:3mm; margin:0; page-break-after:always; break-after:page; overflow:hidden; }
+    .order:last-child { page-break-after:auto; break-after:auto; }
     /* En üst şerit: kargo firması ve platform, çıktının en büyük yazıları */
     .banner { display:flex; justify-content:space-between; align-items:center; gap:8px; background:#000; color:#fff; padding:2mm 3mm; margin:-3mm -3mm 2.5mm; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
     .carrier { font-size:19px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; }
     .plat { font-size:19px; font-weight:800; text-transform:uppercase; letter-spacing:.03em; text-align:right; }
-    .top { display:flex; justify-content:space-between; gap:8px; border-bottom:1.5px solid #000; padding-bottom:5px; margin-bottom:5px; }
+    .top { display:flex; flex-direction:column; gap:6px; border-bottom:1.5px solid #000; padding-bottom:5px; margin-bottom:5px; }
     .info { min-width:0; flex:1; }
     .no { font-size:14px; font-weight:800; margin:0 0 3px; word-break:break-all; }
     .lbl { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:#444; margin-right:3px; }
     .meta { font-size:10.5px; margin-bottom:1px; }
     .trk { font-size:12px; font-weight:700; margin-top:4px; word-break:break-all; }
-    .codes { display:flex; flex-direction:row; align-items:center; gap:10px; flex:none; }
-    .bc { flex:0 0 46mm; width:46mm; min-width:0; }
+    .codes { display:flex; flex-direction:row; align-items:center; justify-content:space-between; gap:8px; flex:none; }
+    .bc { flex:0 0 62mm; width:62mm; min-width:0; }
     .bc svg { width:100%; max-width:100%; height:auto; display:block; }
-    .qr { flex:none; width:20mm; height:20mm; image-rendering:pixelated; }
+    .qr { flex:none; width:24mm; height:24mm; image-rendering:pixelated; }
     .qr.sm { width:10mm; height:10mm; }
     .lines { width:100%; border-collapse:collapse; font-size:10.5px; }
     .lines th { text-align:left; font-size:9px; text-transform:uppercase; border-bottom:1px solid #000; padding:2px 3px; }
