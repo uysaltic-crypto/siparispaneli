@@ -438,6 +438,14 @@ async function fetchStockHepsiburada() {
       if (items.length < limit) break;
       offset += limit;
     }
+    // Ad gelmeyen satırlar için katalogdan Hepsiburada SKU'suna göre ad/görsel doldur (best-effort).
+    if (rows.some((r) => !r.name && r.productCode)) {
+      const cat = await fetchHbCatalogNames();
+      rows.forEach((r) => {
+        const hit = !r.name && r.productCode ? cat.names.get(String(r.productCode).trim()) : null;
+        if (hit) { r.name = hit.name; if (hit.image && !r.image) r.image = hit.image; }
+      });
+    }
     return { platform: "hb", error: null, rows };
   } catch (err) {
     const msg =
@@ -447,6 +455,43 @@ async function fetchStockHepsiburada() {
         ? `Hepsiburada hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
         : `Hepsiburada bağlantı hatası: ${err.message}`;
     return { platform: "hb", error: msg, rows: [] };
+  }
+}
+
+// Hepsiburada katalog servisinden ürün adı/görseli (Hepsiburada SKU'suna göre). Liste ucu ürün adı
+// döndürmediği için ayrıca çağrılır. Uç nokta resmi dokümandan doğrulanmadı: hata verirse çekme
+// bozulmaz, sadece adlar boş kalır ve hata metni döner.
+async function fetchHbCatalogNames() {
+  const names = new Map();
+  if (!hbConfigured()) return { names, error: "HB API bilgisi eksik." };
+  const { HB_MERCHANT_ID, HB_ENV } = process.env;
+  const hbAuth = hbAuthConfig();
+  const host = HB_ENV === "test" ? "mpop-sit.hepsiburada.com" : "mpop.hepsiburada.com";
+  const url = `https://${host}/product/api/products/all-products-of-merchant/${HB_MERCHANT_ID}`;
+  const size = 100;
+  try {
+    for (let page = 0; page < 60; page++) {
+      const resp = await axios.get(url, {
+        auth: hbAuth.auth,
+        params: { page, size, version: 1 },
+        headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
+        timeout: 20000,
+      });
+      const d = resp.data;
+      const items = Array.isArray(d) ? d : d?.data || d?.content || d?.items || d?.products || [];
+      items.forEach((it) => {
+        const sku = String(it.hbSku || it.hepsiburadaSku || it.HepsiburadaSku || it.sku || "").trim();
+        const name = String(it.productName || it.name || it.title || it.ProductName || "").trim();
+        if (!sku || !name) return;
+        const img0 = Array.isArray(it.images) ? it.images[0] : it.image || it.imageUrl;
+        const image = typeof img0 === "string" ? img0 : img0?.url || img0?.imageUrl || "";
+        names.set(sku, { name, image: /^https:\/\//i.test(image || "") ? image : undefined });
+      });
+      if (items.length < size) break;
+    }
+    return { names, error: null };
+  } catch (err) {
+    return { names, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : err.message };
   }
 }
 
@@ -1893,6 +1938,25 @@ app.get("/api/hb/raw-listings", requireAuth, async (req, res) => {
     res.json({ ok: true, scanned, found, ayniMerchantSkuOlanlar: dupes.slice(0, 50) });
   } catch (err) {
     res.status(502).json({ ok: false, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message });
+  }
+});
+
+// Tanı: Hepsiburada katalog servisi yanıtı (ürün adı alanını görmek için). Örn: /api/hb/raw-catalog
+app.get("/api/hb/raw-catalog", requireAuth, async (req, res) => {
+  if (!hbConfigured()) return res.status(400).json({ ok: false, error: "HB API bilgileri eksik." });
+  try {
+    const { HB_MERCHANT_ID, HB_ENV } = process.env;
+    const hbAuth = hbAuthConfig();
+    const host = HB_ENV === "test" ? "mpop-sit.hepsiburada.com" : "mpop.hepsiburada.com";
+    const resp = await axios.get(`https://${host}/product/api/products/all-products-of-merchant/${HB_MERCHANT_ID}`, {
+      auth: hbAuth.auth,
+      params: { page: 0, size: 3, version: 1 },
+      headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
+      timeout: 20000,
+    });
+    res.json({ ok: true, data: resp.data });
+  } catch (err) {
+    res.status(502).json({ ok: false, status: err.response?.status, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message });
   }
 });
 
