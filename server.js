@@ -2944,10 +2944,42 @@ function planBulkPrice(platformIds, mode, value, codes) {
   return { changes, skippedAuto, skippedNoPrice, skippedInvalid };
 }
 
+// Güvenli formül hesaplayıcı (eval yok): yalnızca sayı, x, + - * / ve parantez. x = baz platform fiyatı.
+function evalPriceFormula(expr, x) {
+  const src = String(expr == null || String(expr).trim() === "" ? "x" : expr).toLowerCase().replace(/\s+/g, "").replace(/,/g, ".").replace(/×/g, "*").replace(/÷/g, "/");
+  if (src.length > 60) throw new Error("Formül çok uzun.");
+  let i = 0;
+  const bad = () => new Error("Geçersiz formül. Örnek: x+10, x*1.05, x-20");
+  function factor() {
+    const c = src[i];
+    if (c === "-") { i++; return -factor(); }
+    if (c === "+") { i++; return factor(); }
+    if (c === "(") { i++; const v = expr_(); if (src[i] !== ")") throw bad(); i++; return v; }
+    if (c === "x") { i++; return x; }
+    const m = /^\d+(\.\d+)?|^\.\d+/.exec(src.slice(i));
+    if (!m) throw bad();
+    i += m[0].length;
+    return parseFloat(m[0]);
+  }
+  function term() {
+    let v = factor();
+    while (src[i] === "*" || src[i] === "/") { const op = src[i++]; const r = factor(); v = op === "*" ? v * r : v / r; }
+    return v;
+  }
+  function expr_() {
+    let v = term();
+    while (src[i] === "+" || src[i] === "-") { const op = src[i++]; const r = term(); v = op === "+" ? v + r : v - r; }
+    return v;
+  }
+  const out = expr_();
+  if (i !== src.length || !Number.isFinite(out)) throw bad();
+  return Math.round(out * 100) / 100;
+}
+
 // "Platformu baz al": hedef platformların fiyatı, baz platformun fiyatına eşitlenir.
 // direction: "lower" = hedef, bazdan en az `threshold` ₺ DÜŞÜKSE · "higher" = en az `threshold` ₺ YÜKSEKSE ·
 // "any" = herhangi bir yönde en az `threshold` ₺ farklıysa. threshold 0 ise her fark değiştirilir.
-function planMatchPrice(baseId, targetIds, threshold, direction, codes) {
+function planMatchPrice(baseId, targetIds, threshold, direction, codes, formula) {
   const changes = [];
   let skippedAuto = 0, skippedNoPrice = 0, skippedInvalid = 0;
   const entries = codes
@@ -2961,10 +2993,12 @@ function planMatchPrice(baseId, targetIds, threshold, direction, codes) {
       const old = Number(prod.prices?.[pid]);
       if (!(basePrice > 0) || !(old > 0)) { skippedNoPrice++; continue; }
       const diff = Math.round((basePrice - old) * 100) / 100; // + : hedef bazdan düşük
-      const ok = direction === "lower" ? diff >= threshold : direction === "higher" ? -diff >= threshold : Math.abs(diff) >= threshold;
-      if (!ok || diff === 0) continue;
+      const ok = direction === "all" ? true : direction === "lower" ? diff >= threshold : direction === "higher" ? -diff >= threshold : Math.abs(diff) >= threshold;
+      if (!ok) continue;
       if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
-      const nw = Math.round(basePrice * 100) / 100;
+      const nw = evalPriceFormula(formula, basePrice);
+      if (!(nw > 0)) { skippedInvalid++; continue; }
+      if (nw === old) continue;
       changes.push({ code, platform: pid, old, new: nw });
     }
   }
@@ -3125,15 +3159,17 @@ app.post("/api/prices/bulk", requireAuth, (req, res) => {
   if (mode === "match") {
     matchBase = String(req.body?.base || "");
     if (!validIds.includes(matchBase)) return res.status(400).json({ ok: false, error: "Baz platformu seçin." });
-    const direction = ["lower", "higher", "any"].includes(req.body?.direction) ? req.body.direction : "lower";
-    const threshold = Number(req.body?.threshold);
+    const direction = ["all", "lower", "higher", "any"].includes(req.body?.direction) ? req.body.direction : "all";
+    const threshold = direction === "all" ? 0 : Number(req.body?.threshold);
     if (!Number.isFinite(threshold) || threshold < 0 || threshold > 10000000) return res.status(400).json({ ok: false, error: "Fark tutarı 0 veya daha büyük olmalı." });
+    const formula = String(req.body?.formula ?? "x").trim() || "x";
+    try { evalPriceFormula(formula, 100); } catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
     const targets = platformIds.filter((id) => id !== matchBase);
     if (!targets.length) return res.status(400).json({ ok: false, error: "Baz platform dışında en az bir hedef platform seçin." });
     platformIds.splice(0, platformIds.length, ...targets);
     v = threshold;
-    plan = planMatchPrice(matchBase, targets, threshold, direction, codes);
-    plan.matchInfo = { base: matchBase, direction, threshold };
+    plan = planMatchPrice(matchBase, targets, threshold, direction, codes, formula);
+    plan.matchInfo = { base: matchBase, direction, threshold, formula };
   } else {
     // Sabit fiyat yanlışlıkla tüm kataloğa uygulanmasın diye yalnızca ürün bazında kullanılabilir.
     if (mode === "fixed" && !codes) return res.status(400).json({ ok: false, error: "Sabit fiyat yalnızca tek ürün için kullanılabilir." });
