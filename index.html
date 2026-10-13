@@ -2088,6 +2088,11 @@ function bpModeHint() {
   const mb = document.getElementById('bpMatch');
   if (mb) mb.style.display = mode === 'match' ? '' : 'none';
 }
+function bpDirChange() {
+  const w = document.getElementById('bpThrWrap');
+  if (w) w.style.display = document.getElementById('bpDir').value === 'all' ? 'none' : '';
+  bpInvalidate();
+}
 function closeBulkPrice() {
   document.getElementById('bpModal')?.remove();
   if (bpPoll) { clearInterval(bpPoll); bpPoll = null; }
@@ -2111,6 +2116,7 @@ function bpBody(apply) {
     base: document.getElementById('bpBase')?.value,
     direction: document.getElementById('bpDir')?.value,
     threshold: Number(String(document.getElementById('bpThr')?.value ?? '').replace(',', '.')),
+    formula: document.getElementById('bpFormula')?.value || 'x',
     push: document.getElementById('bpPush').checked,
     codes: bpScope ? [bpScope] : undefined,
     apply
@@ -2157,11 +2163,16 @@ async function openBulkPrice(code) {
             <select id="bpBase" onchange="bpInvalidate()">${pls.map(p => `<option value="${escAttr(p.id)}">${escAttr(p.name)}</option>`).join('')}</select>
           </div>
           <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px;">
-            <span>Seçili (hedef) platformun fiyatı bazdan</span>
-            <input type="text" id="bpThr" value="100" style="width:80px;" oninput="bpInvalidate()"> <span>₺ veya daha fazla</span>
-            <select id="bpDir" onchange="bpInvalidate()"><option value="lower">düşükse</option><option value="higher">yüksekse</option><option value="any">farklıysa (her iki yön)</option></select>
+            <span>Hangi ürünler:</span>
+            <select id="bpDir" onchange="bpDirChange()"><option value="all">Hepsi (koşulsuz)</option><option value="lower">Hedef bazdan düşükse</option><option value="higher">Hedef bazdan yüksekse</option><option value="any">Hedef bazdan farklıysa</option></select>
+            <span id="bpThrWrap" style="display:none;">en az <input type="text" id="bpThr" value="100" style="width:70px;" oninput="bpInvalidate()"> ₺ fark</span>
           </div>
-          <div class="muted" style="margin-top:6px;">Koşulu sağlayan ürünlerin hedef fiyatı, baz platformdaki fiyatla aynı yapılır. Üstte işaretli platformlar hedef olur (baz platform işaretli olsa da atlanır). Fark 0 yazılırsa her fark eşitlenir. İki platformda da fiyat olmalı; Trendyol'da otomatik fiyatlandırması açık ürünler atlanır.</div>
+          <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px;">
+            <span>Yeni fiyat =</span>
+            <input type="text" id="bpFormula" value="x" placeholder="x+10" style="width:140px;" oninput="bpInvalidate()">
+            <span class="muted">x = baz platformun fiyatı. Örn: <b>x</b> (aynısı), <b>x+10</b>, <b>x-5</b>, <b>x*1.05</b>, <b>x*0.9+10</b></span>
+          </div>
+          <div class="muted" style="margin-top:6px;">Seçili (hedef) platformlardaki fiyatlar, baz platformun fiyatından bu formülle hesaplanır. Üstte işaretli platformlar hedef olur (baz platform işaretli olsa da atlanır). İki platformda da fiyat olmalı; Trendyol'da otomatik fiyatlandırması açık ürünler atlanır.</div>
         </div>
         <div class="muted" style="margin-bottom:12px;">${prod
           ? 'Artırmak için pozitif, indirmek için eksi değer yazın. <b>Sabit fiyat</b> seçilirse seçili platformların hepsi tam bu fiyata ayarlanır (fiyatı olmayanlara da yazılır). Trendyol\'da otomatik fiyatlandırması açıksa o platform atlanır; önce Rekabet Analizi\'nden kapatın.'
@@ -2187,7 +2198,7 @@ async function bpRun(apply) {
   if (body.mode === 'match') {
     if (!body.base) { toast('Baz platformu seçin.'); return; }
     if (!body.platforms.some(id => id !== body.base)) { toast('Baz platform dışında en az bir hedef platform seçin.'); return; }
-    if (!Number.isFinite(body.threshold) || body.threshold < 0) { toast('Fark tutarı 0 veya daha büyük olmalı.'); return; }
+    if (body.direction !== 'all' && (!Number.isFinite(body.threshold) || body.threshold < 0)) { toast('Fark tutarı 0 veya daha büyük olmalı.'); return; }
   } else if (!Number.isFinite(body.value) || body.value === 0) { toast('Geçerli bir değer girin.'); return; }
   if (body.mode === 'fixed' && body.value <= 0) { toast('Sabit fiyat 0\'dan büyük olmalı.'); return; }
   const names = body.platforms.filter(id => body.mode !== 'match' || id !== body.base).map(id => platformMeta(id).name).join(', ');
@@ -2197,9 +2208,9 @@ async function bpRun(apply) {
     if (apply) {
       const pName = bpScope ? (state.products.find(x => x.code === bpScope)?.name || bpScope) : '';
       const txt = body.mode === 'fixed' ? '' : (body.mode === 'percent' ? (body.value > 0 ? '%' + body.value + ' artış' : '%' + Math.abs(body.value) + ' indirim') : (body.value > 0 ? body.value + ' ₺ artış' : Math.abs(body.value) + ' ₺ indirim'));
-      const dirTxt = { lower: 'düşükse', higher: 'yüksekse', any: 'farklıysa' }[body.direction] || 'düşükse';
+      const dirTxt = { lower: 'düşükse', higher: 'yüksekse', any: 'farklıysa' }[body.direction] || '';
       const what = body.mode === 'match'
-        ? `${names} platformlarında fiyatı ${platformMeta(body.base).name} fiyatından ${body.threshold.toLocaleString('tr-TR')} ₺ veya daha fazla ${dirTxt}, ${bpScope ? `\"${pName}\" ürününün` : 'ürünlerin'} fiyatı ${platformMeta(body.base).name} fiyatına eşitlenecek`
+        ? `${names} platformlarında ${body.direction === 'all' ? (bpScope ? `\"${pName}\" ürününün` : 'tüm ürünlerin') : `fiyatı ${platformMeta(body.base).name} fiyatından ${body.threshold.toLocaleString('tr-TR')} ₺ veya daha fazla ${dirTxt} olan ${bpScope ? `\"${pName}\" ürününün` : 'ürünlerin'}`} fiyatı, ${platformMeta(body.base).name} fiyatından \"${body.formula}\" formülüyle (x = ${platformMeta(body.base).name} fiyatı) hesaplanıp değiştirilecek`
         : body.mode === 'fixed'
         ? `${names} platformlarında "${pName}" ürününün fiyatı ${body.value.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺ olarak sabitlenecek`
         : bpScope ? `${names} platformlarında "${pName}" ürününe ${txt} uygulanacak` : `${names} platformlarındaki tüm ürünlere ${txt} uygulanacak`;
