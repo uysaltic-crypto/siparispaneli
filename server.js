@@ -373,8 +373,31 @@ function normalizeHbPackage(pkg) {
     status: pkg.Status || pkg.status || "Open",
     date: pkg.OrderDate || pkg.orderDate || pkg.PackageDate || pkg.packageDate || null,
     lines,
-    ...pickCargo(pkg),
+    ...pickHbCargo(pkg),
   };
+}
+
+// Hepsiburada paketinde kargo takip no (HepsiJet'te "627..." ile başlayan 14 haneli gönderi barkodu)
+// paket üzerindeki "barcode" alanında gelir. Alan adı farklıysa, paketin içinde 627 ile başlayan
+// 14 haneli bir değer aranır. Hâlâ bulunamazsa boş döner ve çıktı sipariş numarasına düşer.
+function pickHbCargo(pkg) {
+  const c = pickCargo(pkg, { tracking: ["barcode", "packageBarcode", "shipmentBarcode", "cargoBarcode", "trackingInfoCode"] });
+  if (!c.trackingNumber) {
+    const scan = (o) => {
+      for (const v of Object.values(o || {})) {
+        if (typeof v === "string" || typeof v === "number") {
+          const t = String(v).trim();
+          if (/^627\d{11}$/.test(t)) return t;
+        } else if (v && typeof v === "object") {
+          const r = scan(v);
+          if (r) return r;
+        }
+      }
+      return "";
+    };
+    c.trackingNumber = scan(pkg);
+  }
+  return c;
 }
 
 // Mevcut stok/ürün listesini Hepsiburada'dan çekme (best-effort — resmi dokümandan
@@ -1800,6 +1823,26 @@ app.get("/api/koctas/raw-orders", requireAuth, async (req, res) => {
     const params = id ? { ...koctasShopParams(), order_ids: id } : { ...koctasShopParams(), max: Math.min(10, Number(req.query.max) || 3) };
     const resp = await axios.get(`https://${koctasHost()}/api/orders`, { headers: koctasHeaders(), params, timeout: 20000 });
     res.json({ ok: true, total_count: resp.data?.total_count, orders: resp.data?.orders || [] });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message });
+  }
+});
+
+// Tanı: Hepsiburada'dan gelen ham paket verisi (barkod/takip alanının adını görmek için).
+// Örn: /api/hb/raw-packages?max=3
+app.get("/api/hb/raw-packages", requireAuth, async (req, res) => {
+  if (!hbConfigured()) return res.status(400).json({ ok: false, error: "HB API bilgileri eksik." });
+  try {
+    const { HB_MERCHANT_ID, HB_ENV } = process.env;
+    const hbAuth = hbAuthConfig();
+    const host = HB_ENV === "test" ? "oms-external-sit.hepsiburada.com" : "oms-external.hepsiburada.com";
+    const resp = await axios.get(`https://${host}/packages/merchantid/${HB_MERCHANT_ID}`, {
+      auth: hbAuth.auth,
+      params: { timespan: 24, limit: Math.min(10, Number(req.query.max) || 3), offset: 0 },
+      headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
+      timeout: 20000,
+    });
+    res.json({ ok: true, data: resp.data });
   } catch (err) {
     res.status(502).json({ ok: false, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message });
   }
