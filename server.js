@@ -1858,6 +1858,44 @@ app.get("/api/hb/raw-packages", requireAuth, async (req, res) => {
   }
 });
 
+// Tanı: Hepsiburada ürün listesinde (stok çekmede kullanılan uç) bir ürünü arar.
+// Örn: /api/hb/raw-listings?q=HBCV00001DC51G  (HB SKU'su, satıcı stok kodu ya da ürün adından bir parça)
+// Ürün listede çıkıyorsa MerchantSku alanı görünür; çıkmıyorsa API o ürünü hiç döndürmüyor demektir.
+app.get("/api/hb/raw-listings", requireAuth, async (req, res) => {
+  if (!hbConfigured()) return res.status(400).json({ ok: false, error: "HB API bilgileri eksik." });
+  const q = String(req.query.q || "").trim().toLowerCase();
+  if (!q) return res.status(400).json({ ok: false, error: "q parametresi gerekli." });
+  try {
+    const { HB_MERCHANT_ID, HB_ENV } = process.env;
+    const hbAuth = hbAuthConfig();
+    const host = HB_ENV === "test" ? "listing-external-sit.hepsiburada.com" : "listing-external.hepsiburada.com";
+    const found = [];
+    const skuCount = {};
+    let scanned = 0;
+    const limit = 200;
+    for (let page = 0; page < 25; page++) {
+      const resp = await axios.get(`https://${host}/listings/merchantid/${HB_MERCHANT_ID}`, {
+        auth: hbAuth.auth,
+        params: { limit, offset: page * limit },
+        headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
+        timeout: 20000,
+      });
+      const items = resp.data?.listings || resp.data?.Listings || resp.data?.items || (Array.isArray(resp.data) ? resp.data : []);
+      items.forEach((it) => {
+        scanned++;
+        const m = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "").trim();
+        skuCount[m] = (skuCount[m] || 0) + 1;
+        if (JSON.stringify(it).toLowerCase().includes(q)) found.push(it);
+      });
+      if (items.length < limit) break;
+    }
+    const dupes = Object.entries(skuCount).filter(([k, n]) => k && n > 1).map(([k, n]) => ({ merchantSku: k, adet: n }));
+    res.json({ ok: true, scanned, found, ayniMerchantSkuOlanlar: dupes.slice(0, 50) });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message });
+  }
+});
+
 app.post("/api/refresh", requireAuth, async (req, res) => {
   res.json(await refreshAll());
 });
