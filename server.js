@@ -461,15 +461,32 @@ async function pushStockToHepsiburada(barcode, quantity) {
     `<?xml version="1.0" encoding="utf-8"?>` +
     `<listings><listing><MerchantSku>${escapeXml(barcode)}</MerchantSku>` +
     `<AvailableStock>${qty}</AvailableStock></listing></listings>`;
-  try {
-    const resp = await axios.post(url, xml, {
+  const json = [{ merchantSku: String(barcode), availableStock: qty }];
+  return hbUpload(url, hbAuth, json, xml, "Gönderildi");
+}
+
+// Hepsiburada yükleme uçları: önce JSON gövdesi denenir ("deserializing input data" hatası, yani
+// gövde biçimi reddedilirse) aynı veri XML olarak yeniden gönderilir.
+async function hbUpload(url, hbAuth, jsonBody, xmlBody, okMessage) {
+  const send = (data, type) =>
+    axios.post(url, data, {
       auth: hbAuth.auth,
-      headers: { "Content-Type": "application/xml", Accept: "application/json", "User-Agent": hbAuth.userAgent },
+      headers: { "Content-Type": type, Accept: "application/json", "User-Agent": hbAuth.userAgent },
       timeout: 15000,
     });
-    return { ok: true, message: "Gönderildi", trackingId: resp.data?.Id || resp.data?.id || null };
+  const fmtErr = (err) => (err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message);
+  try {
+    const resp = await send(jsonBody, "application/json");
+    return { ok: true, message: okMessage, trackingId: resp.data?.Id || resp.data?.id || null };
   } catch (err) {
-    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
+    const body = err.response?.data ? JSON.stringify(err.response.data) : "";
+    if (err.response?.status !== 400 || !/deserializ/i.test(body)) return { ok: false, message: fmtErr(err) };
+    try {
+      const resp = await send(xmlBody, "application/xml");
+      return { ok: true, message: okMessage, trackingId: resp.data?.Id || resp.data?.id || null };
+    } catch (err2) {
+      return { ok: false, message: fmtErr(err2) };
+    }
   }
 }
 
@@ -1355,6 +1372,7 @@ async function pushStockToKoctas(barcode, quantity) {
     });
     return { ok: true, message: "Gönderildi (Mirakl kuyruğuna alındı)", importId: resp.data?.import_id || null };
   } catch (err) {
+    if (err.response?.status === 429) return { ok: false, message: "Koçtaş dakikada 1 istek sınırına takıldı — 1 dakika bekleyip tekrar gönder." };
     return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
   }
 }
@@ -1415,16 +1433,8 @@ async function pushPriceToHepsiburada(barcode, price) {
   const xml =
     `<?xml version="1.0" encoding="utf-8"?>` +
     `<listings><listing><MerchantSku>${escapeXml(barcode)}</MerchantSku><Price>${pr}</Price></listing></listings>`;
-  try {
-    const resp = await axios.post(url, xml, {
-      auth: hbAuth.auth,
-      headers: { "Content-Type": "application/xml", Accept: "application/json", "User-Agent": hbAuth.userAgent },
-      timeout: 15000,
-    });
-    return { ok: true, message: "Fiyat gönderildi", trackingId: resp.data?.Id || resp.data?.id || null };
-  } catch (err) {
-    return { ok: false, message: err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message };
-  }
+  const json = [{ merchantSku: String(barcode), price: Math.round(Number(price) * 100) / 100 }];
+  return hbUpload(url, hbAuth, json, xml, "Fiyat gönderildi");
 }
 
 // Bir platforma bir ürünün STOK + FİYAT bilgisini birlikte gönderir. Fiyat yoksa sadece stok gider.
