@@ -2944,6 +2944,33 @@ function planBulkPrice(platformIds, mode, value, codes) {
   return { changes, skippedAuto, skippedNoPrice, skippedInvalid };
 }
 
+// "Platformu baz al": hedef platformların fiyatı, baz platformun fiyatına eşitlenir.
+// direction: "lower" = hedef, bazdan en az `threshold` ₺ DÜŞÜKSE · "higher" = en az `threshold` ₺ YÜKSEKSE ·
+// "any" = herhangi bir yönde en az `threshold` ₺ farklıysa. threshold 0 ise her fark değiştirilir.
+function planMatchPrice(baseId, targetIds, threshold, direction, codes) {
+  const changes = [];
+  let skippedAuto = 0, skippedNoPrice = 0, skippedInvalid = 0;
+  const entries = codes
+    ? [...new Set(codes.flatMap((c) => getFamilyCodes(c)))].filter((c) => products[c]).map((c) => [c, products[c]])
+    : Object.entries(products);
+  for (const [code, prod] of entries) {
+    if (!isListedOn(code, baseId)) continue;
+    const basePrice = Number(prod.prices?.[baseId]);
+    for (const pid of targetIds) {
+      if (pid === baseId || !isListedOn(code, pid)) continue;
+      const old = Number(prod.prices?.[pid]);
+      if (!(basePrice > 0) || !(old > 0)) { skippedNoPrice++; continue; }
+      const diff = Math.round((basePrice - old) * 100) / 100; // + : hedef bazdan düşük
+      const ok = direction === "lower" ? diff >= threshold : direction === "higher" ? -diff >= threshold : Math.abs(diff) >= threshold;
+      if (!ok || diff === 0) continue;
+      if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
+      const nw = Math.round(basePrice * 100) / 100;
+      changes.push({ code, platform: pid, old, new: nw });
+    }
+  }
+  return { changes, skippedAuto, skippedNoPrice, skippedInvalid };
+}
+
 function summarizeChanges(plan, platformIds, sampleLimit = 6) {
   const perPlatform = {};
   platformIds.forEach((id) => (perPlatform[id] = 0));
@@ -3093,15 +3120,29 @@ app.post("/api/prices/bulk", requireAuth, (req, res) => {
   const validIds = PLATFORMS.map((x) => x.id);
   const platformIds = (Array.isArray(platforms) ? platforms : []).filter((id) => validIds.includes(id));
   if (!platformIds.length) return res.status(400).json({ ok: false, error: "En az bir platform seçin." });
-  if (mode !== "percent" && mode !== "amount" && mode !== "fixed") return res.status(400).json({ ok: false, error: "Geçersiz değişiklik türü." });
-  // Sabit fiyat yanlışlıkla tüm kataloğa uygulanmasın diye yalnızca ürün bazında kullanılabilir.
-  if (mode === "fixed" && !codes) return res.status(400).json({ ok: false, error: "Sabit fiyat yalnızca tek ürün için kullanılabilir." });
-  const v = Number(value);
-  if (!Number.isFinite(v) || v === 0) return res.status(400).json({ ok: false, error: "Geçerli bir değer girin (0 olamaz)." });
-  if (mode === "fixed" && (v <= 0 || v > 10000000)) return res.status(400).json({ ok: false, error: "Sabit fiyat 0'dan büyük olmalı." });
-  if (mode === "percent" && (v <= -90 || v > 1000)) return res.status(400).json({ ok: false, error: "Yüzde değeri -90 ile 1000 arasında olmalı." });
-
-  const plan = planBulkPrice(platformIds, mode, v, codes);
+  if (mode !== "percent" && mode !== "amount" && mode !== "fixed" && mode !== "match") return res.status(400).json({ ok: false, error: "Geçersiz değişiklik türü." });
+  let v, plan, matchBase = null;
+  if (mode === "match") {
+    matchBase = String(req.body?.base || "");
+    if (!validIds.includes(matchBase)) return res.status(400).json({ ok: false, error: "Baz platformu seçin." });
+    const direction = ["lower", "higher", "any"].includes(req.body?.direction) ? req.body.direction : "lower";
+    const threshold = Number(req.body?.threshold);
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 10000000) return res.status(400).json({ ok: false, error: "Fark tutarı 0 veya daha büyük olmalı." });
+    const targets = platformIds.filter((id) => id !== matchBase);
+    if (!targets.length) return res.status(400).json({ ok: false, error: "Baz platform dışında en az bir hedef platform seçin." });
+    platformIds.splice(0, platformIds.length, ...targets);
+    v = threshold;
+    plan = planMatchPrice(matchBase, targets, threshold, direction, codes);
+    plan.matchInfo = { base: matchBase, direction, threshold };
+  } else {
+    // Sabit fiyat yanlışlıkla tüm kataloğa uygulanmasın diye yalnızca ürün bazında kullanılabilir.
+    if (mode === "fixed" && !codes) return res.status(400).json({ ok: false, error: "Sabit fiyat yalnızca tek ürün için kullanılabilir." });
+    v = Number(value);
+    if (!Number.isFinite(v) || v === 0) return res.status(400).json({ ok: false, error: "Geçerli bir değer girin (0 olamaz)." });
+    if (mode === "fixed" && (v <= 0 || v > 10000000)) return res.status(400).json({ ok: false, error: "Sabit fiyat 0'dan büyük olmalı." });
+    if (mode === "percent" && (v <= -90 || v > 1000)) return res.status(400).json({ ok: false, error: "Yüzde değeri -90 ile 1000 arasında olmalı." });
+    plan = planBulkPrice(platformIds, mode, v, codes);
+  }
   const summary = summarizeChanges(plan, platformIds, codes ? 40 : 6);
   if (!apply) return res.json({ ok: true, preview: true, ...summary });
 
@@ -3114,7 +3155,7 @@ app.post("/api/prices/bulk", requireAuth, (req, res) => {
   saveJSON("price-undo.json", lastBulkPrice);
 
   let pushStarted = false;
-  if (push) pushStarted = startBulkPush(plan.changes, mode === "fixed" ? `sabit ${v} ₺` : `${mode === "percent" ? "%" + v : v + " ₺"}`);
+  if (push) pushStarted = startBulkPush(plan.changes, mode === "match" ? `${PLATFORMS.find((x) => x.id === matchBase)?.name || matchBase} baz` : mode === "fixed" ? `sabit ${v} ₺` : `${mode === "percent" ? "%" + v : v + " ₺"}`);
   res.json({ ok: true, applied: true, pushStarted, ...summary });
 });
 
