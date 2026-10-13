@@ -2081,7 +2081,12 @@ let bpScope = null; // null = tüm ürünler (üstteki düğme) · ürün kodu =
 function bpModeHint() {
   const mode = document.getElementById('bpMode').value;
   const inp = document.getElementById('bpValue');
-  if (inp) inp.placeholder = mode === 'fixed' ? 'örn. 249.90' : 'örn. 10 (artır) veya -5 (indir)';
+  if (inp) {
+    inp.placeholder = mode === 'fixed' ? 'örn. 249.90' : 'örn. 10 (artır) veya -5 (indir)';
+    inp.style.display = mode === 'match' ? 'none' : '';
+  }
+  const mb = document.getElementById('bpMatch');
+  if (mb) mb.style.display = mode === 'match' ? '' : 'none';
 }
 function closeBulkPrice() {
   document.getElementById('bpModal')?.remove();
@@ -2103,6 +2108,9 @@ function bpBody(apply) {
     platforms: bpSelectedPlatforms(),
     mode: document.getElementById('bpMode').value,
     value: Number(String(document.getElementById('bpValue').value).replace(',', '.')),
+    base: document.getElementById('bpBase')?.value,
+    direction: document.getElementById('bpDir')?.value,
+    threshold: Number(String(document.getElementById('bpThr')?.value ?? '').replace(',', '.')),
     push: document.getElementById('bpPush').checked,
     codes: bpScope ? [bpScope] : undefined,
     apply
@@ -2140,8 +2148,20 @@ async function openBulkPrice(code) {
           ${pls.map(p => `<label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" class="bp-pl" value="${escAttr(p.id)}" ${checked} onchange="bpInvalidate()"> <span style="color:${p.color}; font-weight:600;">${escAttr(p.name)}</span>${prod ? ` <span class="muted">${cur[p.id].length ? cur[p.id].map(fmt).join(' / ') + ' ₺' : 'fiyat yok'}</span>` : ''}</label>`).join('')}
         </div>
         <div style="display:flex; gap:8px; margin-bottom:6px;">
-          <select id="bpMode" onchange="bpInvalidate(); bpModeHint()"><option value="percent">Yüzde (%)</option><option value="amount">Tutar (₺)</option>${prod ? '<option value="fixed">Sabit fiyat (₺)</option>' : ''}</select>
+          <select id="bpMode" onchange="bpInvalidate(); bpModeHint()"><option value="percent">Yüzde (%)</option><option value="amount">Tutar (₺)</option>${prod ? '<option value="fixed">Sabit fiyat (₺)</option>' : ''}<option value="match">Platformu baz al (fiyat eşitle)</option></select>
           <input type="text" id="bpValue" placeholder="örn. 10 (artır) veya -5 (indir)" style="flex:1; min-width:0;" oninput="bpInvalidate()">
+        </div>
+        <div id="bpMatch" style="display:none; margin-bottom:12px;">
+          <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+            <span>Baz platform:</span>
+            <select id="bpBase" onchange="bpInvalidate()">${pls.map(p => `<option value="${escAttr(p.id)}">${escAttr(p.name)}</option>`).join('')}</select>
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px;">
+            <span>Seçili (hedef) platformun fiyatı bazdan</span>
+            <input type="text" id="bpThr" value="100" style="width:80px;" oninput="bpInvalidate()"> <span>₺ veya daha fazla</span>
+            <select id="bpDir" onchange="bpInvalidate()"><option value="lower">düşükse</option><option value="higher">yüksekse</option><option value="any">farklıysa (her iki yön)</option></select>
+          </div>
+          <div class="muted" style="margin-top:6px;">Koşulu sağlayan ürünlerin hedef fiyatı, baz platformdaki fiyatla aynı yapılır. Üstte işaretli platformlar hedef olur (baz platform işaretli olsa da atlanır). Fark 0 yazılırsa her fark eşitlenir. İki platformda da fiyat olmalı; Trendyol'da otomatik fiyatlandırması açık ürünler atlanır.</div>
         </div>
         <div class="muted" style="margin-bottom:12px;">${prod
           ? 'Artırmak için pozitif, indirmek için eksi değer yazın. <b>Sabit fiyat</b> seçilirse seçili platformların hepsi tam bu fiyata ayarlanır (fiyatı olmayanlara da yazılır). Trendyol\'da otomatik fiyatlandırması açıksa o platform atlanır; önce Rekabet Analizi\'nden kapatın.'
@@ -2164,16 +2184,23 @@ async function openBulkPrice(code) {
 async function bpRun(apply) {
   const body = bpBody(apply);
   if (!body.platforms.length) { toast('En az bir platform seçin.'); return; }
-  if (!Number.isFinite(body.value) || body.value === 0) { toast('Geçerli bir değer girin.'); return; }
+  if (body.mode === 'match') {
+    if (!body.base) { toast('Baz platformu seçin.'); return; }
+    if (!body.platforms.some(id => id !== body.base)) { toast('Baz platform dışında en az bir hedef platform seçin.'); return; }
+    if (!Number.isFinite(body.threshold) || body.threshold < 0) { toast('Fark tutarı 0 veya daha büyük olmalı.'); return; }
+  } else if (!Number.isFinite(body.value) || body.value === 0) { toast('Geçerli bir değer girin.'); return; }
   if (body.mode === 'fixed' && body.value <= 0) { toast('Sabit fiyat 0\'dan büyük olmalı.'); return; }
-  const names = body.platforms.map(id => platformMeta(id).name).join(', ');
+  const names = body.platforms.filter(id => body.mode !== 'match' || id !== body.base).map(id => platformMeta(id).name).join(', ');
   const box = document.getElementById('bpPreview');
   let r, d;
   try {
     if (apply) {
       const pName = bpScope ? (state.products.find(x => x.code === bpScope)?.name || bpScope) : '';
       const txt = body.mode === 'fixed' ? '' : (body.mode === 'percent' ? (body.value > 0 ? '%' + body.value + ' artış' : '%' + Math.abs(body.value) + ' indirim') : (body.value > 0 ? body.value + ' ₺ artış' : Math.abs(body.value) + ' ₺ indirim'));
-      const what = body.mode === 'fixed'
+      const dirTxt = { lower: 'düşükse', higher: 'yüksekse', any: 'farklıysa' }[body.direction] || 'düşükse';
+      const what = body.mode === 'match'
+        ? `${names} platformlarında fiyatı ${platformMeta(body.base).name} fiyatından ${body.threshold.toLocaleString('tr-TR')} ₺ veya daha fazla ${dirTxt}, ${bpScope ? `\"${pName}\" ürününün` : 'ürünlerin'} fiyatı ${platformMeta(body.base).name} fiyatına eşitlenecek`
+        : body.mode === 'fixed'
         ? `${names} platformlarında "${pName}" ürününün fiyatı ${body.value.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} ₺ olarak sabitlenecek`
         : bpScope ? `${names} platformlarında "${pName}" ürününe ${txt} uygulanacak` : `${names} platformlarındaki tüm ürünlere ${txt} uygulanacak`;
       if (!confirm(`${what}${body.push ? ' ve platformlara gönderilecek' : ''}. Devam edilsin mi?`)) return;
