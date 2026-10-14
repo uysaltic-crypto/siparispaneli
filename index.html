@@ -1335,11 +1335,13 @@ function openCompeteModal(code) {
         <div class="cfield"><label class="opt">Max Fiyat (KDV Dahil)</label><input type="number" step="0.01" id="cm_max" value="${pricing.maxPrice ?? ''}"></div>
         <div class="cfield"><label class="opt">Rakip Ürün Linkleri</label><textarea id="cm_urls" rows="3" spellcheck="false" placeholder="Her satıra bir rakip ürün linki">${escAttr(competitors.map(c => c.url).join('\n'))}</textarea></div>
         <div class="cfield"><label class="opt">Otomatik Fiyatlandırma</label><label style="flex:1; background:transparent; font-weight:400; gap:8px;"><input type="checkbox" id="cm_auto" ${pricing.autoReprice ? 'checked' : ''} style="flex:0 0 auto;"> Açık</label></div>
+        <div class="cfield"><label class="opt">Fiyat Gidecek Platformlar</label><div style="flex:1; display:flex; flex-wrap:wrap; gap:6px 14px; padding:6px 10px;">${state.platforms.filter(x => x.configured).map(x => `<label style="background:transparent; font-weight:400; gap:6px; display:flex; align-items:center;"><input type="checkbox" class="cm_pl" value="${escAttr(x.id)}" ${((pricing.platforms && pricing.platforms.length) ? pricing.platforms : ['ty']).includes(x.id) ? 'checked' : ''} style="flex:0 0 auto;"> ${escAttr(x.name)}</label>`).join('')}</div></div>
         <div class="cinfo">
           <b class="t">Nasıl çalışır?</b>
           1. En düşük rakip fiyatından <b>Fiyat İndirim Basamağı</b> kadar düşük bir fiyat hesaplanır.<br>
           2. Bu fiyat <b>Min Fiyat</b>'ın altına inmez; <b>Max Fiyat</b> girildiyse onun üstüne de çıkmaz.<br>
-          3. Max Fiyat'ı <b>BOŞ BIRAKIRSAN</b> üst sınır uygulanmaz.
+          3. Max Fiyat'ı <b>BOŞ BIRAKIRSAN</b> üst sınır uygulanmaz.<br>
+          4. Otomatik fiyatlandırma açıksa hesaplanan fiyat yalnızca işaretli platformlara gönderilir (ürün orada kayıtlıysa). Koçtaş dakikada 1 istek kabul eder, hata verirse bir sonraki kontrolde tekrar denenir.
         </div>
         ${list}
       </div>
@@ -1362,11 +1364,13 @@ async function saveCompeteModal(silent) {
   const maxPrice = document.getElementById('cm_max').value;
   const autoReprice = document.getElementById('cm_auto').checked;
   const competitorUrls = document.getElementById('cm_urls').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const platforms = [...document.querySelectorAll('.cm_pl:checked')].map(x => x.value);
+  if (autoReprice && !platforms.length) { toast('Otomatik fiyat için en az bir platform seçin.'); return false; }
   if (minPrice === '' || Number(minPrice) <= 0) { toast('Min Fiyat zorunlu.'); return false; }
   if (undercut === '' || Number(undercut) < 0) { toast('Fiyat İndirim Basamağı zorunlu.'); return false; }
   const resp = await fetch(`/api/products/${encodeURIComponent(code)}/pricing`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ minPrice, maxPrice, undercut, autoReprice, competitorUrls })
+    body: JSON.stringify({ minPrice, maxPrice, undercut, autoReprice, competitorUrls, ...(platforms.length ? { platforms } : {}) })
   });
   const data = await resp.json();
   if (!data.ok) { toast(data.error || 'Kaydedilemedi.'); return false; }
