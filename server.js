@@ -827,25 +827,48 @@ async function repriceProduct(code) {
 
   if (p.pricing.autoReprice && p.pricing.minPrice != null && lowest != null) {
     const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
-    // Seçili platformlardan, ürünün kayıtlı olduğu ve yapılandırılmış olanlara; fiyatı zaten aynı olana gönderilmez.
-    // Koçtaş (dakikada 1 istek) en sona bırakılır.
-    const pids = autoPlatforms(p)
-      .filter((pid) => PLATFORMS.some((x) => x.id === pid && x.configured()) && isListedOn(code, pid))
-      .sort((x, y) => (x === "koctas") - (y === "koctas"));
-    const results = {};
-    for (const pid of pids) {
-      if (Number(p.prices?.[pid]) === target) continue;
-      const sku = skuForPlatform(code, pid);
-      const qty = Number(p.stocks?.[pid] ?? p.centralStock ?? 0) || 0;
-      let r;
-      try { r = await pushListingToPlatform(pid, sku, qty, target); } catch (e) { r = { ok: false, message: e.message }; }
-      results[pid] = r;
-      if (r.ok) { p.prices = p.prices || {}; p.prices[pid] = target; }
+    const rootCode = resolveRoot(code);
+    const qty = Number(products[rootCode]?.centralStock) || 0;
+    const skipped = [];
+    const jobs = [];
+
+    for (const pid of autoPlatforms(p)) {
+      const pl = PLATFORMS.find((x) => x.id === pid);
+      if (!pl || !pl.configured()) { skipped.push(`${pid}: platform yapılandırılmamış`); continue; }
+      let found = false;
+      // Ana ürün + birleştirilmiş alt ürünlerin her birinin KENDİ SKU'suna gönder
+      for (const c of getFamilyCodes(rootCode)) {
+        const m = products[c];
+        if (!m) continue;
+        const sku = m.skus?.[pid] || (c === code && isListedOn(c, pid) ? c : "");
+        if (!sku) continue;
+        found = true;
+        if (Number(m.prices?.[pid]) === target) { skipped.push(`${pid}/${c}: fiyat zaten ${target}`); continue; }
+        jobs.push({ pid, c, sku });
+      }
+      if (!found) skipped.push(`${pid}: ürün ve ailesinde ${pid} SKU kaydı yok`);
     }
+    jobs.sort((x, y) => (x.pid === "koctas") - (y.pid === "koctas")); // Koçtaş en sona
+
+    const results = {};
+    for (const j of jobs) {
+      let r;
+      try { r = await pushListingToPlatform(j.pid, j.sku, qty, target); } catch (e) { r = { ok: false, message: e.message }; }
+      if (!results[j.pid] || results[j.pid].ok) results[j.pid] = r;
+      if (r.ok) {
+        const m = products[j.c];
+        m.prices = m.prices || {};
+        m.prices[j.pid] = target;
+      }
+    }
+
+    p.pricing.lastNote = `${new Date().toISOString()} hedef ${target} · ${jobs.length} gönderim${skipped.length ? " · atlanan: " + skipped.join(" | ") : ""}`;
+    console.log("Otomatik fiyat:", code, p.pricing.lastNote);
+
     if (Object.keys(results).length) {
       const okAny = Object.values(results).some((r) => r.ok);
       const allOk = Object.values(results).every((r) => r.ok);
-      pushResult = { ok: allOk, message: allOk ? "Gönderildi" : Object.entries(results).filter(([, r]) => !r.ok).map(([id, r]) => `${id}: ${r.message}`).join(" | "), newPrice: target, results };
+      pushResult = { ok: allOk, message: allOk ? "Gönderildi" : Object.entries(results).filter(([, r]) => !r.ok).map(([id, r]) => `${id}: ${r.message}`).join(" | "), newPrice: target, results, skipped };
       if (okAny) p.pricing.myPrice = target;
       pushLog.push({
         time: new Date().toISOString(),
@@ -856,6 +879,8 @@ async function repriceProduct(code) {
         results,
       });
       persistPushLog();
+    } else {
+      pushResult = { ok: false, message: "Gönderilecek hedef bulunamadı", newPrice: target, skipped };
     }
   }
 
@@ -3296,6 +3321,10 @@ app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
 
   persistProducts();
   res.json({ ok: true, product: { code: req.params.code, ...p } });
+  // Otomatik fiyatlandırma açık ve rakip linki varsa kaydedince hemen bir kontrol çalıştır.
+  if (p.pricing.autoReprice && (p.competitors || []).length) {
+    repriceProduct(req.params.code).catch((e) => console.error("Fiyat kontrolü hatası:", e.message));
+  }
 });
 
 // Tek bir ürün için hemen kontrol et (rakip fiyatlarını çek + gerekiyorsa fiyatı güncelle)
@@ -4089,6 +4118,9 @@ app.listen(PORT, () => {
 
   // Rekabet kontrolü siparişlerden çok daha seyrek çalışır (varsayılan: 4 saatte bir)
   // — hem rakip siteyi çok sık yormamak hem de engellenme riskini azaltmak için.
+  setTimeout(() => {
+    repriceAll().catch((e) => console.error("Rekabet kontrolü hatası:", e.message));
+  }, 2 * 60 * 1000);
   setInterval(() => {
     repriceAll().catch((e) => console.error("Rekabet kontrolü hatası:", e.message));
   }, Math.max(REPRICE_HOURS, 1) * 60 * 60 * 1000);
