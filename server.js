@@ -785,6 +785,15 @@ async function fetchCompetitorPrice(url) {
   }
 }
 
+// Otomatik fiyatlandırmanın fiyat göndereceği platformlar (ürün bazında). Eski kayıtlarda yoksa Trendyol.
+function autoPlatforms(prod) {
+  const a = prod?.pricing?.platforms;
+  return Array.isArray(a) && a.length ? a : ["ty"];
+}
+function isAutoPriced(prod, pid) {
+  return !!prod?.pricing?.autoReprice && autoPlatforms(prod).includes(pid);
+}
+
 function clamp(n, min, max) {
   let v = n;
   if (min !== null && min !== undefined && min !== "") v = Math.max(v, Number(min));
@@ -818,22 +827,33 @@ async function repriceProduct(code) {
 
   if (p.pricing.autoReprice && p.pricing.minPrice != null && lowest != null) {
     const target = clamp(lowest - (Number(p.pricing.undercut) || 0), p.pricing.minPrice, p.pricing.maxPrice);
-    if (target !== p.pricing.myPrice) {
-      const qty = p.stocks?.ty ?? p.centralStock ?? 0;
-      const sku = skuForPlatform(code, "ty");
-      const r = await pushPriceToTrendyol(sku, target, qty);
-      pushResult = { ok: r.ok, message: r.message, newPrice: target };
-      if (r.ok) {
-        p.pricing.myPrice = target;
-        p.prices.ty = target;
-      }
+    // Seçili platformlardan, ürünün kayıtlı olduğu ve yapılandırılmış olanlara; fiyatı zaten aynı olana gönderilmez.
+    // Koçtaş (dakikada 1 istek) en sona bırakılır.
+    const pids = autoPlatforms(p)
+      .filter((pid) => PLATFORMS.some((x) => x.id === pid && x.configured()) && isListedOn(code, pid))
+      .sort((x, y) => (x === "koctas") - (y === "koctas"));
+    const results = {};
+    for (const pid of pids) {
+      if (Number(p.prices?.[pid]) === target) continue;
+      const sku = skuForPlatform(code, pid);
+      const qty = Number(p.stocks?.[pid] ?? p.centralStock ?? 0) || 0;
+      let r;
+      try { r = await pushListingToPlatform(pid, sku, qty, target); } catch (e) { r = { ok: false, message: e.message }; }
+      results[pid] = r;
+      if (r.ok) { p.prices = p.prices || {}; p.prices[pid] = target; }
+    }
+    if (Object.keys(results).length) {
+      const okAny = Object.values(results).some((r) => r.ok);
+      const allOk = Object.values(results).every((r) => r.ok);
+      pushResult = { ok: allOk, message: allOk ? "Gönderildi" : Object.entries(results).filter(([, r]) => !r.ok).map(([id, r]) => `${id}: ${r.message}`).join(" | "), newPrice: target, results };
+      if (okAny) p.pricing.myPrice = target;
       pushLog.push({
         time: new Date().toISOString(),
         barcode: code,
         name: p.name,
         centralStock: p.centralStock,
         trigger: "otomatik fiyatlandırma",
-        results: { ty: r },
+        results,
       });
       persistPushLog();
     }
@@ -2947,7 +2967,7 @@ function planBulkPrice(platformIds, mode, value, codes) {
       const old = Number(prod.prices?.[pid]);
       if (mode !== "fixed" && !(old > 0)) { skippedNoPrice++; continue; }
       // Trendyol'da otomatik fiyatlandırma açıksa o ürünün fiyatını rekabet sistemi yönetir; ezilmesin diye atlanır.
-      if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
+      if (isAutoPriced(prod, pid)) { skippedAuto++; continue; }
       const nw = computeBulkPrice(old, mode, value);
       if (!(nw > 0)) { skippedInvalid++; continue; }
       if (nw === (old > 0 ? old : null)) continue;
@@ -3008,7 +3028,7 @@ function planMatchPrice(baseId, targetIds, threshold, direction, codes, formula)
       const diff = Math.round((basePrice - old) * 100) / 100; // + : hedef bazdan düşük
       const ok = direction === "all" ? true : direction === "lower" ? diff >= threshold : direction === "higher" ? -diff >= threshold : Math.abs(diff) >= threshold;
       if (!ok) continue;
-      if (pid === "ty" && prod.pricing?.autoReprice) { skippedAuto++; continue; }
+      if (isAutoPriced(prod, pid)) { skippedAuto++; continue; }
       const nw = evalPriceFormula(formula, basePrice);
       if (!(nw > 0)) { skippedInvalid++; continue; }
       if (nw === old) continue;
@@ -3115,7 +3135,7 @@ function buildFamilyPushChanges(rootCode) {
       const prod = products[c];
       let price = Number(prod.prices?.[pl.id]);
       // Trendyol'da otomatik fiyatlandırma açıksa fiyatı rekabet sistemi yönetir: sadece stok gider.
-      if (pl.id === "ty" && prod.pricing?.autoReprice) price = NaN;
+      if (isAutoPriced(prod, pl.id)) price = NaN;
       changes.push({ code: c, platform: pl.id, old: null, new: price > 0 ? price : undefined });
     }
   }
@@ -3250,12 +3270,17 @@ app.get("/api/push-log", requireAuth, (req, res) => {
 app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
   const p = products[req.params.code];
   if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
-  const { minPrice, maxPrice, autoReprice, undercut, competitorUrls } = req.body || {};
+  const { minPrice, maxPrice, autoReprice, undercut, competitorUrls, platforms: autoPls } = req.body || {};
 
   if (minPrice !== undefined) p.pricing.minPrice = minPrice === "" || minPrice === null ? null : Number(minPrice);
   if (maxPrice !== undefined) p.pricing.maxPrice = maxPrice === "" || maxPrice === null ? null : Number(maxPrice);
   if (autoReprice !== undefined) p.pricing.autoReprice = !!autoReprice;
   if (undercut !== undefined && undercut !== "") p.pricing.undercut = Number(undercut);
+  if (Array.isArray(autoPls)) {
+    const valid = [...new Set(autoPls.map(String))].filter((id) => PLATFORMS.some((x) => x.id === id));
+    if (!valid.length) return res.status(400).json({ ok: false, error: "Otomatik fiyat için en az bir platform seçin." });
+    p.pricing.platforms = valid;
+  }
 
   if (p.pricing.minPrice != null && p.pricing.maxPrice != null && p.pricing.minPrice > p.pricing.maxPrice) {
     return res.status(400).json({ ok: false, error: "En düşük fiyat, en yüksek fiyattan büyük olamaz." });
@@ -3650,7 +3675,7 @@ function startBackupSync(withPrices) {
     for (const pl of PLATFORMS) {
       if (!pl.configured() || !isListedOn(code, pl.id)) continue;
       const price = Number(prod.prices?.[pl.id]);
-      const sendPrice = withPrices && price > 0 && !(pl.id === "ty" && prod.pricing?.autoReprice);
+      const sendPrice = withPrices && price > 0 && !isAutoPriced(prod, pl.id);
       changes.push({ code, platform: pl.id, old: null, new: sendPrice ? price : null });
     }
   }
