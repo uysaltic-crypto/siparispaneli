@@ -729,11 +729,24 @@ async function pushPriceToTrendyol(barcode, salePrice, quantity) {
 ================================================================== */
 async function fetchCompetitorPrice(url) {
   try {
-    const resp = await axios.get(url, {
-      timeout: 15000,
+    // İsteğe bağlı: bulut IP'si engelleniyorsa, bir "scraping" servisi/proxy üzerinden çek.
+    // Render ortam değişkeni COMPETITOR_FETCH_TEMPLATE, {url} yer tutucusu içermeli. Örn:
+    //   https://api.scraperapi.com/?api_key=ANAHTAR&url={url}
+    const tpl = process.env.COMPETITOR_FETCH_TEMPLATE;
+    const target = tpl && tpl.includes("{url}") ? tpl.replace("{url}", encodeURIComponent(url)) : url;
+    const resp = await axios.get(target, {
+      timeout: tpl ? 60000 : 15000,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        Referer: "https://www.google.com/",
       },
       maxRedirects: 5,
     });
@@ -767,7 +780,7 @@ async function fetchCompetitorPrice(url) {
     return { ok: false, error: "Sayfadan fiyat okunamadı (yapı değişmiş olabilir)." };
   } catch (err) {
     const status = err.response?.status;
-    if (status === 403 || status === 429) return { ok: false, error: "Site erişimi engelledi (çok sık çekiliyor olabilir)." };
+    if (status === 403 || status === 429) return { ok: false, error: `Site erişimi engelledi (HTTP ${status}). Sunucu IP'si engellenmiş olabilir; COMPETITOR_FETCH_TEMPLATE ile proxy/scraping servisi tanımlanabilir.` };
     return { ok: false, error: err.message };
   }
 }
