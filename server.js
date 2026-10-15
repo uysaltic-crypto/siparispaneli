@@ -831,22 +831,34 @@ async function repriceProduct(code) {
     const qty = Number(products[rootCode]?.centralStock) || 0;
     const skipped = [];
     const jobs = [];
+    const isRoot = rootCode === code;
+    // Bir kaydın KENDİ rekabet ayarı (rakip linki + otomatik fiyat açık) varsa kendi fiyatını kendisi belirler.
+    const ownsPricing = (m) => !!(m?.pricing?.autoReprice && (m.competitors || []).length);
 
     for (const pid of autoPlatforms(p)) {
       const pl = PLATFORMS.find((x) => x.id === pid);
       if (!pl || !pl.configured()) { skipped.push(`${pid}: platform yapılandırılmamış`); continue; }
       let found = false;
-      // Ana ürün + birleştirilmiş alt ürünlerin her birinin KENDİ SKU'suna gönder
-      for (const c of getFamilyCodes(rootCode)) {
-        const m = products[c];
-        if (!m) continue;
-        const sku = m.skus?.[pid] || (c === code && isListedOn(c, pid) ? c : "");
-        if (!sku) continue;
+      // 1) Bu ürünün KENDİ listelemesi
+      const ownSku = p.skus?.[pid] || (isListedOn(code, pid) ? code : "");
+      if (ownSku) {
         found = true;
-        if (Number(m.prices?.[pid]) === target) { skipped.push(`${pid}/${c}: fiyat zaten ${target}`); continue; }
-        jobs.push({ pid, c, sku });
+        if (Number(p.prices?.[pid]) === target) skipped.push(`${pid}/${code}: fiyat zaten ${target}`);
+        else jobs.push({ pid, c: code, sku: ownSku });
       }
-      if (!found) skipped.push(`${pid}: ürün ve ailesinde ${pid} SKU kaydı yok`);
+      // 2) Ana ürünse: kendi rekabet ayarı OLMAYAN birleşik alt kayıtlar ana ürünün fiyatını alır
+      if (isRoot) {
+        for (const c of getFamilyCodes(rootCode)) {
+          if (c === code) continue;
+          const m = products[c];
+          if (!m || !m.skus?.[pid]) continue;
+          if (ownsPricing(m)) { skipped.push(`${pid}/${c}: kendi rekabet ayarı var, kendi fiyatını alır`); continue; }
+          found = true;
+          if (Number(m.prices?.[pid]) === target) { skipped.push(`${pid}/${c}: fiyat zaten ${target}`); continue; }
+          jobs.push({ pid, c, sku: m.skus[pid] });
+        }
+      }
+      if (!found) skipped.push(`${pid}: bu kayıtta ${pid} SKU yok`);
     }
     jobs.sort((x, y) => (x.pid === "koctas") - (y.pid === "koctas")); // Koçtaş en sona
 
@@ -3295,6 +3307,7 @@ app.get("/api/push-log", requireAuth, (req, res) => {
 app.post("/api/products/:code/pricing", requireAuth, (req, res) => {
   const p = products[req.params.code];
   if (!p) return res.status(404).json({ ok: false, error: "Ürün bulunamadı." });
+  ensureProduct(req.params.code); // eski kayıtlarda pricing/competitors alanı eksikse tamamlar
   const { minPrice, maxPrice, autoReprice, undercut, competitorUrls, platforms: autoPls } = req.body || {};
 
   if (minPrice !== undefined) p.pricing.minPrice = minPrice === "" || minPrice === null ? null : Number(minPrice);
