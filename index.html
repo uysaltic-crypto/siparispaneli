@@ -755,7 +755,7 @@ function printOrders(orders) {
     /* A4: soldan 1 cm boşluk, sayfada 2 sipariş (her biri yarım sayfa) */
     .page { width:210mm; padding:5mm 10mm 0 10mm; page-break-after:always; break-after:page; }
     .page:last-child { page-break-after:auto; break-after:auto; }
-    .order { width:128mm; min-height:143mm; border:0; padding:3mm; margin:0; break-inside:avoid; page-break-inside:avoid; }
+    .order { width:120mm; min-height:143mm; border:0; padding:3mm; margin:0; break-inside:avoid; page-break-inside:avoid; }
     .order + .order { border-top:1px dashed #999; margin-top:2mm; padding-top:5mm; }
     /* En üst şerit: kargo firması ve platform, çıktının en büyük yazıları */
     .banner { display:flex; justify-content:space-between; align-items:center; gap:8px; background:#000; color:#fff; padding:2mm 3mm; margin:-3mm -3mm 2.5mm; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
@@ -767,8 +767,8 @@ function printOrders(orders) {
     .lbl { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:#444; margin-right:3px; }
     .meta { font-size:10.5px; margin-bottom:1px; }
     .trk { font-size:12px; font-weight:700; margin-top:4px; word-break:break-all; }
-    .codes { display:flex; flex-direction:row; align-items:center; justify-content:space-between; gap:8px; flex:none; }
-    .bc { flex:0 0 90mm; width:90mm; min-width:0; }
+    .codes { display:flex; flex-direction:row; align-items:center; justify-content:space-between; gap:2mm; flex:none; width:90mm; }
+    .bc { flex:1 1 0; min-width:0; }
     .bc svg { width:100%; max-width:100%; height:auto; display:block; overflow:visible; }
     .qr { flex:none; width:26mm; height:26mm; image-rendering:pixelated; }
     .qr.sm { width:10mm; height:10mm; }
