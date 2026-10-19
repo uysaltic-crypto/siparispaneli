@@ -2065,6 +2065,61 @@ app.post("/api/printed", requireAuth, (req, res) => {
 });
 
 /* ------------------------------------------------------------------
+   Faturalar — sipariş bazlı fatura durumu (platformlara göre listelenir)
+   invoices.json: { "platform:siparisNo": { at, no, by: "manual"|"logo", vat } }
+------------------------------------------------------------------ */
+let invoicedOrders = loadJSON("invoices.json", {});
+const orderKeyOf = (o) => `${o.platform}:${o.packageId || o.orderNumber}`;
+
+// Logo e-Arşiv/e-Fatura web servisi bağlantısı. Logo'nun servis dokümanı (adres, istek biçimi,
+// kimlik doğrulama) gelince burası doldurulacak. LOGO_API_KEY ortam değişkeninden okunur.
+async function issueInvoiceViaLogo(order, vatRate) {
+  throw new Error("Logo web servis bağlantısı henüz yazılmadı (servis dokümanı bekleniyor).");
+}
+
+app.get("/api/invoices", requireAuth, (req, res) => {
+  res.json({ invoices: invoicedOrders, logoConfigured: !!process.env.LOGO_API_KEY });
+});
+
+// Elle işaretleme (fatura Logo portalından kesildiyse) ya da işareti kaldırma
+app.post("/api/invoices/mark", requireAuth, (req, res) => {
+  const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys : [];
+  const mark = !(req.body && req.body.invoiced === false);
+  const vat = Number(req.body && req.body.vat);
+  keys.slice(0, 1000).forEach((k) => {
+    if (typeof k !== "string" || !k || k.length > 200) return;
+    if (mark) invoicedOrders[k] = { at: Date.now(), by: "manual", vat: vat >= 0 && vat <= 100 ? vat : 20 };
+    else delete invoicedOrders[k];
+  });
+  saveJSON("invoices.json", invoicedOrders);
+  res.json({ invoices: invoicedOrders });
+});
+
+// Logo üzerinden fatura kes
+app.post("/api/invoices/issue", requireAuth, async (req, res) => {
+  const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys.slice(0, 200) : [];
+  const vat = Number(req.body && req.body.vat);
+  const vatRate = vat >= 0 && vat <= 100 ? vat : 20;
+  if (!process.env.LOGO_API_KEY) return res.status(400).json({ ok: false, error: "LOGO_API_KEY ortam değişkeni tanımlı değil." });
+  const byKey = new Map((cache.orders || []).map((o) => [orderKeyOf(o), o]));
+  const results = [];
+  for (const k of keys) {
+    const o = byKey.get(k);
+    if (!o) { results.push({ key: k, ok: false, error: "Sipariş bulunamadı." }); continue; }
+    if (invoicedOrders[k]) { results.push({ key: k, ok: false, error: "Zaten faturalandı." }); continue; }
+    try {
+      const r = await issueInvoiceViaLogo(o, vatRate);
+      invoicedOrders[k] = { at: Date.now(), by: "logo", no: (r && r.invoiceNo) || "", vat: vatRate };
+      results.push({ key: k, ok: true, invoiceNo: (r && r.invoiceNo) || "" });
+    } catch (e) {
+      results.push({ key: k, ok: false, error: e.message });
+    }
+  }
+  saveJSON("invoices.json", invoicedOrders);
+  res.json({ ok: results.every((r) => r.ok), results, invoices: invoicedOrders });
+});
+
+/* ------------------------------------------------------------------
    API — Stok / ürün yönetimi
 ------------------------------------------------------------------ */
 /* ------------------------------------------------------------------
