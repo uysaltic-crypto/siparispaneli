@@ -169,6 +169,7 @@
       </div>
       <div class="tabs">
         <div class="tab active" data-tab="orders" onclick="showTab('orders')">Siparişler</div>
+        <div class="tab" data-tab="invoice" onclick="showTab('invoice')">Faturalar</div>
         <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
         <div class="tab" data-tab="messages" onclick="showTab('messages')">Mesajlar <span class="badge fail" id="msgBadge" style="display:none;"></span></div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
@@ -202,6 +203,25 @@
         <tbody id="orderRows"></tbody>
       </table>
       <div id="ordersEmpty" class="empty" style="display:none;">Henüz sipariş bulunamadı.</div>
+    </div>
+
+    <!-- FATURALAR -->
+    <div class="panel" id="panel-invoice">
+      <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px;">
+        <span class="muted">Tarih:</span>
+        <input type="date" id="invFrom" onchange="renderInvoices()"> <span class="muted">–</span> <input type="date" id="invTo" onchange="renderInvoices()">
+        <span class="muted">KDV %</span><input type="text" id="invVat" value="20" style="width:50px;" oninput="renderInvoices()">
+        <label class="muted" style="display:flex; align-items:center; gap:5px; cursor:pointer;"><input type="checkbox" id="invHideDone" checked onchange="renderInvoices()"> Faturalananları gizle</label>
+        <span id="invSelInfo" class="muted"></span>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:14px;">
+        <button onclick="invIssue()">Seçilenlere Logo'dan fatura kes</button>
+        <button class="ghost" onclick="invMark(true)">Faturalandı işaretle</button>
+        <button class="ghost" onclick="invMark(false)">İşareti kaldır</button>
+        <button class="ghost" onclick="invCsv()">CSV indir (seçilen / listelenen)</button>
+      </div>
+      <div id="invGroups"></div>
+      <div id="invEmpty" class="empty" style="display:none;">Bu filtrede sipariş yok.</div>
     </div>
 
     <!-- STOK -->
@@ -369,6 +389,7 @@ function showTab(name) {
   if (name === 'stock' && state.stockDirty) { state.stockDirty = false; renderStock(true); }
   if (name === 'compete') { state.competeDirty = false; renderCompete(); }
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
+  if (name === 'invoice') loadInvoices();
 }
 
 let matchActivePlatform = null;
@@ -591,6 +612,93 @@ function platformMeta(id) {
   return state.platforms.find(p => p.id === id) || { name: id.toUpperCase(), color: '#999' };
 }
 
+
+
+/* ---------------- Faturalar (platform bazlı) ---------------- */
+let invoicedMap = {};
+const invSel = new Set();
+async function loadInvoices() {
+  try { const r = await fetch('/api/invoices'); if (r.ok) invoicedMap = (await r.json()).invoices || {}; } catch (e) {}
+  renderInvoices();
+}
+function invVatRate() { const v = parseFloat(String(document.getElementById('invVat').value).replace(',', '.')); return v >= 0 && v <= 100 ? v : 20; }
+function invOrders() {
+  const all = (window.__ordersData && window.__ordersData.orders) || [];
+  const f = document.getElementById('invFrom').value, t = document.getElementById('invTo').value;
+  const from = f ? new Date(f + 'T00:00:00').getTime() : -Infinity, to = t ? new Date(t + 'T23:59:59').getTime() : Infinity;
+  const hide = document.getElementById('invHideDone').checked;
+  return all.filter(o => {
+    const d = o.date ? new Date(o.date).getTime() : NaN;
+    if (!isNaN(d) && (d < from || d > to)) return false;
+    if (isNaN(d) && (f || t)) return false;
+    return !(hide && invoicedMap[orderKey(o)]);
+  });
+}
+function renderInvoices() {
+  const money = n => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const vat = invVatRate(), list = invOrders();
+  const groups = {};
+  list.forEach(o => (groups[o.platform] = groups[o.platform] || []).push(o));
+  const box = document.getElementById('invGroups');
+  box.innerHTML = Object.keys(groups).map(pid => {
+    const pm = platformMeta(pid), g = groups[pid];
+    const total = g.reduce((s, o) => s + (Number(o.amount) || 0), 0), net = total / (1 + vat / 100);
+    const keys = g.map(orderKey);
+    const allOn = keys.every(k => invSel.has(k));
+    return `<div style="border:1px solid var(--border); border-radius:8px; margin-bottom:14px; overflow:hidden;">
+      <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; padding:8px 12px; background:rgba(128,128,128,.08);">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" ${allOn ? 'checked' : ''} onchange="invToggleGroup('${escAttr(pid)}', this.checked)"> <b style="color:${pm.color}; font-size:15px;">${escHtml(pm.name)}</b></label>
+        <span class="muted">${g.length} sipariş</span>
+        <span>Matrah: <b>${money(net)} ₺</b></span><span>KDV %${vat}: <b>${money(total - net)} ₺</b></span><span>Toplam: <b>${money(total)} ₺</b></span>
+      </div>
+      <table><tbody>${g.map(o => {
+        const k = orderKey(o), inv = invoicedMap[k];
+        return `<tr><td style="width:28px;"><input type="checkbox" ${invSel.has(k) ? 'checked' : ''} onchange="invToggle('${escAttr(k)}', this.checked)"></td>
+          <td>${escHtml(String(o.orderNumber))}</td><td>${escHtml(o.customer || '')}${o.city ? ' <span class="muted">/ ' + escHtml(o.city) + '</span>' : ''}</td>
+          <td style="text-align:right;">${money(o.amount || 0)} ₺</td>
+          <td class="muted">${o.date ? new Date(o.date).toLocaleDateString('tr-TR') : ''}</td>
+          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>` : '<span class="muted">—</span>'}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+  }).join('');
+  document.getElementById('invEmpty').style.display = list.length ? 'none' : 'block';
+  document.getElementById('invSelInfo').textContent = invSel.size ? invSel.size + ' sipariş seçili' : '';
+}
+function invToggle(k, on) { on ? invSel.add(k) : invSel.delete(k); renderInvoices(); }
+function invToggleGroup(pid, on) { invOrders().filter(o => o.platform === pid).forEach(o => on ? invSel.add(orderKey(o)) : invSel.delete(orderKey(o))); renderInvoices(); }
+async function invMark(on) {
+  const keys = [...invSel];
+  if (!keys.length) { toast('Önce sipariş seçin.'); return; }
+  const r = await fetch('/api/invoices/mark', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys, invoiced: on, vat: invVatRate() }) });
+  if (r.ok) { invoicedMap = (await r.json()).invoices || {}; invSel.clear(); renderInvoices(); }
+}
+async function invIssue() {
+  const keys = [...invSel];
+  if (!keys.length) { toast('Önce sipariş seçin.'); return; }
+  if (!confirm(keys.length + ' sipariş için Logo üzerinden fatura kesilsin mi?')) return;
+  const r = await fetch('/api/invoices/issue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys, vat: invVatRate() }) });
+  const d = await r.json().catch(() => ({}));
+  if (d.invoices) invoicedMap = d.invoices;
+  const bad = (d.results || []).filter(x => !x.ok);
+  toast(!r.ok ? (d.error || 'Fatura kesilemedi.') : bad.length ? bad.length + ' siparişte hata: ' + bad[0].error : 'Faturalar kesildi.');
+  if (r.ok && !bad.length) invSel.clear();
+  renderInvoices();
+}
+function invCsv() {
+  const vat = invVatRate();
+  let list = invOrders();
+  if (invSel.size) list = list.filter(o => invSel.has(orderKey(o)));
+  list = list.slice().sort((a, b) => String(a.platform).localeCompare(String(b.platform)));
+  const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const rows = [['Platform', 'Sipariş No', 'Tarih', 'Müşteri', 'Şehir', 'Matrah', 'KDV %', 'KDV', 'Toplam'].map(q).join(';')];
+  list.forEach(o => {
+    const t = Number(o.amount) || 0, n = t / (1 + vat / 100);
+    rows.push([platformMeta(o.platform).name, o.orderNumber, o.date ? new Date(o.date).toLocaleDateString('tr-TR') : '', o.customer, o.city,
+      n.toFixed(2).replace('.', ','), vat, (t - n).toFixed(2).replace('.', ','), t.toFixed(2).replace('.', ',')].map(q).join(';'));
+  });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\ufeff' + rows.join('\r\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'faturalanacak-siparisler.csv'; a.click();
+}
 
 /* ---------------- Sipariş yazdırma (Barkod + QR) ---------------- */
 const selectedOrders = new Set();
