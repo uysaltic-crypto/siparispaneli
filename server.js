@@ -2158,13 +2158,18 @@ function logoSupplier() {
 }
 
 // Gönderim şekli (ELEKTRONIK/KAGIT) alanı için olası yazım biçimleri. e-Logo hangisini kabul ediyorsa o hatırlanır.
-const SEND_VARIANTS = [
-  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
-  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SEND_TYPE</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
-  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>${t}</cbc:DocumentTypeCode><cbc:DocumentType>SendingType</cbc:DocumentType>`,
-  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentType>SendingType</cbc:DocumentType>`,
-  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode>`,
-];
+const SEND_VARIANTS = (() => {
+  // Standart UBL-TR e-Arşiv bloğu: ID=1, DocumentTypeCode=SendingType, DocumentType=ELEKTRONIK|KAGIT
+  const shapes = [
+    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
+    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>${t}</cbc:DocumentTypeCode><cbc:DocumentType>SendingType</cbc:DocumentType>`,
+    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentType>${t}</cbc:DocumentType>`,
+    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode>`,
+  ];
+  const out = [];
+  for (const idMode of ["1", "T"]) for (const sh of shapes) out.push((d, t) => sh(idMode === "1" ? "1" : t, d, t));
+  return out;
+})();
 let sendVariantOk = Number(process.env.LOGO_SEND_VARIANT) || 0; // çalışan biçimin indeksi
 function buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant = 0 }) {
   const total = Number(order.amount) || 0;
