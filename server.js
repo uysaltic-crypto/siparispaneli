@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const fs = require("fs");
 const path = require("path");
 
@@ -2071,14 +2072,44 @@ app.post("/api/printed", requireAuth, (req, res) => {
 let invoicedOrders = loadJSON("invoices.json", {});
 const orderKeyOf = (o) => `${o.platform}:${o.packageId || o.orderNumber}`;
 
-// Logo e-Arşiv/e-Fatura web servisi bağlantısı. Logo'nun servis dokümanı (adres, istek biçimi,
-// kimlik doğrulama) gelince burası doldurulacak. LOGO_API_KEY ortam değişkeninden okunur.
-async function issueInvoiceViaLogo(order, vatRate) {
-  throw new Error("Logo web servis bağlantısı henüz yazılmadı (servis dokümanı bekleniyor).");
+// e-Logo PostBox SOAP bağlantısı (doküman: "Özel Entegratör Sistemi Uygulama Arabirim Dokümanı").
+// Test: https://pb-demo.elogo.com.tr/postboxservice.svc — canlı adres LOGO_URL ile verilir.
+// Giriş: LOGO_USER / LOGO_PASS (Login metodu kullanıcı adı + şifre ister).
+function logoUrl() { return process.env.LOGO_URL || "https://pb-demo.elogo.com.tr/postboxservice.svc"; }
+async function logoSoap(action, bodyXml) {
+  const xml = `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/" xmlns:arr="http://schemas.microsoft.com/2003/10/Serialization/Arrays" xmlns:efat="http://schemas.datacontract.org/2004/07/eFaturaWebService"><soapenv:Header/><soapenv:Body>${bodyXml}</soapenv:Body></soapenv:Envelope>`;
+  const r = await axios.post(logoUrl(), xml, {
+    headers: { "Content-Type": "text/xml; charset=utf-8", SOAPAction: `"http://tempuri.org/IPostBoxService/${action}"` },
+    timeout: 30000, validateStatus: () => true,
+  });
+  return { status: r.status, text: String(r.data || "") };
 }
+const xmlEsc = (v) => String(v).replace(/[<>&'"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]));
+async function logoLogin() {
+  if (!process.env.LOGO_USER || !process.env.LOGO_PASS) throw new Error("LOGO_USER / LOGO_PASS ortam değişkenleri tanımlı değil.");
+  const r = await logoSoap("Login", `<tem:Login><tem:login><efat:appStr>TicaretPaneli</efat:appStr><efat:passWord>${xmlEsc(process.env.LOGO_PASS)}</efat:passWord><efat:userName>${xmlEsc(process.env.LOGO_USER)}</efat:userName><efat:version>1.0</efat:version></tem:login></tem:Login>`);
+  const sid = (r.text.match(/<sessionID>([^<]+)<\/sessionID>/) || [])[1];
+  if (!sid || !/<LoginResult>true<\/LoginResult>/.test(r.text)) {
+    const fault = (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1];
+    throw new Error(`Logo girişi başarısız (HTTP ${r.status})${fault ? ": " + fault : ""}`);
+  }
+  return sid;
+}
+async function logoLogout(sid) { try { await logoSoap("Logout", `<tem:Logout><tem:sessionID>${sid}</tem:sessionID></tem:Logout>`); } catch (_) {} }
+
+// Bağlantı testi: giriş yapıp çıkar
+app.post("/api/invoices/logo-test", requireAuth, async (req, res) => {
+  try {
+    const sid = await logoLogin();
+    await logoLogout(sid);
+    res.json({ ok: true, url: logoUrl() });
+  } catch (e) {
+    res.status(502).json({ ok: false, url: logoUrl(), error: e.message });
+  }
+});
 
 app.get("/api/invoices", requireAuth, (req, res) => {
-  res.json({ invoices: invoicedOrders, logoConfigured: !!process.env.LOGO_API_KEY });
+  res.json({ invoices: invoicedOrders, logoConfigured: !!(process.env.LOGO_USER && process.env.LOGO_PASS) });
 });
 
 // Elle işaretleme (fatura Logo portalından kesildiyse) ya da işareti kaldırma
@@ -2095,28 +2126,163 @@ app.post("/api/invoices/mark", requireAuth, (req, res) => {
   res.json({ invoices: invoicedOrders });
 });
 
-// Logo üzerinden fatura kes
+// ---- e-Arşiv faturası üretimi (UBL-TR 1.2) ----
+const crcTable = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(buf) { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+// Tek dosyalık zip (deflate)
+function zipSingle(name, data) {
+  const comp = zlib.deflateRawSync(data), nameB = Buffer.from(name, "utf8"), crc = crc32(data);
+  const lfh = Buffer.alloc(30);
+  lfh.writeUInt32LE(0x04034b50, 0); lfh.writeUInt16LE(20, 4); lfh.writeUInt16LE(0x0800, 6); lfh.writeUInt16LE(8, 8);
+  lfh.writeUInt16LE(0, 10); lfh.writeUInt16LE(0x21, 12); lfh.writeUInt32LE(crc, 14); lfh.writeUInt32LE(comp.length, 18);
+  lfh.writeUInt32LE(data.length, 22); lfh.writeUInt16LE(nameB.length, 26); lfh.writeUInt16LE(0, 28);
+  const cd = Buffer.alloc(46);
+  cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(20, 4); cd.writeUInt16LE(20, 6); cd.writeUInt16LE(0x0800, 8); cd.writeUInt16LE(8, 10);
+  cd.writeUInt16LE(0, 12); cd.writeUInt16LE(0x21, 14); cd.writeUInt32LE(crc, 16); cd.writeUInt32LE(comp.length, 20);
+  cd.writeUInt32LE(data.length, 24); cd.writeUInt16LE(nameB.length, 28); cd.writeUInt32LE(0, 42);
+  const local = Buffer.concat([lfh, nameB, comp]), central = Buffer.concat([cd, nameB]);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(central.length, 12); eocd.writeUInt32LE(local.length, 16);
+  return Buffer.concat([local, central, eocd]);
+}
+const money2 = (n) => (Math.round(n * 100) / 100).toFixed(2);
+
+function logoSupplier() {
+  const e = process.env;
+  const sup = { id: (e.LOGO_SUPPLIER_ID || "").trim(), name: (e.LOGO_SUPPLIER_NAME || "").trim(), taxOffice: (e.LOGO_SUPPLIER_TAXOFFICE || "").trim(),
+    street: (e.LOGO_SUPPLIER_STREET || "").trim(), district: (e.LOGO_SUPPLIER_DISTRICT || "").trim(), city: (e.LOGO_SUPPLIER_CITY || "").trim() };
+  const miss = Object.entries({ LOGO_SUPPLIER_ID: sup.id, LOGO_SUPPLIER_NAME: sup.name, LOGO_SUPPLIER_STREET: sup.street, LOGO_SUPPLIER_DISTRICT: sup.district, LOGO_SUPPLIER_CITY: sup.city }).filter(([, v]) => !v).map(([k]) => k);
+  if (miss.length) throw new Error("Eksik ortam değişkenleri: " + miss.join(", "));
+  return sup;
+}
+
+function buildEArchiveXml({ id, uuid, order, vatRate, sup, now }) {
+  const total = Number(order.amount) || 0;
+  if (total <= 0) throw new Error("Sipariş tutarı 0.");
+  const net = Math.round((total / (1 + vatRate / 100)) * 100) / 100;
+  const vatAmt = Math.round((total - net) * 100) / 100;
+  const date = now.toISOString().slice(0, 10), time = now.toISOString().slice(11, 19);
+  const x = xmlEsc, c = (n) => `currencyID="TRY">${money2(n)}`;
+  const cust = String(order.customer || "Müşteri").trim().replace(/\s+/g, " ");
+  const parts = cust.split(" "), family = parts.length > 1 ? parts.pop() : "-", first = parts.join(" ") || "-";
+  const tckn = /^\d{11}$/.test(String(order.tckn || "")) ? order.tckn : "11111111111";
+  const city = String(order.city || "").trim() || "Merkez", district = String(order.district || "").trim() || city;
+  const supIsTckn = /^\d{11}$/.test(sup.id);
+  const supParts = sup.name.split(" "), supFamily = supParts.length > 1 ? supParts.pop() : "-", supFirst = supParts.join(" ") || sup.name;
+  const supAddr = `<cac:PostalAddress><cbc:StreetName>${x(sup.street)}</cbc:StreetName><cbc:CitySubdivisionName>${x(sup.district)}</cbc:CitySubdivisionName><cbc:CityName>${x(sup.city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress>`;
+  const supParty = `<cac:Party><cbc:WebsiteURI/><cac:PartyIdentification><cbc:ID schemeID="${supIsTckn ? "TCKN" : "VKN"}">${x(sup.id)}</cbc:ID></cac:PartyIdentification>${supIsTckn ? "" : `<cac:PartyName><cbc:Name>${x(sup.name)}</cbc:Name></cac:PartyName>`}${supAddr}${sup.taxOffice ? `<cac:PartyTaxScheme><cac:TaxScheme><cbc:Name>${x(sup.taxOffice)}</cbc:Name></cac:TaxScheme></cac:PartyTaxScheme>` : ""}${supIsTckn ? `<cac:Person><cbc:FirstName>${x(supFirst)}</cbc:FirstName><cbc:FamilyName>${x(supFamily)}</cbc:FamilyName></cac:Person>` : ""}</cac:Party>`;
+  const taxSub = `<cac:TaxSubtotal><cbc:TaxableAmount ${c(net)}</cbc:TaxableAmount><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount><cbc:Percent>${vatRate}</cbc:Percent><cac:TaxCategory><cac:TaxScheme><cbc:Name>KDV</cbc:Name><cbc:TaxTypeCode>0015</cbc:TaxTypeCode></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal>`;
+  const platName = ({ hb: "Hepsiburada", ty: "Trendyol", n11: "N11", cs: "Çiçeksepeti", koctas: "Koçtaş", store: "Mağaza" })[order.platform] || order.platform;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent/></ext:UBLExtension></ext:UBLExtensions>
+<cbc:UBLVersionID>2.1</cbc:UBLVersionID><cbc:CustomizationID>TR1.2</cbc:CustomizationID><cbc:ProfileID>EARSIVFATURA</cbc:ProfileID>
+<cbc:ID>${x(id)}</cbc:ID><cbc:CopyIndicator>false</cbc:CopyIndicator><cbc:UUID>${uuid}</cbc:UUID>
+<cbc:IssueDate>${date}</cbc:IssueDate><cbc:IssueTime>${time}</cbc:IssueTime><cbc:InvoiceTypeCode>SATIS</cbc:InvoiceTypeCode>
+<cbc:Note>${x(platName)} siparişi: ${x(order.orderNumber)}</cbc:Note>
+<cbc:DocumentCurrencyCode>TRY</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>1</cbc:LineCountNumeric>
+<cac:AdditionalDocumentReference><cbc:ID>ELEKTRONIK</cbc:ID><cbc:IssueDate>${date}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode></cac:AdditionalDocumentReference>
+<cac:Signature><cbc:ID schemeID="VKN_TCKN">${x(sup.id)}</cbc:ID><cac:SignatoryParty><cac:PartyIdentification><cbc:ID schemeID="${supIsTckn ? "TCKN" : "VKN"}">${x(sup.id)}</cbc:ID></cac:PartyIdentification>${supAddr}</cac:SignatoryParty><cac:DigitalSignatureAttachment><cac:ExternalReference><cbc:URI>#Signature</cbc:URI></cac:ExternalReference></cac:DigitalSignatureAttachment></cac:Signature>
+<cac:AccountingSupplierParty>${supParty}</cac:AccountingSupplierParty>
+<cac:AccountingCustomerParty><cac:Party><cac:PartyIdentification><cbc:ID schemeID="TCKN">${tckn}</cbc:ID></cac:PartyIdentification><cac:PostalAddress><cbc:CitySubdivisionName>${x(district)}</cbc:CitySubdivisionName><cbc:CityName>${x(city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress><cac:Person><cbc:FirstName>${x(first)}</cbc:FirstName><cbc:FamilyName>${x(family)}</cbc:FamilyName></cac:Person></cac:Party></cac:AccountingCustomerParty>
+<cac:TaxTotal><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount>${taxSub}</cac:TaxTotal>
+<cac:LegalMonetaryTotal><cbc:LineExtensionAmount ${c(net)}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount ${c(net)}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount ${c(total)}</cbc:TaxInclusiveAmount><cbc:PayableAmount ${c(total)}</cbc:PayableAmount></cac:LegalMonetaryTotal>
+<cac:InvoiceLine><cbc:ID>1</cbc:ID><cbc:InvoicedQuantity unitCode="C62">1</cbc:InvoicedQuantity><cbc:LineExtensionAmount ${c(net)}</cbc:LineExtensionAmount><cac:TaxTotal><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount>${taxSub}</cac:TaxTotal><cac:Item><cbc:Name>Satış bedeli (${x(platName)} ${x(order.orderNumber)})</cbc:Name></cac:Item><cac:Price><cbc:PriceAmount ${c(net)}</cbc:PriceAmount></cac:Price></cac:InvoiceLine>
+</Invoice>`;
+}
+
+let logoCounters = loadJSON("logo-counters.json", {}); // { "ABC2026": sonKullanılanNo }
+function logoDocType() { return process.env.LOGO_DOCTYPE || "EARCHIVE"; }
+
+async function logoNextNumber(sid, year) {
+  const prefix = (process.env.LOGO_PREFIX || "").trim().toUpperCase();
+  if (!/^[A-Z0-9]{3}$/.test(prefix)) throw new Error("LOGO_PREFIX (3 harfli fatura ön eki) ortam değişkeni eksik/hatalı.");
+  const key = prefix + year;
+  let remote = 0;
+  try {
+    const r = await logoSoap("GetPrefixLastNumberList", `<tem:GetPrefixLastNumberList><tem:sessionID>${sid}</tem:sessionID><tem:paramList><arr:string>DOCUMENTTYPE=${logoDocType()}</arr:string><arr:string>PREFIXYEAR=${year}</arr:string></tem:paramList></tem:GetPrefixLastNumberList>`);
+    const items = r.text.match(/<(?:\w+:)?PrefixLastNumber>[\s\S]*?<\/(?:\w+:)?PrefixLastNumber>/g) || [];
+    for (const it of items) {
+      if ((it.match(/<(?:\w+:)?InvoicePrefix>([^<]*)</) || [])[1] === prefix) remote = Math.max(remote, Number((it.match(/<(?:\w+:)?Counter>(\d+)</) || [])[1]) || 0);
+    }
+  } catch (_) {}
+  return { prefix, key, last: Math.max(remote, logoCounters[key] || 0) };
+}
+
+async function logoSendInvoice(sid, order, vatRate, sup, num) {
+  const now = new Date();
+  const uuid = crypto.randomUUID();
+  const next = num.last + 1;
+  const id = `${num.prefix}${now.getFullYear()}${String(next).padStart(9, "0")}`;
+  const xml = buildEArchiveXml({ id, uuid, order, vatRate, sup, now });
+  const zip = zipSingle(uuid + ".xml", Buffer.from(xml, "utf8"));
+  const hash = crypto.createHash("md5").update(zip).digest("hex").toUpperCase();
+  const body = `<tem:SendDocument><tem:sessionID>${sid}</tem:sessionID><tem:paramList><arr:string>DOCUMENTTYPE=${logoDocType()}</arr:string><arr:string>SIGNED=0</arr:string><arr:string>UseDefaultXSLT=1</arr:string></tem:paramList><tem:document><efat:binaryData><efat:Value>${zip.toString("base64")}</efat:Value><efat:contentType>base64</efat:contentType></efat:binaryData><efat:currentDate>${now.toISOString().slice(0, 10)}</efat:currentDate><efat:fileName>${uuid}.zip</efat:fileName><efat:hash>${hash}</efat:hash></tem:document></tem:SendDocument>`;
+  const r = await logoSoap("SendDocument", body);
+  const code = Number((r.text.match(/<(?:\w+:)?resultCode>(-?\d+)</) || [])[1]);
+  const msg = (r.text.match(/<(?:\w+:)?resultMsg>([^<]*)</) || [])[1] || (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1] || `HTTP ${r.status}`;
+  if (code !== 1) throw new Error(`Logo: ${msg}`);
+  logoCounters[num.key] = next; num.last = next;
+  saveJSON("logo-counters.json", logoCounters);
+  return { invoiceNo: id, uuid };
+}
+
+async function logoStatus(sid, uuid) {
+  const r = await logoSoap("GetDocumentStatus", `<tem:GetDocumentStatus><tem:sessionID>${sid}</tem:sessionID><tem:uuid>${uuid}</tem:uuid><tem:paramList><arr:string>DOCUMENTTYPE=${logoDocType()}</arr:string></tem:paramList></tem:GetDocumentStatus>`);
+  const pick = (n) => (r.text.match(new RegExp(`<(?:\\w+:)?${n}>([^<]*)<`, "i")) || [])[1];
+  return { status: Number(pick("Status")), code: Number(pick("Code")), description: pick("description") || "" };
+}
+
+// Logo üzerinden fatura kes (e-Arşiv, sipariş toplamı üzerinden, tek satır)
 app.post("/api/invoices/issue", requireAuth, async (req, res) => {
-  const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys.slice(0, 200) : [];
+  const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys.slice(0, 100) : [];
   const vat = Number(req.body && req.body.vat);
   const vatRate = vat >= 0 && vat <= 100 ? vat : 20;
-  if (!process.env.LOGO_API_KEY) return res.status(400).json({ ok: false, error: "LOGO_API_KEY ortam değişkeni tanımlı değil." });
-  const byKey = new Map((cache.orders || []).map((o) => [orderKeyOf(o), o]));
-  const results = [];
-  for (const k of keys) {
-    const o = byKey.get(k);
-    if (!o) { results.push({ key: k, ok: false, error: "Sipariş bulunamadı." }); continue; }
-    if (invoicedOrders[k]) { results.push({ key: k, ok: false, error: "Zaten faturalandı." }); continue; }
-    try {
-      const r = await issueInvoiceViaLogo(o, vatRate);
-      invoicedOrders[k] = { at: Date.now(), by: "logo", no: (r && r.invoiceNo) || "", vat: vatRate };
-      results.push({ key: k, ok: true, invoiceNo: (r && r.invoiceNo) || "" });
-    } catch (e) {
-      results.push({ key: k, ok: false, error: e.message });
+  let sid;
+  try {
+    const sup = logoSupplier();
+    sid = await logoLogin();
+    const byKey = new Map((cache.orders || []).map((o) => [orderKeyOf(o), o]));
+    const num = await logoNextNumber(sid, new Date().getFullYear());
+    const results = [];
+    for (const k of keys) {
+      const o = byKey.get(k);
+      if (!o) { results.push({ key: k, ok: false, error: "Sipariş bulunamadı." }); continue; }
+      if (invoicedOrders[k]) { results.push({ key: k, ok: false, error: "Zaten faturalandı." }); continue; }
+      try {
+        const r = await logoSendInvoice(sid, o, vatRate, sup, num);
+        invoicedOrders[k] = { at: Date.now(), by: "logo", no: r.invoiceNo, uuid: r.uuid, vat: vatRate, demo: /pb-demo/.test(logoUrl()) || undefined };
+        results.push({ key: k, ok: true, invoiceNo: r.invoiceNo });
+      } catch (e) {
+        results.push({ key: k, ok: false, error: e.message });
+      }
     }
+    saveJSON("invoices.json", invoicedOrders);
+    res.json({ ok: results.every((r) => r.ok), results, invoices: invoicedOrders });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  } finally {
+    if (sid) await logoLogout(sid);
   }
-  saveJSON("invoices.json", invoicedOrders);
-  res.json({ ok: results.every((r) => r.ok), results, invoices: invoicedOrders });
+});
+
+// Gönderilen faturaların GİB durumunu güncelle
+app.post("/api/invoices/status", requireAuth, async (req, res) => {
+  let sid;
+  try {
+    sid = await logoLogin();
+    for (const [k, v] of Object.entries(invoicedOrders)) {
+      if (v.by !== "logo" || !v.uuid || v.status === 2 || v.status === -1) continue;
+      try { Object.assign(v, await logoStatus(sid, v.uuid)); } catch (_) {}
+    }
+    saveJSON("invoices.json", invoicedOrders);
+    res.json({ ok: true, invoices: invoicedOrders });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  } finally {
+    if (sid) await logoLogout(sid);
+  }
 });
 
 /* ------------------------------------------------------------------
