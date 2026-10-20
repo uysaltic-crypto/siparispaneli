@@ -2158,18 +2158,11 @@ function logoSupplier() {
 }
 
 // Gönderim şekli (ELEKTRONIK/KAGIT) alanı için olası yazım biçimleri. e-Logo hangisini kabul ediyorsa o hatırlanır.
-const SEND_VARIANTS = (() => {
-  // Standart UBL-TR e-Arşiv bloğu: ID=1, DocumentTypeCode=SendingType, DocumentType=ELEKTRONIK|KAGIT
-  const shapes = [
-    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
-    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>${t}</cbc:DocumentTypeCode><cbc:DocumentType>SendingType</cbc:DocumentType>`,
-    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentType>${t}</cbc:DocumentType>`,
-    (id, d, t) => `<cbc:ID>${id}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode>`,
-  ];
-  const out = [];
-  for (const idMode of ["1", "T"]) for (const sh of shapes) out.push((d, t) => sh(idMode === "1" ? "1" : t, d, t));
-  return out;
-})();
+// e-Logo'nun kendi ürettiği e-Arşiv faturasındaki biçim: ID=gonderimSekli, DocumentType=ELEKTRONIK|KAGIT
+const SEND_VARIANTS = [
+  (d, t) => `<cbc:ID>gonderimSekli</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentType>${t}</cbc:DocumentType>`,
+  (d, t) => `<cbc:ID>1</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
+];
 let sendVariantOk = Number(process.env.LOGO_SEND_VARIANT) || 0; // çalışan biçimin indeksi
 function buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant = 0 }) {
   const total = Number(order.amount) || 0;
@@ -2199,6 +2192,7 @@ function buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant = 0 }) {
 <cbc:Note>${x(platName)} siparişi: ${x(order.orderNumber)}</cbc:Note>
 <cbc:DocumentCurrencyCode>TRY</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>1</cbc:LineCountNumeric>
 <cac:AdditionalDocumentReference>${SEND_VARIANTS[variant % SEND_VARIANTS.length](date, "ELEKTRONIK")}</cac:AdditionalDocumentReference>
+<cac:AdditionalDocumentReference><cbc:ID>duzenlemeTarihi</cbc:ID><cbc:IssueDate>${date}</cbc:IssueDate><cbc:DocumentType>${time}</cbc:DocumentType></cac:AdditionalDocumentReference>
 <cac:Signature><cbc:ID schemeID="VKN_TCKN">${x(sup.id)}</cbc:ID><cac:SignatoryParty><cac:PartyIdentification><cbc:ID schemeID="${supIsTckn ? "TCKN" : "VKN"}">${x(sup.id)}</cbc:ID></cac:PartyIdentification>${supAddr}</cac:SignatoryParty><cac:DigitalSignatureAttachment><cac:ExternalReference><cbc:URI>#Signature</cbc:URI></cac:ExternalReference></cac:DigitalSignatureAttachment></cac:Signature>
 <cac:AccountingSupplierParty>${supParty}</cac:AccountingSupplierParty>
 <cac:AccountingCustomerParty><cac:Party><cac:PartyIdentification><cbc:ID schemeID="TCKN">${tckn}</cbc:ID></cac:PartyIdentification><cac:PostalAddress><cbc:CitySubdivisionName>${x(district)}</cbc:CitySubdivisionName><cbc:CityName>${x(city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress><cac:Person><cbc:FirstName>${x(first)}</cbc:FirstName><cbc:FamilyName>${x(family)}</cbc:FamilyName></cac:Person></cac:Party></cac:AccountingCustomerParty>
@@ -2249,6 +2243,7 @@ async function logoSendInvoice(sid, order, vatRate, sup, num) {
       return { invoiceNo: id, uuid };
     }
     lastErr = new Error(`Logo: ${msg}`);
+    if (process.env.LOGO_DEBUG === "1" && k === 0) console.log("[logo][debug] Gönderilen XML (biçim #" + variant + "):\n" + xml);
     console.log(`[logo] SendDocument reddedildi (biçim #${variant}): ${msg}`);
     if (!/g[öo]nderim\s*[şs]ekli/i.test(msg)) throw lastErr; // başka bir hata ise yeniden deneme
   }
