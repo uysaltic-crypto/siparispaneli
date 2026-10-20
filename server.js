@@ -2157,7 +2157,16 @@ function logoSupplier() {
   return sup;
 }
 
-function buildEArchiveXml({ id, uuid, order, vatRate, sup, now }) {
+// Gönderim şekli (ELEKTRONIK/KAGIT) alanı için olası yazım biçimleri. e-Logo hangisini kabul ediyorsa o hatırlanır.
+const SEND_VARIANTS = [
+  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
+  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SEND_TYPE</cbc:DocumentTypeCode><cbc:DocumentType>${t}</cbc:DocumentType>`,
+  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>${t}</cbc:DocumentTypeCode><cbc:DocumentType>SendingType</cbc:DocumentType>`,
+  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentType>SendingType</cbc:DocumentType>`,
+  (d, t) => `<cbc:ID>${t}</cbc:ID><cbc:IssueDate>${d}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode>`,
+];
+let sendVariantOk = Number(process.env.LOGO_SEND_VARIANT) || 0; // çalışan biçimin indeksi
+function buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant = 0 }) {
   const total = Number(order.amount) || 0;
   if (total <= 0) throw new Error("Sipariş tutarı 0.");
   const net = Math.round((total / (1 + vatRate / 100)) * 100) / 100;
@@ -2184,7 +2193,7 @@ function buildEArchiveXml({ id, uuid, order, vatRate, sup, now }) {
 <cbc:IssueDate>${date}</cbc:IssueDate><cbc:IssueTime>${time}</cbc:IssueTime><cbc:InvoiceTypeCode>SATIS</cbc:InvoiceTypeCode>
 <cbc:Note>${x(platName)} siparişi: ${x(order.orderNumber)}</cbc:Note>
 <cbc:DocumentCurrencyCode>TRY</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>1</cbc:LineCountNumeric>
-<cac:AdditionalDocumentReference><cbc:ID>ELEKTRONIK</cbc:ID><cbc:IssueDate>${date}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>SendingType</cbc:DocumentType></cac:AdditionalDocumentReference>
+<cac:AdditionalDocumentReference>${SEND_VARIANTS[variant % SEND_VARIANTS.length](date, "ELEKTRONIK")}</cac:AdditionalDocumentReference>
 <cac:Signature><cbc:ID schemeID="VKN_TCKN">${x(sup.id)}</cbc:ID><cac:SignatoryParty><cac:PartyIdentification><cbc:ID schemeID="${supIsTckn ? "TCKN" : "VKN"}">${x(sup.id)}</cbc:ID></cac:PartyIdentification>${supAddr}</cac:SignatoryParty><cac:DigitalSignatureAttachment><cac:ExternalReference><cbc:URI>#Signature</cbc:URI></cac:ExternalReference></cac:DigitalSignatureAttachment></cac:Signature>
 <cac:AccountingSupplierParty>${supParty}</cac:AccountingSupplierParty>
 <cac:AccountingCustomerParty><cac:Party><cac:PartyIdentification><cbc:ID schemeID="TCKN">${tckn}</cbc:ID></cac:PartyIdentification><cac:PostalAddress><cbc:CitySubdivisionName>${x(district)}</cbc:CitySubdivisionName><cbc:CityName>${x(city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress><cac:Person><cbc:FirstName>${x(first)}</cbc:FirstName><cbc:FamilyName>${x(family)}</cbc:FamilyName></cac:Person></cac:Party></cac:AccountingCustomerParty>
@@ -2214,20 +2223,31 @@ async function logoNextNumber(sid, year) {
 
 async function logoSendInvoice(sid, order, vatRate, sup, num) {
   const now = new Date();
-  const uuid = crypto.randomUUID();
   const next = num.last + 1;
   const id = `${num.prefix}${now.getFullYear()}${String(next).padStart(9, "0")}`;
-  const xml = buildEArchiveXml({ id, uuid, order, vatRate, sup, now });
-  const zip = zipSingle(uuid + ".xml", Buffer.from(xml, "utf8"));
-  const hash = crypto.createHash("md5").update(zip).digest("hex").toUpperCase();
-  const body = `<tem:SendDocument><tem:sessionID>${sid}</tem:sessionID><tem:paramList><arr:string>DOCUMENTTYPE=${logoDocType()}</arr:string><arr:string>SIGNED=0</arr:string><arr:string>UseDefaultXSLT=1</arr:string></tem:paramList><tem:document><efat:binaryData><efat:Value>${zip.toString("base64")}</efat:Value><efat:contentType>base64</efat:contentType></efat:binaryData><efat:currentDate>${now.toISOString().slice(0, 10)}</efat:currentDate><efat:fileName>${uuid}.zip</efat:fileName><efat:hash>${hash}</efat:hash></tem:document></tem:SendDocument>`;
-  const r = await logoSoap("SendDocument", body);
-  const code = Number((r.text.match(/<(?:\w+:)?resultCode>(-?\d+)</) || [])[1]);
-  const msg = (r.text.match(/<(?:\w+:)?resultMsg>([^<]*)</) || [])[1] || (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1] || `HTTP ${r.status}`;
-  if (code !== 1) throw new Error(`Logo: ${msg}`);
-  logoCounters[num.key] = next; num.last = next;
-  saveJSON("logo-counters.json", logoCounters);
-  return { invoiceNo: id, uuid };
+  let lastErr;
+  for (let k = 0; k < SEND_VARIANTS.length; k++) {
+    const variant = (sendVariantOk + k) % SEND_VARIANTS.length;
+    const uuid = crypto.randomUUID();
+    const xml = buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant });
+    const zip = zipSingle(uuid + ".xml", Buffer.from(xml, "utf8"));
+    const hash = crypto.createHash("md5").update(zip).digest("hex").toUpperCase();
+    const body = `<tem:SendDocument><tem:sessionID>${sid}</tem:sessionID><tem:paramList><arr:string>DOCUMENTTYPE=${logoDocType()}</arr:string><arr:string>SIGNED=0</arr:string><arr:string>UseDefaultXSLT=1</arr:string></tem:paramList><tem:document><efat:binaryData><efat:Value>${zip.toString("base64")}</efat:Value><efat:contentType>base64</efat:contentType></efat:binaryData><efat:currentDate>${now.toISOString().slice(0, 10)}</efat:currentDate><efat:fileName>${uuid}.zip</efat:fileName><efat:hash>${hash}</efat:hash></tem:document></tem:SendDocument>`;
+    const r = await logoSoap("SendDocument", body);
+    const code = Number((r.text.match(/<(?:\w+:)?resultCode>(-?\d+)</) || [])[1]);
+    const msg = (r.text.match(/<(?:\w+:)?resultMsg>([^<]*)</) || [])[1] || (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1] || `HTTP ${r.status}`;
+    if (code === 1) {
+      if (variant !== sendVariantOk) console.log(`[logo] Gönderim şekli biçimi #${variant} kabul edildi (LOGO_SEND_VARIANT=${variant} olarak ayarlanabilir)`);
+      sendVariantOk = variant;
+      logoCounters[num.key] = next; num.last = next;
+      saveJSON("logo-counters.json", logoCounters);
+      return { invoiceNo: id, uuid };
+    }
+    lastErr = new Error(`Logo: ${msg}`);
+    console.log(`[logo] SendDocument reddedildi (biçim #${variant}): ${msg}`);
+    if (!/g[öo]nderim\s*[şs]ekli/i.test(msg)) throw lastErr; // başka bir hata ise yeniden deneme
+  }
+  throw lastErr;
 }
 
 async function logoStatus(sid, uuid) {
