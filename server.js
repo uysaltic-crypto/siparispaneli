@@ -2235,13 +2235,22 @@ async function logoNextNumber(sid, year) {
       if ((it.match(/<(?:\w+:)?InvoicePrefix>([^<]*)</) || [])[1] === prefix) remote = Math.max(remote, Number((it.match(/<(?:\w+:)?Counter>(\d+)</) || [])[1]) || 0);
     }
   } catch (_) {}
-  return { prefix, key, last: Math.max(remote, logoCounters[key] || 0) };
+  let local = Number(logoCounters[key]) || 0;
+  if (local > 999999999) { // eski bir hatayla yıl da sayaca karışmış olabilir
+    local = local % 1000000000;
+    logoCounters[key] = local;
+    saveJSON("logo-counters.json", logoCounters);
+    scheduleInvoicesDriveSave();
+  }
+  remote = remote % 1000000000;
+  return { prefix, key, last: Math.max(remote, local) };
 }
 
 async function logoSendInvoiceOnce(sid, order, vatRate, sup, num) {
   const now = new Date();
   const next = num.last + 1;
   const id = `${num.prefix}${now.getFullYear()}${String(next).padStart(9, "0")}`;
+  if (next > 999999999) throw new Error("Fatura sıra numarası sınırı aşıldı: " + next);
   let lastErr;
   for (let k = 0; k < SEND_VARIANTS.length; k++) {
     const variant = (sendVariantOk + k) % SEND_VARIANTS.length;
@@ -2281,7 +2290,7 @@ async function logoSendInvoice(sid, order, vatRate, sup, num) {
       return await logoSendInvoiceOnce(sid, order, vatRate, sup, num);
     } catch (e) {
       if (!e.dup) throw e;
-      const used = Number((e.dup.no.match(/(\d+)$/) || [])[1]) || 0;
+      const used = Number(String(e.dup.no).slice(-9)) || 0; // son 9 hane = sıra no (öncesi yıl)
       num.last = Math.max(num.last + 1, used);
       logoCounters[num.key] = Math.max(logoCounters[num.key] || 0, num.last);
       saveJSON("logo-counters.json", logoCounters);
