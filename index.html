@@ -219,6 +219,8 @@
         <button class="ghost" onclick="invMark(true)">Faturalandı işaretle</button>
         <button class="ghost" onclick="invMark(false)">İşareti kaldır</button>
         <button class="ghost" onclick="invCsv()">CSV indir (seçilen / listelenen)</button>
+        <button class="ghost" onclick="invStatus()">Durumları güncelle</button>
+        <button class="ghost" onclick="invLogoTest()">Logo bağlantı testi</button>
       </div>
       <div id="invGroups"></div>
       <div id="invEmpty" class="empty" style="display:none;">Bu filtrede sipariş yok.</div>
@@ -657,7 +659,7 @@ function renderInvoices() {
           <td>${escHtml(String(o.orderNumber))}</td><td>${escHtml(o.customer || '')}${o.city ? ' <span class="muted">/ ' + escHtml(o.city) + '</span>' : ''}</td>
           <td style="text-align:right;">${money(o.amount || 0)} ₺</td>
           <td class="muted">${o.date ? new Date(o.date).toLocaleDateString('tr-TR') : ''}</td>
-          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>` : '<span class="muted">—</span>'}</td></tr>`;
+          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>${inv.demo ? ' <span class="badge">TEST</span>' : ''}${inv.code ? ' <span class="muted" title="' + escAttr(inv.description || '') + '">GİB: ' + inv.code + '</span>' : ''}` : '<span class="muted">—</span>'}</td></tr>`;
       }).join('')}</tbody></table></div>`;
   }).join('');
   document.getElementById('invEmpty').style.display = list.length ? 'none' : 'block';
@@ -674,7 +676,7 @@ async function invMark(on) {
 async function invIssue() {
   const keys = [...invSel];
   if (!keys.length) { toast('Önce sipariş seçin.'); return; }
-  if (!confirm(keys.length + ' sipariş için Logo üzerinden fatura kesilsin mi?')) return;
+  if (!confirm(keys.length + ' sipariş için Logo üzerinden e-Arşiv faturası kesilsin mi? (Canlı adres ayarlıysa geri alınamaz.)')) return;
   const r = await fetch('/api/invoices/issue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys, vat: invVatRate() }) });
   const d = await r.json().catch(() => ({}));
   if (d.invoices) invoicedMap = d.invoices;
@@ -682,6 +684,18 @@ async function invIssue() {
   toast(!r.ok ? (d.error || 'Fatura kesilemedi.') : bad.length ? bad.length + ' siparişte hata: ' + bad[0].error : 'Faturalar kesildi.');
   if (r.ok && !bad.length) invSel.clear();
   renderInvoices();
+}
+async function invStatus() {
+  const r = await fetch('/api/invoices/status', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (d.invoices) invoicedMap = d.invoices;
+  toast(r.ok ? 'Durumlar güncellendi.' : (d.error || 'Durum alınamadı.'));
+  renderInvoices();
+}
+async function invLogoTest() {
+  const r = await fetch('/api/invoices/logo-test', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  toast(r.ok ? 'Logo bağlantısı başarılı (' + d.url + ')' : (d.error || 'Bağlantı kurulamadı.') + (d.url ? ' — ' + d.url : ''));
 }
 function invCsv() {
   const vat = invVatRate();
