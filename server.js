@@ -359,9 +359,26 @@ function normalizeHbPackage(pkg) {
     name: it.ProductName || it.productName || it.Name || "",
   }));
   const productSummary = lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ");
-  const total =
-    pkg.TotalPrice ?? pkg.totalPrice ?? pkg.Price ?? pkg.price ??
-    items.reduce((s, it) => s + Number(it.Price || it.price || 0) * Number(it.Quantity || it.quantity || 1), 0);
+  // Hepsiburada tutarları bazen { amount, currency } nesnesi olarak gelir; Number(nesne) = NaN → 0 olurdu.
+  const money = (v) => {
+    if (v == null) return 0;
+    if (typeof v === "object") return Number(v.amount ?? v.Amount ?? v.value ?? v.Value ?? 0) || 0;
+    return Number(String(v).replace(",", ".")) || 0;
+  };
+  let total = money(pkg.TotalPrice ?? pkg.totalPrice) || money(pkg.Price ?? pkg.price);
+  if (!total) {
+    total = items.reduce((s, it) => {
+      const qty = Number(it.Quantity || it.quantity || 1);
+      const line = money(it.TotalPrice ?? it.totalPrice);
+      if (line) return s + line;
+      const unit = money(it.UnitPrice ?? it.unitPrice) || money(it.Price ?? it.price) || money(it.LineItemPrice ?? it.lineItemPrice);
+      return s + unit * qty;
+    }, 0);
+  }
+  if (!total && !global.__hbPriceLogged) {
+    global.__hbPriceLogged = true;
+    console.log("[hb] Fiyat bulunamadı. Paket alanları:", Object.keys(pkg).join(","), "| Kalem alanları:", items[0] ? Object.keys(items[0]).join(",") : "(kalem yok)");
+  }
 
   return {
     platform: "hb",
@@ -2284,6 +2301,66 @@ app.post("/api/invoices/issue", requireAuth, async (req, res) => {
     res.json({ ok: results.every((r) => r.ok), results, invoices: invoicedOrders });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
+  } finally {
+    if (sid) await logoLogout(sid);
+  }
+});
+
+// ZIP içinden (merkezi dizin üzerinden) ilk eşleşen dosyayı çıkarır
+function unzipFirst(buf, nameRe) {
+  let e = buf.length - 22;
+  while (e >= 0 && buf.readUInt32LE(e) !== 0x06054b50) e--;
+  if (e < 0) throw new Error("ZIP çözülemedi.");
+  const n = buf.readUInt16LE(e + 10);
+  let p = buf.readUInt32LE(e + 16);
+  for (let i = 0; i < n && buf.readUInt32LE(p) === 0x02014b50; i++) {
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
+    const nl = buf.readUInt16LE(p + 28), el = buf.readUInt16LE(p + 30), cl = buf.readUInt16LE(p + 32);
+    const lho = buf.readUInt32LE(p + 42), name = buf.toString("utf8", p + 46, p + 46 + nl);
+    if (nameRe.test(name)) {
+      const ds = lho + 30 + buf.readUInt16LE(lho + 26) + buf.readUInt16LE(lho + 28);
+      const data = buf.subarray(ds, ds + csize);
+      return method === 0 ? data : zlib.inflateRawSync(data);
+    }
+    p += 46 + nl + el + cl;
+  }
+  throw new Error("ZIP içinde PDF bulunamadı.");
+}
+
+// Logo'dan faturanın PDF görüntüsünü al (e-Logo GetDocumentData → ZIP içinde PDF)
+async function logoGetPdf(sid, uuid) {
+  const dt = logoDocType();
+  const variants = [
+    `<tem:GetDocumentData><tem:sessionID>${sid}</tem:sessionID><tem:uuid>${uuid}</tem:uuid><tem:docType>${dt}</tem:docType><tem:dataType>PDF</tem:dataType></tem:GetDocumentData>`,
+    `<tem:GetDocumentData><tem:sessionID>${sid}</tem:sessionID><tem:uuid>${uuid}</tem:uuid><tem:paramList><arr:string>DOCUMENTTYPE=${dt}</arr:string><arr:string>DATATYPE=PDF</arr:string></tem:paramList></tem:GetDocumentData>`,
+  ];
+  let lastMsg = "";
+  for (const body of variants) {
+    const r = await logoSoap("GetDocumentData", body);
+    const b64 = (r.text.match(/<(?:\w+:)?Value[^>]*>([A-Za-z0-9+\/=\s]{100,})</) || [])[1];
+    if (b64) {
+      const raw = Buffer.from(b64.replace(/\s+/g, ""), "base64");
+      if (raw.subarray(0, 4).toString() === "%PDF") return raw;
+      if (raw[0] === 0x50 && raw[1] === 0x4b) return unzipFirst(raw, /\.pdf$/i);
+    }
+    lastMsg = (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1] || (r.text.match(/<(?:\w+:)?resultMsg>([^<]*)</) || [])[1] || `HTTP ${r.status}`;
+    console.log("[logo] GetDocumentData başarısız:", lastMsg);
+  }
+  throw new Error(lastMsg || "PDF alınamadı.");
+}
+
+app.get("/api/invoices/pdf", requireAuth, async (req, res) => {
+  const inv = invoicedOrders[String(req.query.key || "")];
+  if (!inv || inv.by !== "logo" || !inv.uuid) return res.status(404).type("text/plain; charset=utf-8").send("Bu sipariş için Logo faturası bulunamadı.");
+  let sid;
+  try {
+    sid = await logoLogin();
+    const pdf = await logoGetPdf(sid, inv.uuid);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${String(inv.no || inv.uuid).replace(/[^\w.-]/g, "_")}.pdf"`);
+    res.send(pdf);
+  } catch (e) {
+    res.status(502).type("text/plain; charset=utf-8").send("Fatura PDF'i alınamadı: " + e.message);
   } finally {
     if (sid) await logoLogout(sid);
   }
