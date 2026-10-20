@@ -2184,7 +2184,7 @@ function buildEArchiveXml({ id, uuid, order, vatRate, sup, now }) {
 <cbc:IssueDate>${date}</cbc:IssueDate><cbc:IssueTime>${time}</cbc:IssueTime><cbc:InvoiceTypeCode>SATIS</cbc:InvoiceTypeCode>
 <cbc:Note>${x(platName)} siparişi: ${x(order.orderNumber)}</cbc:Note>
 <cbc:DocumentCurrencyCode>TRY</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>1</cbc:LineCountNumeric>
-<cac:AdditionalDocumentReference><cbc:ID>ELEKTRONIK</cbc:ID><cbc:IssueDate>${date}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode></cac:AdditionalDocumentReference>
+<cac:AdditionalDocumentReference><cbc:ID>ELEKTRONIK</cbc:ID><cbc:IssueDate>${date}</cbc:IssueDate><cbc:DocumentTypeCode>SendingType</cbc:DocumentTypeCode><cbc:DocumentType>SendingType</cbc:DocumentType></cac:AdditionalDocumentReference>
 <cac:Signature><cbc:ID schemeID="VKN_TCKN">${x(sup.id)}</cbc:ID><cac:SignatoryParty><cac:PartyIdentification><cbc:ID schemeID="${supIsTckn ? "TCKN" : "VKN"}">${x(sup.id)}</cbc:ID></cac:PartyIdentification>${supAddr}</cac:SignatoryParty><cac:DigitalSignatureAttachment><cac:ExternalReference><cbc:URI>#Signature</cbc:URI></cac:ExternalReference></cac:DigitalSignatureAttachment></cac:Signature>
 <cac:AccountingSupplierParty>${supParty}</cac:AccountingSupplierParty>
 <cac:AccountingCustomerParty><cac:Party><cac:PartyIdentification><cbc:ID schemeID="TCKN">${tckn}</cbc:ID></cac:PartyIdentification><cac:PostalAddress><cbc:CitySubdivisionName>${x(district)}</cbc:CitySubdivisionName><cbc:CityName>${x(city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress><cac:Person><cbc:FirstName>${x(first)}</cbc:FirstName><cbc:FamilyName>${x(family)}</cbc:FamilyName></cac:Person></cac:Party></cac:AccountingCustomerParty>
