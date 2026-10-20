@@ -2140,6 +2140,7 @@ app.post("/api/invoices/mark", requireAuth, (req, res) => {
     else delete invoicedOrders[k];
   });
   saveJSON("invoices.json", invoicedOrders);
+    scheduleInvoicesDriveSave();
   res.json({ invoices: invoicedOrders });
 });
 
@@ -2237,7 +2238,7 @@ async function logoNextNumber(sid, year) {
   return { prefix, key, last: Math.max(remote, logoCounters[key] || 0) };
 }
 
-async function logoSendInvoice(sid, order, vatRate, sup, num) {
+async function logoSendInvoiceOnce(sid, order, vatRate, sup, num) {
   const now = new Date();
   const next = num.last + 1;
   const id = `${num.prefix}${now.getFullYear()}${String(next).padStart(9, "0")}`;
@@ -2257,14 +2258,42 @@ async function logoSendInvoice(sid, order, vatRate, sup, num) {
       sendVariantOk = variant;
       logoCounters[num.key] = next; num.last = next;
       saveJSON("logo-counters.json", logoCounters);
+      scheduleInvoicesDriveSave();
       return { invoiceNo: id, uuid };
     }
     lastErr = new Error(`Logo: ${msg}`);
     if (process.env.LOGO_DEBUG === "1" && k === 0) console.log("[logo][debug] Gönderilen XML (biçim #" + variant + "):\n" + xml);
     console.log(`[logo] SendDocument reddedildi (biçim #${variant}): ${msg}`);
+    const dup = msg.match(/Fatura No:\s*([A-Z0-9]+)\s*,.*?Unvan\s*:?\s*\S*\s*-\s*([^,]*?)\s*,\s*Yeni/i);
+    if (/tekrar kullan[ıi]lamaz/i.test(msg) && dup) { lastErr.dup = { no: dup[1], name: dup[2] }; throw lastErr; }
     if (!/g[öo]nderim\s*[şs]ekli/i.test(msg)) throw lastErr; // başka bir hata ise yeniden deneme
   }
   throw lastErr;
+}
+
+
+// Fatura numarası Logo'da başka bir faturada kullanılmışsa (ör. panel verisi sıfırlandığı için sayaç geride kaldıysa)
+// numarayı atlayıp bir sonrakini dener. Aynı müşteri adına kesilmiş fatura varsa tekrar kesmez.
+const normTr = (v) => String(v || "").toLocaleLowerCase("tr").replace(/\s+/g, " ").trim();
+async function logoSendInvoice(sid, order, vatRate, sup, num) {
+  for (let i = 0; i < 40; i++) {
+    try {
+      return await logoSendInvoiceOnce(sid, order, vatRate, sup, num);
+    } catch (e) {
+      if (!e.dup) throw e;
+      const used = Number((e.dup.no.match(/(\d+)$/) || [])[1]) || 0;
+      num.last = Math.max(num.last + 1, used);
+      logoCounters[num.key] = Math.max(logoCounters[num.key] || 0, num.last);
+      saveJSON("logo-counters.json", logoCounters);
+      scheduleInvoicesDriveSave();
+      if (normTr(e.dup.name) && normTr(e.dup.name) === normTr(order.customer)) {
+        const err = new Error(`Bu sipariş (${order.customer}) için Logo'da ${e.dup.no} numaralı fatura zaten var; tekrar kesmedim. Doğruysa "Faturalandı işaretle"ye bas.`);
+        err.already = e.dup.no;
+        throw err;
+      }
+    }
+  }
+  throw new Error("Fatura numarası çakışması çözülemedi; lütfen Logo'daki son fatura numarasını kontrol edin.");
 }
 
 async function logoStatus(sid, uuid) {
@@ -2298,6 +2327,7 @@ app.post("/api/invoices/issue", requireAuth, async (req, res) => {
       }
     }
     saveJSON("invoices.json", invoicedOrders);
+    scheduleInvoicesDriveSave();
     res.json({ ok: results.every((r) => r.ok), results, invoices: invoicedOrders });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
@@ -2376,6 +2406,7 @@ app.post("/api/invoices/status", requireAuth, async (req, res) => {
       try { Object.assign(v, await logoStatus(sid, v.uuid)); } catch (_) {}
     }
     saveJSON("invoices.json", invoicedOrders);
+    scheduleInvoicesDriveSave();
     res.json({ ok: true, invoices: invoicedOrders });
   } catch (e) {
     res.status(502).json({ ok: false, error: e.message });
@@ -4003,6 +4034,59 @@ async function autoRestorePrintedIfEmpty() {
   return false;
 }
 
+
+// Fatura kayıtları + fatura numarası sayacı da Render'da sıfırlanabilir (numara çakışması yaratır).
+// Yazdırılanlar gibi küçük bir dosya olarak Drive'a yazılır, açılışta yerel veri boşsa geri okunur.
+const INVOICES_DRIVE_FILE = "fatura-kayitlari.json";
+let invoicesDriveTimer = null;
+async function findInvoicesDriveFile(token) {
+  const q = encodeURIComponent(`name = '${INVOICES_DRIVE_FILE}' and '${GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false`);
+  const r = await axios.get(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
+  return (r.data.files || [])[0] || null;
+}
+async function saveInvoicesToDrive() {
+  if (!driveConfigured() || (!Object.keys(invoicedOrders).length && !Object.keys(logoCounters).length)) return;
+  const token = await getDriveAccessToken();
+  const content = JSON.stringify({ invoices: invoicedOrders, counters: logoCounters });
+  const found = await findInvoicesDriveFile(token);
+  if (found) {
+    await axios.patch(`https://www.googleapis.com/upload/drive/v3/files/${found.id}?uploadType=media`, content, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=UTF-8" }, timeout: 30000, maxBodyLength: Infinity,
+    });
+  } else {
+    const boundary = "faturakayit" + crypto.randomBytes(8).toString("hex");
+    const metadata = { name: INVOICES_DRIVE_FILE, parents: [GOOGLE_DRIVE_FOLDER_ID], mimeType: "application/json" };
+    const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${content}\r\n--${boundary}--`;
+    await axios.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", body, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` }, timeout: 30000,
+    });
+  }
+}
+function scheduleInvoicesDriveSave() {
+  if (invoicesDriveTimer || !driveConfigured()) return;
+  invoicesDriveTimer = setTimeout(() => {
+    invoicesDriveTimer = null;
+    saveInvoicesToDrive().catch((e) => console.error("Fatura kayıtları Drive'a yazılamadı:", e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
+  }, 5000);
+}
+async function autoRestoreInvoicesIfEmpty() {
+  if (Object.keys(invoicedOrders).length || Object.keys(logoCounters).length || !driveConfigured()) return false;
+  try {
+    const token = await getDriveAccessToken();
+    const found = await findInvoicesDriveFile(token);
+    if (!found) return false;
+    const r = await axios.get(`https://www.googleapis.com/drive/v3/files/${found.id}?alt=media`, { headers: { Authorization: `Bearer ${token}` }, timeout: 30000 });
+    const d = r.data;
+    if (d && typeof d === "object") {
+      if (d.invoices && typeof d.invoices === "object") { invoicedOrders = d.invoices; saveJSON("invoices.json", invoicedOrders); }
+      if (d.counters && typeof d.counters === "object") { logoCounters = d.counters; saveJSON("logo-counters.json", logoCounters); }
+      console.log(`Fatura kayıtları Drive'dan geri yüklendi: ${Object.keys(invoicedOrders).length} fatura.`);
+      return true;
+    }
+  } catch (e) { console.error("Fatura kayıtları geri yüklenemedi:", e.message); }
+  return false;
+}
+
 async function listBackupsFromDrive(token) {
   const t = token || (await getDriveAccessToken());
   const q = encodeURIComponent(`'${GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false`);
@@ -4443,6 +4527,8 @@ app.listen(PORT, () => {
     .catch((e) => console.error("Otomatik geri yükleme hatası:", e.message))
     .then(() => autoRestorePrintedIfEmpty())
     .catch((e) => console.error("Yazdırılanları geri yükleme hatası:", e.message))
+    .then(() => autoRestoreInvoicesIfEmpty())
+    .catch((e) => console.error("Fatura kayıtlarını geri yükleme hatası:", e.message))
     .then(() => refreshAll())
     .catch((e) => console.error("İlk veri çekme hatası:", e.message));
   setInterval(() => {
