@@ -659,7 +659,7 @@ function renderInvoices() {
           <td>${escHtml(String(o.orderNumber))}</td><td>${escHtml(o.customer || '')}${o.city ? ' <span class="muted">/ ' + escHtml(o.city) + '</span>' : ''}</td>
           <td style="text-align:right;">${money(o.amount || 0)} ₺</td>
           <td class="muted">${o.date ? new Date(o.date).toLocaleDateString('tr-TR') : ''}</td>
-          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>${inv.demo ? ' <span class="badge">TEST</span>' : ''}${inv.code ? ' <span class="muted" title="' + escAttr(inv.description || '') + '">GİB: ' + inv.code + '</span>' : ''}` : '<span class="muted">—</span>'}</td></tr>`;
+          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>${inv.demo ? ' <span class="badge">TEST</span>' : ''} ${(inv.by === 'logo' && inv.uuid) ? ' <a href="/api/invoices/pdf?key=' + escAttr(encodeURIComponent(k)) + '" target="_blank" rel="noopener" style="font-size:12px;">PDF indir</a>' : ''}${inv.code ? ' <span class="muted" title="' + escAttr(inv.description || '') + '">GİB: ' + inv.code + '</span>' : ''}` : '<span class="muted">—</span>'}</td></tr>`;
       }).join('')}</tbody></table></div>`;
   }).join('');
   document.getElementById('invEmpty').style.display = list.length ? 'none' : 'block';
