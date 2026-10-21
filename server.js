@@ -1928,9 +1928,159 @@ async function processNewOrdersAndSync(ordersByPlatform) {
 ------------------------------------------------------------------ */
 let cache = { fetchedAt: null, orders: [], errors: [], sync: { changedCount: 0, newOrders: 0 } };
 
+
+/* ------------------------------------------------------------------
+   Elle eski sipariş çekme (tarih aralığı)
+   Otomatik çekim sadece son 7 günü (Koçtaş 30) alır. Buradan çekilen eski siparişler
+   yalnızca listede/faturada görünür; STOK DÜŞÜLMEZ (anahtarları "işlenmiş" sayılır).
+------------------------------------------------------------------ */
+let manualOrders = loadJSON("manual-orders.json", {});
+(() => { // 120 günden eski kayıtları temizle
+  const cutoff = Date.now() - 120 * 86400000;
+  let changed = false;
+  for (const k of Object.keys(manualOrders)) if ((manualOrders[k].date || 0) < cutoff) { delete manualOrders[k]; changed = true; }
+  if (changed) saveJSON("manual-orders.json", manualOrders);
+})();
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchOrdersRange(pid, from, to) {
+  const DAY = 86400000;
+  const windows = (step) => { const w = []; for (let a = from; a < to; a += step) w.push([a, Math.min(a + step, to)]); return w; };
+  const out = [];
+  const errors = [];
+  const tryWin = async (label, fn) => { try { await fn(); } catch (err) { errors.push(`${label}: ${err.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : err.message}`); } };
+
+  if (pid === "ty") {
+    if (!tyConfigured()) throw new Error("Trendyol API bilgileri eksik.");
+    const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+    const host = TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com";
+    const url = `https://${host}/integration/order/sellers/${TY_SELLER_ID}/v2/orders`;
+    for (const [a, b] of windows(13 * DAY)) await tryWin("Trendyol", async () => {
+      for (let page = 0; page < 30; page++) {
+        const resp = await axios.get(url, {
+          auth: { username: TY_API_KEY, password: TY_API_SECRET },
+          params: { startDate: a, endDate: b, orderByField: "PackageLastModifiedDate", orderByDirection: "DESC", size: 200, page },
+          headers: { "User-Agent": `${TY_SELLER_ID} - SelfIntegration`, Accept: "application/json" }, timeout: 30000,
+        });
+        const c = resp.data?.content || [];
+        out.push(...c.map(normalizeTyPackage));
+        if (c.length < 200 || page + 1 >= Number(resp.data?.totalPages || 1)) break;
+        await sleepMs(300);
+      }
+    });
+  } else if (pid === "n11") {
+    if (!n11Configured()) throw new Error("N11 API bilgileri eksik.");
+    const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+    for (const [a, b] of windows(7 * DAY)) await tryWin("N11", async () => {
+      for (let page = 0; page < 30; page++) {
+        const resp = await axios.get("https://api.n11.com/rest/delivery/v1/shipmentPackages", {
+          headers: { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, Accept: "application/json" },
+          params: { startDate: a, endDate: b, page, size: 100, orderByDirection: "DESC", orderByField: true }, timeout: 30000,
+        });
+        const c = resp.data?.content || [];
+        out.push(...c.map(normalizeN11Package));
+        if (c.length < 100) break;
+        await sleepMs(300);
+      }
+    });
+  } else if (pid === "cs") {
+    if (!csConfigured()) throw new Error("Çiçeksepeti API bilgisi eksik.");
+    const url = `https://${csHost()}/api/v1/Order/GetOrders`;
+    let first = true;
+    for (const [a, b] of windows(7 * DAY)) await tryWin("Çiçeksepeti", async () => {
+      for (let page = 0; page < 30; page++) {
+        if (!first) await sleepMs(5300); // Çiçeksepeti: aynı uca 5 saniyede 1 istek
+        first = false;
+        const resp = await axios.post(url, { startDate: new Date(a).toISOString(), endDate: new Date(b).toISOString(), pageSize: 100, page }, { headers: csHeaders(), timeout: 30000 });
+        const c = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
+        const arr = Array.isArray(c) ? c : [];
+        out.push(...arr.map(normalizeCsPackage));
+        if (arr.length < 100) break;
+      }
+    });
+  } else if (pid === "koctas") {
+    if (!koctasConfigured()) throw new Error("Koçtaş API bilgisi eksik.");
+    const url = `https://${koctasHost()}/api/orders`;
+    await tryWin("Koçtaş", async () => {
+      let offset = 0, total = Infinity;
+      for (let page = 0; page < 30 && offset < total; page++) {
+        const resp = await axios.get(url, { headers: koctasHeaders(), params: { ...koctasShopParams(), start_date: new Date(from).toISOString(), end_date: new Date(to).toISOString(), max: 100, offset }, timeout: 30000 });
+        const batch = resp.data?.orders || [];
+        total = Number(resp.data?.total_count ?? batch.length + offset);
+        out.push(...batch.map(normalizeKoctasOrder));
+        if (batch.length < 100) break;
+        offset += 100;
+      }
+    });
+  } else if (pid === "hb") {
+    if (!hbConfigured()) throw new Error("Hepsiburada API bilgileri eksik.");
+    const { HB_MERCHANT_ID, HB_ENV } = process.env;
+    const hbAuth = hbAuthConfig();
+    const host = HB_ENV === "test" ? "oms-external-sit.hepsiburada.com" : "oms-external.hepsiburada.com";
+    // Bu uç yalnızca "son N saat" (timespan) kabul ediyor; aralığın başlangıcına kadar geri gidip sonra tarihe göre süzüyoruz.
+    const hours = Math.ceil((Date.now() - from) / 3600000);
+    await tryWin("Hepsiburada", async () => {
+      for (let page = 0; page < 60; page++) {
+        const resp = await axios.get(`https://${host}/packages/merchantid/${HB_MERCHANT_ID}`, {
+          auth: hbAuth.auth, params: { timespan: hours, limit: 50, offset: page * 50 },
+          headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" }, timeout: 30000,
+        });
+        const batch = Array.isArray(resp.data) ? resp.data : resp.data?.items || resp.data?.Items || resp.data?.packages || [];
+        out.push(...batch.map(normalizeHbPackage));
+        if (batch.length < 50) break;
+      }
+    });
+  } else {
+    throw new Error("Bilinmeyen platform: " + pid);
+  }
+
+  const seen = new Set();
+  const orders = out.filter((o) => {
+    const k = orderKeyOf(o);
+    if (seen.has(k) || (!o.packageId && !o.orderNumber)) return false;
+    seen.add(k);
+    return !o.date || (o.date >= from && o.date <= to + DAY);
+  });
+  return { orders, errors };
+}
+
+app.post("/api/orders/backfill", requireAuth, async (req, res) => {
+  try {
+    const pid = String(req.body?.platform || "");
+    const fromStr = String(req.body?.from || ""), toStr = String(req.body?.to || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fromStr) || !/^\d{4}-\d{2}-\d{2}$/.test(toStr)) return res.status(400).json({ ok: false, error: "Başlangıç ve bitiş tarihi gerekli." });
+    const from = new Date(fromStr + "T00:00:00+03:00").getTime();
+    const to = Math.min(new Date(toStr + "T23:59:59+03:00").getTime(), Date.now());
+    if (!(from < to)) return res.status(400).json({ ok: false, error: "Tarih aralığı geçersiz (başlangıç bitişten önce olmalı)." });
+    if (to - from > 62 * 86400000) return res.status(400).json({ ok: false, error: "En fazla 62 günlük aralık çekilebilir." });
+
+    const { orders, errors } = await fetchOrdersRange(pid, from, to);
+    let added = 0;
+    const have = new Set((cache.orders || []).map((o) => orderKeyOf(o)));
+    orders.forEach((o) => {
+      const k = orderKeyOf(o);
+      processedPackages.add(k); // stok düşme: bu siparişler stoğa dokunmasın
+      if (!manualOrders[k]) manualOrders[k] = o;
+      if (!have.has(k)) { cache.orders.push(o); added++; }
+    });
+    if (orders.length) {
+      persistProcessed();
+      saveJSON("manual-orders.json", manualOrders);
+      cache.orders.sort((a, b) => (b.date || 0) - (a.date || 0));
+    }
+    res.json({ ok: true, fetched: orders.length, added, errors });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 async function refreshAll() {
   const results = await Promise.all(PLATFORMS.map((p) => p.fetchOrders()));
-  const merged = [...results.flatMap((r) => r.orders), ...storeOrdersNormalized()].sort((a, b) => (b.date || 0) - (a.date || 0));
+  const freshOrders = results.flatMap((r) => r.orders);
+  const haveKeys = new Set(freshOrders.map((o) => orderKeyOf(o)));
+  const manualExtra = Object.values(manualOrders).filter((o) => !haveKeys.has(orderKeyOf(o)));
+  const merged = [...freshOrders, ...manualExtra, ...storeOrdersNormalized()].sort((a, b) => (b.date || 0) - (a.date || 0));
   const errors = results.map((r) => r.error).filter(Boolean);
 
   let sync = { changedCount: 0, newOrders: 0 };
