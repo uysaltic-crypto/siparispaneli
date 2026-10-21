@@ -2212,6 +2212,24 @@ app.get("/api/printed", requireAuth, (req, res) => {
   res.json(printedOrders);
 });
 
+
+// Tanı: yazdırıldı işaretleri Drive'a yazılıyor mu? (tarayıcıda /api/printed/status aç)
+app.get("/api/printed/status", requireAuth, async (req, res) => {
+  const out = { driveConfigured: driveConfigured(), localCount: Object.keys(printedOrders).length, ...printedDriveState };
+  try {
+    if (out.driveConfigured) {
+      const token = await getDriveAccessToken();
+      const found = await findPrintedDriveFile(token);
+      out.driveFile = !!found;
+      if (found) {
+        const r = await axios.get(`https://www.googleapis.com/drive/v3/files/${found.id}?alt=media`, { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 });
+        out.driveCount = r.data && typeof r.data === "object" ? Object.keys(r.data).length : null;
+      }
+    }
+  } catch (e) { out.driveError = e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message; }
+  res.json(out);
+});
+
 app.post("/api/printed", requireAuth, (req, res) => {
   const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys : [];
   const mark = !(req.body && req.body.printed === false);
@@ -4145,7 +4163,7 @@ async function findPrintedDriveFile(token) {
 }
 
 async function savePrintedToDrive() {
-  if (!driveConfigured() || !Object.keys(printedOrders).length) return;
+  if (!driveConfigured()) return;
   const token = await getDriveAccessToken();
   const content = JSON.stringify(printedOrders);
   const found = await findPrintedDriveFile(token);
@@ -4167,28 +4185,40 @@ async function savePrintedToDrive() {
   }
 }
 
-function schedulePrintedDriveSave() {
+const printedDriveState = { dirty: false, lastOk: null, lastError: null, retries: 0 };
+function schedulePrintedDriveSave(delay = 2000) {
+  printedDriveState.dirty = true;
   if (printedDriveTimer || !driveConfigured()) return;
-  printedDriveTimer = setTimeout(() => {
+  printedDriveTimer = setTimeout(async () => {
     printedDriveTimer = null;
-    savePrintedToDrive().catch((e) => console.error("Yazdırılanlar Drive'a yazılamadı:", e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
-  }, 20000);
+    try {
+      await savePrintedToDrive();
+      printedDriveState.dirty = false; printedDriveState.lastOk = new Date().toISOString(); printedDriveState.lastError = null; printedDriveState.retries = 0;
+      console.log(`Yazdırılanlar Drive'a yazıldı: ${Object.keys(printedOrders).length} kayıt.`);
+    } catch (e) {
+      const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message;
+      printedDriveState.lastError = msg;
+      console.error("Yazdırılanlar Drive'a yazılamadı:", msg);
+      if (++printedDriveState.retries <= 6) schedulePrintedDriveSave(15000); // 15 sn sonra yeniden dene
+    }
+  }, delay);
 }
 
 // Açılışta yerel liste boşsa Drive'dan geri yükle.
 async function autoRestorePrintedIfEmpty() {
-  if (Object.keys(printedOrders).length || !driveConfigured()) return false;
+  if (!driveConfigured()) return false;
   try {
     const token = await getDriveAccessToken();
     const found = await findPrintedDriveFile(token);
-    if (!found) return false;
+    if (!found) { console.log("Drive'da yazdırılanlar dosyası yok (henüz hiç kaydedilmemiş)."); return false; }
     const r = await axios.get(`https://www.googleapis.com/drive/v3/files/${found.id}?alt=media`, {
       headers: { Authorization: `Bearer ${token}` }, timeout: 30000,
     });
     if (r.data && typeof r.data === "object" && !Array.isArray(r.data)) {
-      printedOrders = r.data;
-      saveJSON("printed.json", printedOrders);
-      console.log(`Yazdırılan siparişler Drive'dan geri yüklendi: ${Object.keys(printedOrders).length} kayıt.`);
+      let added = 0;
+      for (const [k, v] of Object.entries(r.data)) if (!printedOrders[k]) { printedOrders[k] = v; added++; }
+      if (added) saveJSON("printed.json", printedOrders);
+      console.log(`Yazdırılan siparişler Drive'dan okundu: ${Object.keys(r.data).length} kayıt (${added} tanesi yerelde yoktu).`);
       return true;
     }
   } catch (e) {
@@ -4202,6 +4232,7 @@ async function autoRestorePrintedIfEmpty() {
 // Yazdırılanlar gibi küçük bir dosya olarak Drive'a yazılır, açılışta yerel veri boşsa geri okunur.
 const INVOICES_DRIVE_FILE = "fatura-kayitlari.json";
 let invoicesDriveTimer = null;
+let invoicesDriveDirty = false;
 async function findInvoicesDriveFile(token) {
   const q = encodeURIComponent(`name = '${INVOICES_DRIVE_FILE}' and '${GOOGLE_DRIVE_FOLDER_ID}' in parents and trashed = false`);
   const r = await axios.get(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
@@ -4226,10 +4257,11 @@ async function saveInvoicesToDrive() {
   }
 }
 function scheduleInvoicesDriveSave() {
+  invoicesDriveDirty = true;
   if (invoicesDriveTimer || !driveConfigured()) return;
   invoicesDriveTimer = setTimeout(() => {
     invoicesDriveTimer = null;
-    saveInvoicesToDrive().catch((e) => console.error("Fatura kayıtları Drive'a yazılamadı:", e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
+    saveInvoicesToDrive().then(() => { invoicesDriveDirty = false; }).catch((e) => console.error("Fatura kayıtları Drive'a yazılamadı:", e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message));
   }, 5000);
 }
 async function autoRestoreInvoicesIfEmpty() {
@@ -4678,6 +4710,18 @@ app.use((req, res, next) => {
   // cevaplanıyordu (her logo için!). Bunlar düz 404 olmalı.
   if (path.extname(req.path)) return res.status(404).end();
   res.sendFile(path.join(__dirname, "index.html"));
+});
+
+
+// Render durdururken/yeniden dağıtırken SIGTERM gönderir: bekleyen yazdırıldı/fatura kayıtlarını Drive'a hemen yaz.
+process.on("SIGTERM", async () => {
+  try {
+    console.log("SIGTERM alındı, bekleyen kayıtlar Drive'a yazılıyor...");
+    const jobs = [];
+    if (printedDriveState.dirty && driveConfigured()) jobs.push(savePrintedToDrive());
+    if (invoicesDriveDirty && driveConfigured()) jobs.push(saveInvoicesToDrive());
+    await Promise.race([Promise.allSettled(jobs), new Promise((r) => setTimeout(r, 12000))]);
+  } finally { process.exit(0); }
 });
 
 app.listen(PORT, () => {
