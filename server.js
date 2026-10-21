@@ -2369,9 +2369,12 @@ function unzipFirst(buf, nameRe) {
 // Logo'dan faturanın PDF görüntüsünü al (e-Logo GetDocumentData → ZIP içinde PDF)
 async function logoGetPdf(sid, uuid) {
   const dt = logoDocType();
+  const pl = (items) => `<tem:GetDocumentData><tem:sessionID>${sid}</tem:sessionID><tem:uuid>${uuid}</tem:uuid><tem:paramList>${items.map((x) => `<arr:string>${x}</arr:string>`).join("")}</tem:paramList></tem:GetDocumentData>`;
   const variants = [
+    pl([`DOCUMENTTYPE=${dt}`, "DATAFORMAT=PDF"]),
+    pl(["DATAFORMAT=PDF"]),
+    pl([`DOCUMENTTYPE=${dt}`, "DATAFORMAT=PDF", "COMPRESSED=0"]),
     `<tem:GetDocumentData><tem:sessionID>${sid}</tem:sessionID><tem:uuid>${uuid}</tem:uuid><tem:docType>${dt}</tem:docType><tem:dataType>PDF</tem:dataType></tem:GetDocumentData>`,
-    `<tem:GetDocumentData><tem:sessionID>${sid}</tem:sessionID><tem:uuid>${uuid}</tem:uuid><tem:paramList><arr:string>DOCUMENTTYPE=${dt}</arr:string><arr:string>DATATYPE=PDF</arr:string></tem:paramList></tem:GetDocumentData>`,
   ];
   let lastMsg = "";
   for (const body of variants) {
@@ -2382,8 +2385,9 @@ async function logoGetPdf(sid, uuid) {
       if (raw.subarray(0, 4).toString() === "%PDF") return raw;
       if (raw[0] === 0x50 && raw[1] === 0x4b) return unzipFirst(raw, /\.pdf$/i);
     }
-    lastMsg = (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1] || (r.text.match(/<(?:\w+:)?resultMsg>([^<]*)</) || [])[1] || `HTTP ${r.status}`;
-    console.log("[logo] GetDocumentData başarısız:", lastMsg);
+    const m = (r.text.match(/<faultstring[^>]*>([^<]+)</) || [])[1] || (r.text.match(/<(?:\w+:)?resultMsg>([^<]*)</) || [])[1] || `HTTP ${r.status}`;
+    if (!lastMsg) lastMsg = m;
+    console.log("[logo] GetDocumentData başarısız:", m);
   }
   throw new Error(lastMsg || "PDF alınamadı.");
 }
