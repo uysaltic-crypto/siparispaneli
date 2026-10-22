@@ -2497,7 +2497,7 @@ app.post("/api/invoices/issue", requireAuth, async (req, res) => {
       if (invoicedOrders[k]) { results.push({ key: k, ok: false, error: "Zaten faturalandı." }); continue; }
       try {
         const r = await logoSendInvoice(sid, o, vatRate, sup, num);
-        invoicedOrders[k] = { at: Date.now(), by: "logo", no: r.invoiceNo, uuid: r.uuid, vat: vatRate, demo: /pb-demo/.test(logoUrl()) || undefined };
+        invoicedOrders[k] = { at: Date.now(), by: "logo", no: r.invoiceNo, uuid: r.uuid, vat: vatRate, customer: o.customer || undefined, demo: /pb-demo/.test(logoUrl()) || undefined };
         results.push({ key: k, ok: true, invoiceNo: r.invoiceNo });
       } catch (e) {
         results.push({ key: k, ok: false, error: e.message });
@@ -2568,7 +2568,20 @@ app.get("/api/invoices/pdf", requireAuth, async (req, res) => {
     sid = await logoLogin();
     const pdf = await logoGetPdf(sid, inv.uuid);
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${String(inv.no || inv.uuid).replace(/[^\w.-]/g, "_")}.pdf"`);
+    // Dosya adı: müşteri adı (eski faturalarda kayıt yoksa siparişten bulunur), yoksa fatura no
+    const key = String(req.query.key || "");
+    const ord = (cache.orders || []).find((o) => orderKeyOf(o) === key);
+    const custName = String(inv.customer || (ord && ord.customer) || "").replace(/\s+/g, " ").trim();
+    const fallback = String(inv.no || inv.uuid).replace(/[^\w.-]/g, "_");
+    const niceName = custName
+      ? custName.replace(/[\\/:*?"<>|\x00-\x1f]/g, "").trim().slice(0, 80) || fallback
+      : fallback;
+    const asciiName = niceName
+      .replace(/ğ/g, "g").replace(/Ğ/g, "G").replace(/ü/g, "u").replace(/Ü/g, "U")
+      .replace(/ş/g, "s").replace(/Ş/g, "S").replace(/ı/g, "i").replace(/İ/g, "I")
+      .replace(/ö/g, "o").replace(/Ö/g, "O").replace(/ç/g, "c").replace(/Ç/g, "C")
+      .replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+    res.setHeader("Content-Disposition", `attachment; filename="${asciiName}.pdf"; filename*=UTF-8''${encodeURIComponent(niceName)}.pdf`);
     res.send(pdf);
   } catch (e) {
     res.status(502).type("text/plain; charset=utf-8").send("Fatura PDF'i alınamadı: " + e.message);
