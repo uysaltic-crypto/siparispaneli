@@ -2973,6 +2973,53 @@ app.post("/api/products/:code/rename", requireAuth, (req, res) => {
   res.json({ ok: true, product: { code: newCode, ...p } });
 });
 
+// Toplu ürün adı düzenleme: tüm ürün adlarında "bul → değiştir" (yalnızca panelde kayıtlı ad değişir).
+// Türkçe harfleri (İ/i, I/ı) doğru eşleştirmek için büyük/küçük harfe duyarsız modda "tr" yerel ayarı kullanılır.
+let lastBulkRename = loadJSON("rename-undo.json", null); // { at, changes:[{code,from,to}] }
+function bulkReplaceName(name, find, repl, caseSensitive) {
+  if (caseSensitive) return name.split(find).join(repl);
+  const lo = name.toLocaleLowerCase("tr"), fl = find.toLocaleLowerCase("tr");
+  if (!fl || lo.length !== name.length) return name.split(find).join(repl); // güvenli yedek
+  let out = "", i = 0, j;
+  while ((j = lo.indexOf(fl, i)) !== -1) { out += name.slice(i, j) + repl; i = j + fl.length; }
+  return out + name.slice(i);
+}
+app.post("/api/products/bulk-rename", requireAuth, (req, res) => {
+  const find = String(req.body?.find ?? "");
+  const repl = String(req.body?.replace ?? "");
+  const cs = req.body?.caseSensitive !== false;
+  if (!find.trim()) return res.status(400).json({ ok: false, error: "Aranacak metni yaz." });
+  const changes = [];
+  for (const code of Object.keys(products)) {
+    const from = String(products[code].name || "");
+    let to = bulkReplaceName(from, find, repl, cs);
+    if (to === from) continue;
+    to = to.replace(/\s{2,}/g, " ").trim();
+    if (!to || to === from) continue;
+    changes.push({ code, from, to });
+  }
+  if (!req.body?.apply) return res.json({ ok: true, count: changes.length, changes: changes.slice(0, 200) });
+  changes.forEach((c) => { products[c.code].name = c.to; });
+  if (changes.length) {
+    persistProducts();
+    lastBulkRename = { at: Date.now(), changes: changes.map((c) => ({ code: c.code, from: c.from, to: c.to })) };
+    saveJSON("rename-undo.json", lastBulkRename);
+  }
+  res.json({ ok: true, count: changes.length });
+});
+app.post("/api/products/bulk-rename/undo", requireAuth, (req, res) => {
+  if (!lastBulkRename || !lastBulkRename.changes?.length) return res.status(400).json({ ok: false, error: "Geri alınacak toplu isim değişikliği yok." });
+  let n = 0;
+  for (const c of lastBulkRename.changes) {
+    // Ürünün adı bu arada elle tekrar değiştirildiyse dokunma.
+    if (products[c.code] && products[c.code].name === c.to) { products[c.code].name = c.from; n++; }
+  }
+  if (n) persistProducts();
+  lastBulkRename = null;
+  saveJSON("rename-undo.json", { at: Date.now(), changes: [] });
+  res.json({ ok: true, count: n });
+});
+
 // İki ürünü aynı "aile" altında birleştirir (sürükle-bırak ile farklı
 // platformlardaki karşılıkları tek bir Ana Ürün altında toplamak için).
 // ÖNEMLİ: `from` ürünü ARTIK SİLİNMİYOR. Kendi skus/stocks/prices/productCodes/
