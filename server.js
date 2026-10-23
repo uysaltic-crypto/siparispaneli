@@ -2368,6 +2368,14 @@ function buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant = 0 }) {
   const supAddr = `<cac:PostalAddress><cbc:StreetName>${x(sup.street)}</cbc:StreetName><cbc:CitySubdivisionName>${x(sup.district)}</cbc:CitySubdivisionName><cbc:CityName>${x(sup.city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress>`;
   const supParty = `<cac:Party><cbc:WebsiteURI/><cac:PartyIdentification><cbc:ID schemeID="${supIsTckn ? "TCKN" : "VKN"}">${x(sup.id)}</cbc:ID></cac:PartyIdentification><cac:PartyName><cbc:Name>${x(sup.name)}</cbc:Name></cac:PartyName>${supAddr}${sup.taxOffice ? `<cac:PartyTaxScheme><cac:TaxScheme><cbc:Name>${x(sup.taxOffice)}</cbc:Name></cac:TaxScheme></cac:PartyTaxScheme>` : ""}${supIsTckn ? `<cac:Person><cbc:FirstName>${x(supFirst)}</cbc:FirstName><cbc:FamilyName>${x(supFamily)}</cbc:FamilyName></cac:Person>` : ""}</cac:Party>`;
   const taxSub = `<cac:TaxSubtotal><cbc:TaxableAmount ${c(net)}</cbc:TaxableAmount><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount><cbc:Percent>${vatRate}</cbc:Percent><cac:TaxCategory><cac:TaxScheme><cbc:Name>KDV</cbc:Name><cbc:TaxTypeCode>0015</cbc:TaxTypeCode></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal>`;
+  // Fatura satırında ürün adı(ları): "Ürün A x2, Ürün B". Ürün bilgisi yoksa eski metne düşer.
+  const prodLabel = (() => {
+    const fromLines = (order.lines || [])
+      .map((l) => { const n = String(l.name || "").replace(/\s+/g, " ").trim(); return n ? (Number(l.quantity) > 1 ? `${n} x${Number(l.quantity)}` : n) : ""; })
+      .filter(Boolean).join(", ");
+    const ps = String(order.productSummary || "").replace(/\s+/g, " ").trim();
+    return (fromLines || (ps && ps !== "—" ? ps : "")).slice(0, 250);
+  })();
   const platName = ({ hb: "Hepsiburada", ty: "Trendyol", n11: "N11", cs: "Çiçeksepeti", koctas: "Koçtaş", store: "Mağaza" })[order.platform] || order.platform;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -2384,7 +2392,7 @@ function buildEArchiveXml({ id, uuid, order, vatRate, sup, now, variant = 0 }) {
 <cac:AccountingCustomerParty><cac:Party><cac:PartyIdentification><cbc:ID schemeID="TCKN">${tckn}</cbc:ID></cac:PartyIdentification><cac:PostalAddress><cbc:CitySubdivisionName>${x(district)}</cbc:CitySubdivisionName><cbc:CityName>${x(city)}</cbc:CityName><cac:Country><cbc:Name>Türkiye</cbc:Name></cac:Country></cac:PostalAddress><cac:Person><cbc:FirstName>${x(first)}</cbc:FirstName><cbc:FamilyName>${x(family)}</cbc:FamilyName></cac:Person></cac:Party></cac:AccountingCustomerParty>
 <cac:TaxTotal><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount>${taxSub}</cac:TaxTotal>
 <cac:LegalMonetaryTotal><cbc:LineExtensionAmount ${c(net)}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount ${c(net)}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount ${c(total)}</cbc:TaxInclusiveAmount><cbc:PayableAmount ${c(total)}</cbc:PayableAmount></cac:LegalMonetaryTotal>
-<cac:InvoiceLine><cbc:ID>1</cbc:ID><cbc:InvoicedQuantity unitCode="C62">1</cbc:InvoicedQuantity><cbc:LineExtensionAmount ${c(net)}</cbc:LineExtensionAmount><cac:TaxTotal><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount>${taxSub}</cac:TaxTotal><cac:Item><cbc:Name>Satış bedeli (${x(platName)} ${x(order.orderNumber)})</cbc:Name></cac:Item><cac:Price><cbc:PriceAmount ${c(net)}</cbc:PriceAmount></cac:Price></cac:InvoiceLine>
+<cac:InvoiceLine><cbc:ID>1</cbc:ID><cbc:InvoicedQuantity unitCode="C62">1</cbc:InvoicedQuantity><cbc:LineExtensionAmount ${c(net)}</cbc:LineExtensionAmount><cac:TaxTotal><cbc:TaxAmount ${c(vatAmt)}</cbc:TaxAmount>${taxSub}</cac:TaxTotal><cac:Item><cbc:Name>${prodLabel ? x(prodLabel) : `Satış bedeli (${x(platName)} ${x(order.orderNumber)})`}</cbc:Name></cac:Item><cac:Price><cbc:PriceAmount ${c(net)}</cbc:PriceAmount></cac:Price></cac:InvoiceLine>
 </Invoice>`;
 }
 
