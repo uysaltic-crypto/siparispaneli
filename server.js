@@ -2988,13 +2988,17 @@ app.post("/api/products/bulk-rename", requireAuth, (req, res) => {
   const find = String(req.body?.find ?? "");
   const repl = String(req.body?.replace ?? "");
   const cs = req.body?.caseSensitive !== false;
-  if (!find.trim()) return res.status(400).json({ ok: false, error: "Aranacak metni yaz." });
+  const lowerMode = req.body?.mode === "lower"; // tüm adları küçük harfe çevir (Türkçe: İ→i, I→ı)
+  if (!lowerMode && !find.trim()) return res.status(400).json({ ok: false, error: "Aranacak metni yaz." });
   const changes = [];
   for (const code of Object.keys(products)) {
     const from = String(products[code].name || "");
-    let to = bulkReplaceName(from, find, repl, cs);
-    if (to === from) continue;
-    to = to.replace(/\s{2,}/g, " ").trim();
+    let to;
+    if (lowerMode) to = from.toLocaleLowerCase("tr");
+    else {
+      to = bulkReplaceName(from, find, repl, cs);
+      if (to !== from) to = to.replace(/\s{2,}/g, " ").trim();
+    }
     if (!to || to === from) continue;
     changes.push({ code, from, to });
   }
