@@ -192,7 +192,7 @@
         <button onclick="printSelectedOrders()">Seçilenleri yazdır</button>
         <button class="ghost" onclick="printUnprintedOrders()">Yazdırılmamışları yazdır</button>
         <button class="ghost" onclick="printAllOrders()">Tümünü yazdır</button>
-        <label class="muted" style="display:flex; align-items:center; gap:5px; cursor:pointer;"><input type="checkbox" id="hidePrinted" onchange="rerenderOrders()"> Yazdırılanları gizle</label>
+        <label class="muted" style="display:flex; align-items:center; gap:5px; cursor:pointer;"><input type="checkbox" id="hidePrinted" checked onchange="rerenderOrders()"> Yazdırılanları gizle</label>
         <button class="ghost small" onclick="markAllPrinted()" title="Listedeki tüm siparişleri yazdırıldı olarak işaretler">Hepsini yazdırıldı say</button>
         <span class="muted" id="orderSelInfo"></span>
       </div>
@@ -252,6 +252,7 @@
           <option value="category-asc">Kategoriye göre</option>
         </select>
         <button class="ghost small" onclick="openBulkPrice()">Toplu fiyat</button>
+        <button class="ghost small" onclick="openBulkName()" title="Ürün adlarında bul-değiştir yap (örn. AKÇALİ → AKÇALI)">Toplu isim</button>
         <button class="ghost small" id="unmergeAllBtn" onclick="unmergeAllProducts()" title="Birleştirilmiş tüm ürünleri tek seferde ayırır">Tümünü ayır</button>
         <button class="ghost small" onclick="toggleAddForm()">+ Ürün</button>
         <span id="importButtons"></span>
@@ -2265,6 +2266,75 @@ async function backupSyncPoll() {
   } catch (e) {}
 }
 
+
+/* ---------------- Toplu ürün adı düzenleme (bul → değiştir) ---------------- */
+function closeBulkName() { document.getElementById('bnModal')?.remove(); }
+function bnInvalidate() {
+  const box = document.getElementById('bnPreview'); if (box) box.innerHTML = '';
+  const b = document.getElementById('bnApply'); if (b) b.disabled = true;
+}
+function openBulkName() {
+  closeBulkName();
+  const wrap = document.createElement('div');
+  wrap.className = 'cmodal-back'; wrap.id = 'bnModal';
+  wrap.innerHTML = `
+    <div class="cmodal" role="dialog" aria-modal="true">
+      <div class="cmodal-head"><span>Toplu ürün adı düzenleme</span><button class="cmodal-x" onclick="closeBulkName()" title="Kapat">×</button></div>
+      <div class="cmodal-body">
+        <div class="muted" style="margin-bottom:8px;">Tüm ürün adlarında aranan metni yenisiyle değiştirir. Önce <b>Önizle</b> ile hangi ürünlerin değişeceğini görürsün.</div>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <input type="text" id="bnFind" placeholder="Aranacak (örn. AKÇALİ)" style="flex:1; min-width:0;" oninput="bnInvalidate()">
+          <span style="align-self:center;">→</span>
+          <input type="text" id="bnRepl" placeholder="Yeni metin (örn. AKÇALI)" style="flex:1; min-width:0;" oninput="bnInvalidate()">
+        </div>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:12px; cursor:pointer;"><input type="checkbox" id="bnCase" checked onchange="bnInvalidate()"> Büyük/küçük harfe duyarlı</label>
+        <div id="bnPreview"></div>
+      </div>
+      <div class="cmodal-foot">
+        <button class="ghost small" style="margin-right:auto;" onclick="bnUndo()">Son işlemi geri al</button>
+        <button class="ghost small" onclick="closeBulkName()">Kapat</button>
+        <button class="ghost small" onclick="bnRun(false)">Önizle</button>
+        <button class="small" id="bnApply" disabled onclick="bnRun(true)">Uygula</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  document.getElementById('bnFind').focus();
+}
+async function bnRun(apply) {
+  const find = document.getElementById('bnFind').value;
+  const replace = document.getElementById('bnRepl').value;
+  const caseSensitive = document.getElementById('bnCase').checked;
+  if (!find.trim()) { toast('Aranacak metni yaz.'); return; }
+  if (apply && !confirm(`Ürün adlarında "${find}" → "${replace}" değişikliği uygulanacak. Devam edilsin mi?`)) return;
+  const box = document.getElementById('bnPreview');
+  let d;
+  try {
+    const r = await fetch('/api/products/bulk-rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ find, replace, caseSensitive, apply }) });
+    d = await r.json();
+  } catch (e) { toast('Bağlantı hatası.'); return; }
+  if (!d.ok) { toast(d.error || 'İşlem başarısız.'); return; }
+  if (apply) {
+    toast(`${d.count} ürünün adı güncellendi.`);
+    closeBulkName();
+    await loadProducts(true);
+    return;
+  }
+  if (!d.count) { box.innerHTML = '<div class="muted">Eşleşen ürün adı bulunamadı.</div>'; document.getElementById('bnApply').disabled = true; return; }
+  box.innerHTML = `<div style="margin-bottom:6px;"><b>${d.count}</b> ürünün adı değişecek${d.count > d.changes.length ? ` (ilk ${d.changes.length} tanesi gösteriliyor)` : ''}:</div>
+    <div style="max-height:240px; overflow:auto; font-size:12px; border:1px solid var(--border, #ddd); border-radius:6px; padding:6px 8px;">
+      ${d.changes.map(c => `<div style="margin-bottom:6px;"><span style="text-decoration:line-through; opacity:.7;">${escAttr(c.from)}</span><br><b>${escAttr(c.to)}</b></div>`).join('')}
+    </div>`;
+  document.getElementById('bnApply').disabled = false;
+}
+async function bnUndo() {
+  if (!confirm('Son toplu isim değişikliği geri alınacak. Devam edilsin mi?')) return;
+  const r = await fetch('/api/products/bulk-rename/undo', { method: 'POST' });
+  const d = await r.json();
+  if (!d.ok) { toast(d.error || 'Geri alınamadı.'); return; }
+  toast(`${d.count} ürünün adı eski haline getirildi.`);
+  closeBulkName();
+  await loadProducts(true);
+}
 
 /* ---------------- Toplu fiyat değişikliği ---------------- */
 let bpPoll = null;
