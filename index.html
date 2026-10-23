@@ -57,6 +57,7 @@
   .imgm-drop.over { border-color:var(--ok); background:#34D39912; }
   .pcard-title { font-weight:700; }
   .pcard-title-input { display:block; background:transparent; border:1px solid transparent; border-radius:4px; padding:2px 5px; margin-left:-5px; font-weight:700; font-size:inherit; font-family:inherit; line-height:1.35; color:var(--text); width:100%; resize:none; overflow:hidden; box-sizing:border-box; }
+  .pcard-title-input { text-transform:lowercase; }
   .pcard-title-input:hover { border-color:var(--border); }
   .pcard-title-input:focus { border-color:var(--border); background:var(--surface2); outline:none; }
   .pcard-meta { font-size:11px; color:var(--muted); font-family:monospace; }
@@ -65,7 +66,19 @@
   .pcard-code-input:hover { border-color:var(--border); }
   .pcard-code-input:focus { border-color:var(--border); background:var(--surface2); color:var(--text); outline:none; }
   select { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); }
-  .pcard-central { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .pcard-central { margin-left:auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+  .pcard-central .pcard-field { text-align:right; }
+  .pcard-central .pcard-field .lbl { font-size:10px; letter-spacing:.3px; }
+  .pmenu { position:relative; flex-shrink:0; }
+  .pmenu.open { z-index:41; }
+  .pmenu-btn { background:none; border:1px solid transparent; color:var(--muted); cursor:pointer; font-size:20px; line-height:1; padding:4px 9px; border-radius:6px; }
+  .pmenu-btn:hover, .pmenu.open .pmenu-btn { background:#ffffff14; border-color:var(--border); color:var(--text); }
+  .pmenu-pop { display:none; position:absolute; top:100%; right:0; z-index:40; margin-top:4px; min-width:210px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:6px; box-shadow:0 8px 24px #0009; }
+  .pmenu.open .pmenu-pop { display:block; }
+  .pmenu-item { display:block; width:100%; text-align:left; background:none; border:none; color:var(--text); font:inherit; font-size:13px; padding:8px 10px; border-radius:6px; cursor:pointer; white-space:nowrap; }
+  .pmenu-item:hover { background:#ffffff14; }
+  .pmenu-item.danger { color:var(--danger); }
+  .pmenu-sep { height:1px; background:var(--border); margin:5px 2px; }
   .pcard-compete { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .pcard-compete .cmp-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; }
   .cmodal-back { position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
@@ -1034,7 +1047,7 @@ async function loadProducts(force = true) {
   // Kullanıcı bir kartta yazıyorsa / ⋮ menüsü açıksa arka plan yenilemesi bekler
   // (imzalar güncellenmediği için bir sonraki turda tekrar denenir).
   const active = document.activeElement;
-  const busy = !force && ((active && active.closest && active.closest('#stockCards')) || document.querySelector('.pchip.open'));
+  const busy = !force && ((active && active.closest && active.closest('#stockCards')) || document.querySelector('.pchip.open') || document.querySelector('.pmenu.open'));
   if (busy && tabActive('stock')) return;
 
   const prev = state.renderedByCode;
@@ -1119,11 +1132,24 @@ function togglePchipMenu(btn, ev) {
   const chip = btn.closest('.pchip');
   const wasOpen = chip.classList.contains('open');
   document.querySelectorAll('.pchip.open').forEach(c => c.classList.remove('open'));
+  closePcardMenus();
   if (!wasOpen) chip.classList.add('open');
 }
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.pchip-pop')) document.querySelectorAll('.pchip.open').forEach(c => c.classList.remove('open'));
+  if (!e.target.closest('.pmenu')) closePcardMenus();
 });
+// Kart sağındaki ⋮ menüsü (aynı anda tek menü açık kalır).
+function closePcardMenus() { document.querySelectorAll('.pmenu.open').forEach(m => m.classList.remove('open')); }
+function togglePcardMenu(btn, ev) {
+  ev.stopPropagation();
+  const m = btn.closest('.pmenu');
+  const wasOpen = m.classList.contains('open');
+  closePcardMenus();
+  document.querySelectorAll('.pchip.open').forEach(c => c.classList.remove('open'));
+  if (!wasOpen) m.classList.add('open');
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePcardMenus(); });
 
 // Tek bir ürünün tek bir platformdaki kutusu. Görünen: logo · durum · fiyat · ⋮
 // ⋮ ile açılan menüde: kod, satış durumu değiştirme, fiyat düzenleme, gönder, (birleşen ürünse) Ayır.
@@ -1220,7 +1246,7 @@ function renderStock(force) {
   const active = document.activeElement;
   if (!force && active && active.closest && active.closest('#stockCards')) return;
   // Açık bir ⋮ menüsü varken arka plan yenilemesi menüyü kapatmasın.
-  if (!force && document.querySelector('.pchip.open')) return;
+  if (!force && (document.querySelector('.pchip.open') || document.querySelector('.pmenu.open'))) return;
 
   const list = stockComputeView();
 
@@ -1292,21 +1318,28 @@ function buildStockCard(p, activePlatforms) {
         </div>
         ${competeCardHtml(p)}
         <div class="pcard-central" onmousedown="event.stopPropagation()">
-          <div style="text-align:right;">
-            <div class="muted" style="font-size:10px;">MAĞAZA FİYATI</div>
+          <div class="pcard-field">
+            <div class="muted lbl">MAĞAZA FİYATI</div>
             <input class="stockcell" style="width:80px; text-align:right;" type="number" step="0.01" value="${p.storePrice ?? ''}" placeholder="otomatik" title="Boş bırakırsan en düşük platform fiyatı kullanılır" onchange="updateStoreField('${p.code}', { storePrice: this.value })">
             <label class="muted" style="display:block; font-size:10px; cursor:pointer;"><input type="checkbox" ${p.storeHidden ? '' : 'checked'} onchange="updateStoreField('${p.code}', { storeHidden: !this.checked })"> Mağazada göster</label>
           </div>
-          <div style="text-align:right;">
-            <div class="muted" style="font-size:10px;">MERKEZİ STOK</div>
+          <div class="pcard-field">
+            <div class="muted lbl">MERKEZİ STOK</div>
             <input class="stockcell" style="width:70px; text-align:right;" type="number" value="${c}" onchange="updateCentral('${p.code}',this.value)">
           </div>
-          <button class="ghost small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
-          <button class="ghost small" onclick="pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat+stok gönder</button>
-          <button class="ghost small" onclick="openListingModal('${p.code}')" title="Platformda yayında olan bir ürünü manuel olarak bu ürüne ekle">+ Platform kaydı</button>
-          ${familyMembers.length > 1 ? `<button class="ghost small" onclick="unmergeFamily('${p.code}')" title="Bu kartın altındaki tüm ürünleri birbirinden ayırır">Hepsini ayır</button>` : ''}
-          ${familyMembers.length === 1 && new Set([...Object.keys(p.skus || {}), ...Object.keys(p.productCodes || {})]).size >= 2 ? `<button class="ghost small" onclick="splitAllListings('${p.code}')" title="Bu üründeki platform kayıtlarını ayrı ürünlere böler">Platformları ayır</button>` : ''}
-          <button class="ghost small" onclick="deleteProduct('${p.code}')">Sil</button>
+          <button class="small" onclick="pushProduct('${p.code}')" title="Merkezi stoğu tüm platformlara gönderir">Gönder</button>
+          <div class="pmenu">
+            <button class="pmenu-btn" onclick="togglePcardMenu(this, event)" title="Diğer işlemler" aria-label="Diğer işlemler">⋮</button>
+            <div class="pmenu-pop">
+              <button class="pmenu-item" onclick="closePcardMenus(); pushPlatform('${p.code}')" title="Her platformun fiyatını ve merkezi stoğu ilgili siteye gönderir">Fiyat + stok gönder</button>
+              <button class="pmenu-item" onclick="closePcardMenus(); openBulkPrice('${p.code}')" title="Bu ürünün fiyatını yüzde, tutar veya sabit fiyatla değiştir">Toplu fiyat</button>
+              <button class="pmenu-item" onclick="closePcardMenus(); openListingModal('${p.code}')" title="Platformda yayında olan bir ürünü manuel olarak bu ürüne ekle">+ Platform kaydı</button>
+              ${familyMembers.length > 1 ? `<button class="pmenu-item" onclick="closePcardMenus(); unmergeFamily('${p.code}')" title="Bu kartın altındaki tüm ürünleri birbirinden ayırır">Hepsini ayır</button>` : ''}
+              ${familyMembers.length === 1 && new Set([...Object.keys(p.skus || {}), ...Object.keys(p.productCodes || {})]).size >= 2 ? `<button class="pmenu-item" onclick="closePcardMenus(); splitAllListings('${p.code}')" title="Bu üründeki platform kayıtlarını ayrı ürünlere böler">Platformları ayır</button>` : ''}
+              <div class="pmenu-sep"></div>
+              <button class="pmenu-item danger" onclick="closePcardMenus(); deleteProduct('${p.code}')">Sil</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="pcard-platforms">${chips || '<span class="muted" style="font-size:12px;">Yapılandırılmış platform yok.</span>'}</div>
@@ -1483,7 +1516,7 @@ function competeSummary(p) {
 }
 
 function competeCardHtml(p) {
-  return `<div class="pcard-compete" onmousedown="event.stopPropagation()"><button class="small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">+ Rekabet Analizi Ekle</button><button class="ghost small" onclick="openBulkPrice(this.closest('.pcard').dataset.code)" title="Bu ürünün fiyatını yüzde, tutar veya sabit fiyatla değiştir">Toplu fiyat</button></div>`;
+  return `<div class="pcard-compete" onmousedown="event.stopPropagation()"><button class="ghost small" onclick="openCompeteModal(this.closest('.pcard').dataset.code)">+ Rekabet Analizi Ekle</button></div>`;
 }
 
 let competeModalCode = null;
@@ -2273,6 +2306,12 @@ function bnInvalidate() {
   const box = document.getElementById('bnPreview'); if (box) box.innerHTML = '';
   const b = document.getElementById('bnApply'); if (b) b.disabled = true;
 }
+function bnModeChange() {
+  const lower = document.getElementById('bnMode').value === 'lower';
+  document.getElementById('bnReplaceBox').style.display = lower ? 'none' : '';
+  document.getElementById('bnLowerHint').style.display = lower ? '' : 'none';
+  bnInvalidate();
+}
 function openBulkName() {
   closeBulkName();
   const wrap = document.createElement('div');
@@ -2282,12 +2321,19 @@ function openBulkName() {
       <div class="cmodal-head"><span>Toplu ürün adı düzenleme</span><button class="cmodal-x" onclick="closeBulkName()" title="Kapat">×</button></div>
       <div class="cmodal-body">
         <div class="muted" style="margin-bottom:8px;">Tüm ürün adlarında aranan metni yenisiyle değiştirir. Önce <b>Önizle</b> ile hangi ürünlerin değişeceğini görürsün.</div>
+        <select id="bnMode" style="margin-bottom:8px;" onchange="bnModeChange()">
+          <option value="replace">Bul ve değiştir</option>
+          <option value="lower">Tüm adları küçük harf yap</option>
+        </select>
+        <div id="bnReplaceBox">
         <div style="display:flex; gap:8px; margin-bottom:8px;">
           <input type="text" id="bnFind" placeholder="Aranacak (örn. AKÇALİ)" style="flex:1; min-width:0;" oninput="bnInvalidate()">
           <span style="align-self:center;">→</span>
           <input type="text" id="bnRepl" placeholder="Yeni metin (örn. AKÇALI)" style="flex:1; min-width:0;" oninput="bnInvalidate()">
         </div>
         <label style="display:flex; align-items:center; gap:6px; margin-bottom:12px; cursor:pointer;"><input type="checkbox" id="bnCase" checked onchange="bnInvalidate()"> Büyük/küçük harfe duyarlı</label>
+        </div>
+        <div id="bnLowerHint" class="muted" style="display:none; margin-bottom:12px;">Tüm ürün adları küçük harfe çevrilir (Türkçe kurala göre: İ → i, I → ı). Önce <b>Önizle</b> ile değişecek adları görebilirsin.</div>
         <div id="bnPreview"></div>
       </div>
       <div class="cmodal-foot">
@@ -2301,15 +2347,16 @@ function openBulkName() {
   document.getElementById('bnFind').focus();
 }
 async function bnRun(apply) {
+  const mode = document.getElementById('bnMode').value;
   const find = document.getElementById('bnFind').value;
   const replace = document.getElementById('bnRepl').value;
   const caseSensitive = document.getElementById('bnCase').checked;
-  if (!find.trim()) { toast('Aranacak metni yaz.'); return; }
-  if (apply && !confirm(`Ürün adlarında "${find}" → "${replace}" değişikliği uygulanacak. Devam edilsin mi?`)) return;
+  if (mode === 'replace' && !find.trim()) { toast('Aranacak metni yaz.'); return; }
+  if (apply && !confirm(mode === 'lower' ? 'Tüm ürün adları küçük harfe çevrilecek. Devam edilsin mi?' : `Ürün adlarında "${find}" → "${replace}" değişikliği uygulanacak. Devam edilsin mi?`)) return;
   const box = document.getElementById('bnPreview');
   let d;
   try {
-    const r = await fetch('/api/products/bulk-rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ find, replace, caseSensitive, apply }) });
+    const r = await fetch('/api/products/bulk-rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, find, replace, caseSensitive, apply }) });
     d = await r.json();
   } catch (e) { toast('Bağlantı hatası.'); return; }
   if (!d.ok) { toast(d.error || 'İşlem başarısız.'); return; }
