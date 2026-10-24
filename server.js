@@ -2934,6 +2934,28 @@ app.post("/api/products/:code/listing", requireAuth, (req, res) => {
   res.json({ ok: true, how, target, products: fam.map(serializeProduct) });
 });
 
+// Toplu ürün silme: { codes: [...], includeChildren: bool }
+// includeChildren=false ise silinen ana ürünlerin alt ürünleri bağımsız ürün olarak kalır (tekli silmeyle aynı).
+app.post("/api/products/bulk-delete", requireAuth, (req, res) => {
+  const codes = Array.isArray(req.body?.codes) ? req.body.codes.map(String) : [];
+  const includeChildren = req.body?.includeChildren === true;
+  if (!codes.length) return res.status(400).json({ ok: false, error: "Silinecek ürün seçilmedi." });
+  const toDelete = new Set(codes.filter((c) => products[c]));
+  if (includeChildren) {
+    Object.entries(products).forEach(([c, p]) => { if (p.mergedInto && toDelete.has(p.mergedInto)) toDelete.add(c); });
+  }
+  // Silinmeyen ama silinen bir ana ürüne bağlı olanlar bağımsız kalsın.
+  Object.entries(products).forEach(([c, p]) => {
+    if (!toDelete.has(c) && p.mergedInto && toDelete.has(p.mergedInto)) p.mergedInto = null;
+  });
+  for (const c of toDelete) {
+    removeCustomImageFile(products[c]);
+    delete products[c];
+  }
+  persistProducts();
+  res.json({ ok: true, count: toDelete.size });
+});
+
 app.delete("/api/products/:code", requireAuth, (req, res) => {
   const code = req.params.code;
   // Silinen ürün başka ürünlerin ana ürünüyse (yani alt ürünleri varsa), o alt
