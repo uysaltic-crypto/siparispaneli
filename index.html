@@ -264,6 +264,14 @@
           <option value="stock-asc">Merkezi stok: azdan çoğa</option>
           <option value="category-asc">Kategoriye göre</option>
         </select>
+        <input type="text" id="stockLetters" placeholder="Baş harf: M, K" title="Adı bu harf(ler) veya kelime(ler)le başlayan ürünleri gösterir. Birden fazla için virgül veya boşluk kullan (örn. M, K)" style="width:110px;" oninput="stockSearchInput()">
+        <button class="ghost small" id="selModeBtn" onclick="toggleSelectMode()" title="Ürünleri işaretleyip toplu silmek için">Toplu sil</button>
+        <span id="selTools" style="display:none; align-items:center; gap:6px;">
+          <button class="ghost small" onclick="selectAllVisible(true)" title="Filtreye uyan TÜM ürünleri seçer (ekranda görünmeyenler dahil)">Hepsini seç</button>
+          <button class="ghost small" onclick="selectAllVisible(false)">Seçimi temizle</button>
+          <span id="selCount" class="muted" style="font-size:12px;">0 seçili</span>
+          <button class="small" style="background:#c0392b;" onclick="bulkDeleteSelected()">Seçilenleri sil</button>
+        </span>
         <button class="ghost small" onclick="openBulkPrice()">Toplu fiyat</button>
         <button class="ghost small" onclick="openBulkName()" title="Ürün adlarında bul-değiştir yap (örn. AKÇALİ → AKÇALI)">Toplu isim</button>
         <button class="ghost small" id="unmergeAllBtn" onclick="unmergeAllProducts()" title="Birleştirilmiş tüm ürünleri tek seferde ayırır">Tümünü ayır</button>
@@ -1220,6 +1228,16 @@ function stockComputeView() {
     list = list.filter(p => matchesText(p) || getChildren(p.code).some(matchesText));
   }
 
+  // Baş harf / önek filtresi: "M, K" → adı M veya K ile başlayan ürünler (Türkçe harf kuralıyla).
+  const lettersEl = document.getElementById('stockLetters');
+  const prefixes = ((lettersEl && lettersEl.value) || '').toLocaleLowerCase('tr').split(/[\s,;]+/).filter(Boolean);
+  if (prefixes.length) {
+    list = list.filter(p => {
+      const nm = String(p.name || '').trim().toLocaleLowerCase('tr');
+      return prefixes.some(x => nm.startsWith(x));
+    });
+  }
+
   const sortVal = document.getElementById('stockSort').value;
   const collator = new Intl.Collator('tr');
   list = [...list].sort((a, b) => {
@@ -1306,6 +1324,7 @@ function buildStockCard(p, activePlatforms) {
     card.dataset.code = p.code;
     card.innerHTML = `
       <div class="pcard-head">
+        ${selectMode ? `<input type="checkbox" class="pcard-sel" ${stockSel.has(p.code) ? 'checked' : ''} onmousedown="event.stopPropagation()" onchange="toggleSel('${p.code}', this.checked)" title="Toplu silme için seç" style="width:18px; height:18px; flex:none; cursor:pointer;">` : ''}
         <span class="pcard-drag-handle" title="Birleştirmek için sürükle">⠿</span>
         ${thumb}
         <div style="flex:1; min-width:260px;">
@@ -1905,6 +1924,51 @@ async function setStoreStatus(orderNumber, status, prev, el) {
   if (!r.ok || !d.ok) { toast(d.error || 'Durum değiştirilemedi.'); el.value = prev; return; }
   toast('Sipariş durumu güncellendi.');
   await refresh(true);
+}
+
+/* ---------------- Toplu ürün silme ---------------- */
+let selectMode = false;
+const stockSel = new Set();
+function updateSelCount() {
+  const el = document.getElementById('selCount');
+  if (el) el.textContent = stockSel.size + ' seçili';
+}
+function toggleSelectMode() {
+  selectMode = !selectMode;
+  stockSel.clear();
+  document.getElementById('selTools').style.display = selectMode ? 'inline-flex' : 'none';
+  document.getElementById('selModeBtn').textContent = selectMode ? 'Seçimi kapat' : 'Toplu sil';
+  updateSelCount();
+  renderStock(true);
+}
+function toggleSel(code, on) { on ? stockSel.add(code) : stockSel.delete(code); updateSelCount(); }
+function selectAllVisible(on) {
+  if (!on) stockSel.clear();
+  else stockComputeView().forEach(p => stockSel.add(p.code));   // filtreye uyan hepsi (sayfalamadan bağımsız)
+  updateSelCount();
+  document.querySelectorAll('#stockCards .pcard-sel').forEach(cb => {
+    const card = cb.closest('.pcard');
+    cb.checked = !!card && stockSel.has(card.dataset.code);
+  });
+}
+async function bulkDeleteSelected() {
+  const codes = [...stockSel];
+  if (!codes.length) { toast('Önce silinecek ürünleri seç.'); return; }
+  const byCode = new Map(state.products.map(p => [p.code, p]));
+  const names = codes.slice(0, 5).map(c => '• ' + ((byCode.get(c) || {}).name || c)).join('\n');
+  const more = codes.length > 5 ? `\n… ve ${codes.length - 5} ürün daha` : '';
+  if (!confirm(`${codes.length} ürün KALICI olarak silinecek (geri alınamaz):\n\n${names}${more}\n\nDevam edilsin mi?`)) return;
+  const withKids = codes.some(c => getChildren(c).length);
+  const includeChildren = withKids && confirm('Seçilen ürünlerin altında birleştirilmiş ürünler var.\n\nTamam = alt ürünler de silinsin\nİptal = alt ürünler bağımsız ürün olarak kalsın');
+  let d;
+  try {
+    const r = await fetch('/api/products/bulk-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codes, includeChildren }) });
+    d = await r.json();
+  } catch (e) { toast('Bağlantı hatası.'); return; }
+  if (!d.ok) { toast(d.error || 'Toplu silme başarısız.'); return; }
+  toast(`${d.count} ürün silindi.`);
+  stockSel.clear(); updateSelCount();
+  await loadProducts(true);
 }
 
 async function deleteProduct(barcode) {
