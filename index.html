@@ -2122,6 +2122,7 @@ async function triggerPull(platform) {
       return;
     }
     toast(`${pm.name}: ${result.total} ürün bulundu (${result.created} yeni, ${result.updated} güncellendi${result.autoMatched ? `, ${result.autoMatched} otomatik eşleşti` : ''}).`);
+    if (result.warning) setTimeout(() => toast(result.warning), 3500);
     loadProducts();
   } catch (e) {
     toast(`${pm.name} bağlantı hatası: ${e.message}`);
