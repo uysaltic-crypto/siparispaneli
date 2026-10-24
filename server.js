@@ -457,14 +457,19 @@ async function fetchStockHepsiburada() {
       offset += limit;
     }
     // Ad gelmeyen satırlar için katalogdan Hepsiburada SKU'suna göre ad/görsel doldur (best-effort).
-    if (rows.some((r) => !r.name && r.productCode)) {
+    let warning = null;
+    if (rows.some((r) => !r.name)) {
       const cat = await fetchHbCatalogNames();
       rows.forEach((r) => {
-        const hit = !r.name && r.productCode ? cat.names.get(String(r.productCode).trim()) : null;
+        if (r.name) return;
+        const hit = (r.productCode && cat.names.get(String(r.productCode).trim())) || cat.names.get("m:" + r.barcode);
         if (hit) { r.name = hit.name; if (hit.image && !r.image) r.image = hit.image; }
       });
+      const missing = rows.filter((r) => !r.name).length;
+      if (cat.error) warning = `Ürün adları alınamadı (katalog hatası: ${cat.error}).`;
+      else if (missing) warning = `${missing} ürünün adı katalogda bulunamadı (katalog ${cat.names.size} kayıt döndürdü).`;
     }
-    return { platform: "hb", error: null, rows };
+    return { platform: "hb", error: null, rows, warning };
   } catch (err) {
     const msg =
       err.response?.status === 401 || err.response?.status === 403
@@ -498,12 +503,28 @@ async function fetchHbCatalogNames() {
       const d = resp.data;
       const items = Array.isArray(d) ? d : d?.data || d?.content || d?.items || d?.products || [];
       items.forEach((it) => {
-        const sku = String(it.hbSku || it.hepsiburadaSku || it.HepsiburadaSku || it.sku || "").trim();
-        const name = String(it.productName || it.name || it.title || it.ProductName || "").trim();
-        if (!sku || !name) return;
+        const sku = String(it.hbSku || it.hepsiburadaSku || it.HepsiburadaSku || it.HbSku || it.sku || "").trim();
+        const msku = String(it.merchantSku || it.MerchantSku || "").trim();
+        // Ad alanı yanıtta farklı adlarla ya da iç içe gelebiliyor; bilinen adaylara bakılır,
+        // bulunamazsa "name/title" geçen ilk metin alanı kullanılır.
+        let name = String(it.productName || it.ProductName || it.name || it.Name || it.title || it.Title || it.urunAdi || "").trim();
+        if (!name) {
+          const scan = (o, depth) => {
+            if (!o || typeof o !== "object" || depth > 3) return "";
+            for (const [k, v] of Object.entries(o)) {
+              if (typeof v === "string" && /(product)?(name|title)$/i.test(k) && v.trim() && !/brand|category|merchant|seller|image/i.test(k)) return v.trim();
+              if (v && typeof v === "object") { const r = scan(v, depth + 1); if (r) return r; }
+            }
+            return "";
+          };
+          name = scan(it, 0);
+        }
+        if ((!sku && !msku) || !name) return;
         const img0 = Array.isArray(it.images) ? it.images[0] : it.image || it.imageUrl;
         const image = typeof img0 === "string" ? img0 : img0?.url || img0?.imageUrl || "";
-        names.set(sku, { name, image: /^https:\/\//i.test(image || "") ? image : undefined });
+        const entry = { name, image: /^https:\/\//i.test(image || "") ? image : undefined };
+        if (sku) names.set(sku, entry);
+        if (msku) names.set("m:" + msku, entry);
       });
       if (items.length < size) break;
     }
@@ -3518,7 +3539,7 @@ app.post("/api/products/pull", requireAuth, async (req, res) => {
   if (result.error) return res.status(502).json({ ok: false, error: result.error });
   const merged = mergeStockRows(platform, result.rows);
   const autoMatched = autoMatchProducts().length;
-  res.json({ ok: true, ...merged, total: result.rows.length, autoMatched });
+  res.json({ ok: true, ...merged, total: result.rows.length, autoMatched, warning: result.warning || null });
 });
 
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
