@@ -574,7 +574,8 @@ async function loadPlatforms() {
     + ' '
     + state.platforms
       .filter(p => p.configured && p.pullable)
-      .map(p => `<button class="ghost small" onclick="triggerPull('${p.id}')">${p.name} Siteden Çek${p.stockPullVerified ? '' : ' (deneysel)'}</button>`).join(' ');
+      .map(p => `<button class="ghost small" onclick="triggerPull('${p.id}')">${p.name} Siteden Çek${p.stockPullVerified ? '' : ' (deneysel)'}</button>`).join(' ')
+    + (state.platforms.some(p => p.id === 'hb' && p.configured) ? ' <button class="ghost small" onclick="fillHbNames()" title="Adı İsimsiz kalan Hepsiburada ürünlerinin adını Hepsiburada sitesinden doldurur">İsimsiz adları doldur</button>' : '');
 
   const unverified = state.platforms.filter(p => p.configured && !p.verified);
   document.getElementById('unverifiedArea').innerHTML = unverified.length
@@ -2105,6 +2106,20 @@ async function repriceAllNow() {
 function triggerImport(platform) {
   importPlatform = platform;
   document.getElementById('importFile').click();
+}
+
+async function fillHbNames() {
+  toast('Hepsiburada ürün adları siteden alınıyor… (en çok 25 ürün)');
+  try {
+    const r = await fetch('/api/hb/fill-names', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) { toast(d.error || 'Ad doldurma başarısız.'); return; }
+    if (!d.tried) { toast('Adı boş Hepsiburada ürünü yok.'); return; }
+    let msg = `${d.filled}/${d.tried} ürünün adı dolduruldu.` + (d.remaining ? ` Kalan: ${d.remaining} (tekrar bas).` : '');
+    if (d.filled < d.tried && d.failed && d.failed[0]) msg += ` Hata: ${d.failed[0].error}`;
+    toast(msg);
+    loadProducts();
+  } catch (e) { toast('Bağlantı hatası: ' + e.message); }
 }
 
 async function triggerPull(platform) {
