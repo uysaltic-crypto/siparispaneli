@@ -2219,6 +2219,109 @@ app.get("/api/hb/raw-catalog", requireAuth, async (req, res) => {
   }
 });
 
+// Hepsiburada sitesinden ürün adı (yedek yol). Resmi API değil: sayfa yapısı değişirse ya da Hepsiburada
+// sunucu IP'sini engellerse çalışmaz; hata nedeni döner. COMPETITOR_FETCH_TEMPLATE tanımlıysa o proxy kullanılır.
+function decodeHtmlEntities(t) {
+  return String(t || "").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/\s+/g, " ").trim();
+}
+async function fetchHbNameFromSite(sku) {
+  try {
+    const url = `https://www.hepsiburada.com/ara?q=${encodeURIComponent(sku)}`;
+    const tpl = process.env.COMPETITOR_FETCH_TEMPLATE;
+    const target = tpl && tpl.includes("{url}") ? tpl.replace("{url}", encodeURIComponent(url)) : url;
+    const resp = await axios.get(target, {
+      timeout: tpl ? 60000 : 15000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        Referer: "https://www.google.com/",
+      },
+      maxRedirects: 5,
+    });
+    const html = String(resp.data);
+    // 1) Ürün bağlantısı: href "...-p-<SKU>" olan <a> etiketinin title'ı
+    const esc = sku.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const a = html.match(new RegExp(`<a[^>]+href="[^"]*-p-${esc}[^"]*"[^>]*>`, "i"));
+    if (a) {
+      const t = a[0].match(/\btitle="([^"]{4,250})"/i);
+      if (t) return { ok: true, name: decodeHtmlEntities(t[1]) };
+    }
+    // 2) JSON-LD (Product / ItemList)
+    for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+      try {
+        const data = JSON.parse(m[1].trim());
+        const items = Array.isArray(data) ? data : data["@graph"] || [data];
+        for (const it of items) {
+          if (it?.name && /product/i.test(String(it["@type"]))) return { ok: true, name: decodeHtmlEntities(it.name) };
+          const els = it?.itemListElement;
+          if (Array.isArray(els) && els.length) {
+            const n = els[0]?.item?.name || els[0]?.name;
+            if (n) return { ok: true, name: decodeHtmlEntities(n) };
+          }
+        }
+      } catch (_) { /* geç */ }
+    }
+    // 3) SKU'nun yakınındaki "name"/"productName" JSON alanı
+    const idx = html.indexOf(sku);
+    if (idx >= 0) {
+      const around = html.slice(Math.max(0, idx - 1200), idx + 1200);
+      const j = around.match(/"(?:productName|name|title)"\s*:\s*"([^"]{6,250})"/i);
+      if (j) return { ok: true, name: decodeHtmlEntities(j[1]) };
+    }
+    return { ok: false, error: "Sayfada ürün adı bulunamadı (yapı değişmiş ya da engel sayfası gelmiş olabilir)." };
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 403 || status === 429) return { ok: false, error: `Hepsiburada erişimi engelledi (HTTP ${status}).` };
+    return { ok: false, error: err.message };
+  }
+}
+
+// Adı "İsimsiz ürün" kalan Hepsiburada ürünlerinin adını siteden doldurur (her çağrıda en çok 25 ürün).
+app.post("/api/hb/fill-names", requireAuth, async (req, res) => {
+  const targets = Object.entries(products)
+    .filter(([, p]) => (!p.name || p.name === "İsimsiz ürün") && (p.productCodes?.hb || p.skus?.hb))
+    .slice(0, 25);
+  let filled = 0;
+  const failed = [];
+  for (const [code, p] of targets) {
+    const sku = String(p.productCodes?.hb || p.skus?.hb).trim();
+    const r = await fetchHbNameFromSite(sku);
+    if (r.ok && r.name) { p.name = r.name; filled++; } else failed.push({ sku, error: r.error });
+    await new Promise((ok) => setTimeout(ok, 500));
+  }
+  if (filled) persistProducts();
+  const remaining = Object.values(products).filter((p) => (!p.name || p.name === "İsimsiz ürün") && (p.productCodes?.hb || p.skus?.hb)).length;
+  res.json({ ok: true, tried: targets.length, filled, remaining, failed: failed.slice(0, 5) });
+});
+
+// Tanı: ürün adı neden gelmiyor? Örn: /api/hb/name-debug?sku=HBV000003AGB0
+app.get("/api/hb/name-debug", requireAuth, async (req, res) => {
+  const sku = String(req.query.sku || "").trim();
+  const out = { sku };
+  if (!hbConfigured()) return res.json({ ok: false, error: "HB API bilgileri eksik." });
+  const { HB_MERCHANT_ID, HB_ENV } = process.env;
+  const hbAuth = hbAuthConfig();
+  const host = HB_ENV === "test" ? "mpop-sit.hepsiburada.com" : "mpop.hepsiburada.com";
+  try {
+    const r = await axios.get(`https://${host}/product/api/products/all-products-of-merchant/${HB_MERCHANT_ID}`, {
+      auth: hbAuth.auth, params: { page: 0, size: 2, version: 1 },
+      headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" }, timeout: 20000, validateStatus: () => true,
+    });
+    const d = r.data;
+    const items = Array.isArray(d) ? d : d?.data || d?.content || d?.items || d?.products || [];
+    out.katalog = { status: r.status, ustAnahtarlar: d && typeof d === "object" ? Object.keys(d) : typeof d, kayitSayisi: items.length, ilkKayit: JSON.stringify(items[0] ?? d).slice(0, 1500) };
+  } catch (e) { out.katalog = { hata: e.message }; }
+  try {
+    const cat = await fetchHbCatalogNames();
+    out.katalogAdSayisi = cat.names.size;
+    out.katalogHata = cat.error;
+    out.skuIcinKatalogAdi = sku ? cat.names.get(sku)?.name || cat.names.get("m:" + sku)?.name || null : undefined;
+  } catch (e) { out.katalogAdHata = e.message; }
+  if (sku) out.siteden = await fetchHbNameFromSite(sku);
+  res.json({ ok: true, ...out });
+});
+
 app.post("/api/refresh", requireAuth, async (req, res) => {
   res.json(await refreshAll());
 });
