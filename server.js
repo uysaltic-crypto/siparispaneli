@@ -493,7 +493,7 @@ async function fetchHbCatalogNames() {
   const url = `https://${host}/product/api/products/all-products-of-merchant/${HB_MERCHANT_ID}`;
   const size = 100;
   try {
-    for (let page = 0; page < 60; page++) {
+    for (let page = 0; page < 200; page++) {
       const resp = await axios.get(url, {
         auth: hbAuth.auth,
         params: { page, size, version: 1 },
@@ -526,7 +526,8 @@ async function fetchHbCatalogNames() {
         if (sku) names.set(sku, entry);
         if (msku) names.set("m:" + msku, entry);
       });
-      if (items.length < size) break;
+      // Sayfa boyutu sunucuda kısıtlanmış olabilir; bu yüzden "son sayfa" bilgisine ya da boş sayfaya bakılır.
+      if (!items.length || d?.last === true) break;
     }
     return { names, error: null };
   } catch (err) {
@@ -2310,7 +2311,7 @@ app.get("/api/hb/name-debug", requireAuth, async (req, res) => {
     });
     const d = r.data;
     const items = Array.isArray(d) ? d : d?.data || d?.content || d?.items || d?.products || [];
-    out.katalog = { status: r.status, ustAnahtarlar: d && typeof d === "object" ? Object.keys(d) : typeof d, kayitSayisi: items.length, ilkKayit: JSON.stringify(items[0] ?? d).slice(0, 1500) };
+    out.katalog = { status: r.status, ustAnahtarlar: d && typeof d === "object" ? Object.keys(d) : typeof d, toplamKayit: d?.totalElements, toplamSayfa: d?.totalPages, kayitSayisi: items.length, ilkKayit: JSON.stringify(items[0] ?? d).slice(0, 1500) };
   } catch (e) { out.katalog = { hata: e.message }; }
   try {
     const cat = await fetchHbCatalogNames();
