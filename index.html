@@ -2109,7 +2109,7 @@ function triggerImport(platform) {
 }
 
 async function fillHbNames() {
-  toast('Hepsiburada ürün adları siteden alınıyor… (en çok 25 ürün)');
+  toast('Hepsiburada ürün adları siteden alınıyor… (en çok 10 ürün)');
   try {
     const r = await fetch('/api/hb/fill-names', { method: 'POST' });
     const d = await r.json();
