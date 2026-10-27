@@ -2243,10 +2243,18 @@ async function fetchHbNameFromSite(sku) {
     const html = String(resp.data);
     // 1) Ürün bağlantısı: href "...-p-<SKU>" olan <a> etiketinin title'ı
     const esc = sku.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const a = html.match(new RegExp(`<a[^>]+href="[^"]*-p-${esc}[^"]*"[^>]*>`, "i"));
+    const a = html.match(new RegExp(`<a[^>]+href="([^"]*-p-${esc}[^"]*)"[^>]*>`, "i"));
+    let slugName = "";
     if (a) {
       const t = a[0].match(/\btitle="([^"]{4,250})"/i);
       if (t) return { ok: true, name: decodeHtmlEntities(t[1]) };
+      // başlık etiketsiz ise bağlantının hemen sonrasındaki title/alt değerine bak
+      const after = html.slice(a.index, a.index + 2500);
+      const t2 = after.match(/\b(?:title|alt)="([^"]{8,250})"/i);
+      if (t2 && !/hepsiburada|sepete|favori/i.test(t2[1])) return { ok: true, name: decodeHtmlEntities(t2[1]) };
+      // son çare: adres bağlantısındaki ürün adı kısmı (Türkçe karakter/büyük harf kaybolur)
+      const slug = (a[1].split("?")[0].split("/").pop() || "").replace(new RegExp(`-p-${esc}.*$`, "i"), "");
+      if (slug && slug.includes("-")) slugName = slug.split("-").filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
     }
     // 2) JSON-LD (Product / ItemList)
     for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
@@ -2270,7 +2278,13 @@ async function fetchHbNameFromSite(sku) {
       const j = around.match(/"(?:productName|name|title)"\s*:\s*"([^"]{6,250})"/i);
       if (j) return { ok: true, name: decodeHtmlEntities(j[1]) };
     }
-    return { ok: false, error: "Sayfada ürün adı bulunamadı (yapı değişmiş ya da engel sayfası gelmiş olabilir)." };
+    if (slugName) return { ok: true, name: slugName, fromSlug: true };
+    const title = (html.match(/<title[^>]*>([^<]{0,160})/i) || [])[1] || "";
+    return {
+      ok: false,
+      error: "Sayfada ürün adı bulunamadı (yapı değişmiş ya da engel sayfası gelmiş olabilir).",
+      info: { uzunluk: html.length, baslik: decodeHtmlEntities(title), skuSayfadaVar: html.includes(sku), urunBaglantisiVar: /-p-HB[A-Z0-9]+/i.test(html), baslangic: decodeHtmlEntities(html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ")).slice(0, 300) },
+    };
   } catch (err) {
     const status = err.response?.status;
     if (status === 403 || status === 429) return { ok: false, error: `Hepsiburada erişimi engelledi (HTTP ${status}).` };
@@ -2282,13 +2296,13 @@ async function fetchHbNameFromSite(sku) {
 app.post("/api/hb/fill-names", requireAuth, async (req, res) => {
   const targets = Object.entries(products)
     .filter(([, p]) => (!p.name || p.name === "İsimsiz ürün") && (p.productCodes?.hb || p.skus?.hb))
-    .slice(0, 25);
+    .slice(0, Math.min(Number(req.body?.limit) || 10, 25));
   let filled = 0;
   const failed = [];
   for (const [code, p] of targets) {
     const sku = String(p.productCodes?.hb || p.skus?.hb).trim();
     const r = await fetchHbNameFromSite(sku);
-    if (r.ok && r.name) { p.name = r.name; filled++; } else failed.push({ sku, error: r.error });
+    if (r.ok && r.name) { p.name = r.name; filled++; } else failed.push({ sku, error: r.error, info: r.info });
     await new Promise((ok) => setTimeout(ok, 500));
   }
   if (filled) persistProducts();
