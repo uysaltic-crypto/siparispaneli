@@ -2295,7 +2295,7 @@ async function fetchHbNameFromSite(sku) {
 // Adı "İsimsiz ürün" kalan Hepsiburada ürünlerinin adını siteden doldurur (her çağrıda en çok 25 ürün).
 app.post("/api/hb/fill-names", requireAuth, async (req, res) => {
   const targets = Object.entries(products)
-    .filter(([, p]) => (!p.name || p.name === "İsimsiz ürün") && (p.productCodes?.hb || p.skus?.hb))
+    .filter(([, p]) => isPlaceholderName(p.name) && (p.productCodes?.hb || p.skus?.hb))
     .slice(0, Math.min(Number(req.body?.limit) || 10, 25));
   let filled = 0;
   const failed = [];
@@ -3615,7 +3615,7 @@ function mergeStockRows(platform, rows) {
     // Ürün daha önce hiç görülmemişse (merkezi stok hiç ayarlanmamışsa) bu platformun
     // stok değeri merkezi stoğun ilk değeri olarak da kullanılır.
     if (!existed) p.centralStock = stock;
-    if (r.name && (!p.name || p.name === "İsimsiz ürün")) p.name = r.name;
+    if (r.name && isPlaceholderName(p.name)) p.name = r.name;
     if (r.image) {
       p.platformImage = r.image; // "Platform görseline dön" için saklanır
       if (!p.imageCustom) p.image = r.image; // elle değiştirilen resim siteden çekmede ezilmez
@@ -3632,6 +3632,41 @@ function mergeStockRows(platform, rows) {
   persistProducts();
   return { updated, created };
 }
+
+// "İsimsiz ürün" yer tutucusu (büyük/küçük harf ve İ/i birleşik-ayrık yazımlarına dayanıklı)
+function isPlaceholderName(n) {
+  const t = String(n || "").normalize("NFC").trim().toLocaleLowerCase("tr");
+  return !t || t === "isimsiz ürün" || t === "i̇simsiz ürün";
+}
+
+// Excel'den SADECE adları doldur: stok/fiyata dokunmaz. items: [{ codes: [...], name }]
+app.post("/api/products/fill-names-import", requireAuth, (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const byCode = new Map();
+  items.forEach((it) => {
+    const name = String(it?.name || "").trim();
+    if (!name) return;
+    (Array.isArray(it.codes) ? it.codes : []).forEach((c) => {
+      const k = String(c || "").trim().toUpperCase();
+      if (k && !byCode.has(k)) byCode.set(k, name);
+    });
+  });
+  let nameless = 0, filled = 0;
+  const stillNameless = [];
+  Object.entries(products).forEach(([code, p]) => {
+    if (!isPlaceholderName(p.name)) return;
+    nameless++;
+    const cands = [code, ...Object.values(p.skus || {}), ...Object.values(p.productCodes || {})];
+    let hit = null;
+    for (const c of cands) {
+      const k = String(c || "").trim().toUpperCase();
+      if (k && byCode.has(k)) { hit = byCode.get(k); break; }
+    }
+    if (hit) { p.name = hit; filled++; } else stillNameless.push(code);
+  });
+  if (filled) persistProducts();
+  res.json({ ok: true, fileRows: items.length, nameless, filled, remaining: stillNameless.length, sample: stillNameless.slice(0, 5) });
+});
 
 // Excel/CSV içe aktarma: dosya tarayıcıda (SheetJS ile) okunur, satırlar burada birleştirilir.
 app.post("/api/products/import", requireAuth, (req, res) => {
