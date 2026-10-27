@@ -575,7 +575,8 @@ async function loadPlatforms() {
     + state.platforms
       .filter(p => p.configured && p.pullable)
       .map(p => `<button class="ghost small" onclick="triggerPull('${p.id}')">${p.name} Siteden Çek${p.stockPullVerified ? '' : ' (deneysel)'}</button>`).join(' ')
-    + (state.platforms.some(p => p.id === 'hb' && p.configured) ? ' <button class="ghost small" onclick="fillHbNames()" title="Adı İsimsiz kalan Hepsiburada ürünlerinin adını Hepsiburada sitesinden doldurur">İsimsiz adları doldur</button>' : '');
+    + (state.platforms.some(p => p.id === 'hb' && p.configured) ? ' <button class="ghost small" onclick="fillHbNames()" title="Adı İsimsiz kalan Hepsiburada ürünlerinin adını Hepsiburada sitesinden doldurur">İsimsiz adları doldur</button>' : '')
+    + ' <button class="ghost small" onclick="fillNamesFromExcel()" title="Hepsiburada Excel listesinden sadece ürün adlarını doldurur (stok/fiyata dokunmaz)">Excel\'den adları doldur</button>';
 
   const unverified = state.platforms.filter(p => p.configured && !p.verified);
   document.getElementById('unverifiedArea').innerHTML = unverified.length
@@ -2103,6 +2104,12 @@ async function repriceAllNow() {
   await loadProducts();
 }
 
+let importNamesOnly = false;
+function fillNamesFromExcel() {
+  importNamesOnly = true;
+  document.getElementById('importFile').click();
+}
+
 function triggerImport(platform) {
   importPlatform = platform;
   document.getElementById('importFile').click();
@@ -2155,10 +2162,31 @@ function handleImportFile(e) {
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
     if (!rows.length) { toast('Dosyada veri bulunamadı.'); return; }
     const headers = rows[0].map(String);
+    if (importNamesOnly) {
+      importNamesOnly = false;
+      const hl = headers.map(x => x.trim().toLocaleLowerCase('tr'));
+      const nIdx = hl.findIndex(x => ['ürün adı','urun adi','ürün ismi','başlık','baslik'].includes(x));
+      if (nIdx < 0) { toast('Dosyada "Ürün Adı" sütunu bulunamadı.'); return; }
+      const codeIdx = hl.map((x, i) => ['satıcı stok kodu','stok kodu','sku','barkod','merchantsku'].includes(x) ? i : -1).filter(i => i >= 0);
+      const items = rows.slice(1)
+        .map(r => ({ name: String(r[nIdx] ?? '').trim(), codes: codeIdx.map(i => String(r[i] ?? '').trim()).filter(Boolean) }))
+        .filter(x => x.name && x.codes.length);
+      toast(`${items.length} satır okundu, adlar dolduruluyor…`);
+      try {
+        const resp = await fetch('/api/products/fill-names-import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+        const d = await resp.json();
+        if (!d.ok) { toast(d.error || 'Ad doldurma başarısız.'); return; }
+        toast(`Adsız ${d.nameless} ürünün ${d.filled}'i dolduruldu.` + (d.remaining ? ` Eşleşmeyen: ${d.remaining} (örn. ${d.sample.join(', ')}).` : ''));
+        await loadProducts();
+      } catch (e) { toast('Hata: ' + e.message); }
+      return;
+    }
     const guess = (keywords) => headers.findIndex(h => keywords.some(k => h.toLocaleLowerCase('tr').includes(k)));
-    const barcodeCol = guess(['barkod','sku','stok kod','ürün kod','urun kod']);
-    const stockCol = guess(['stok adedi','stok miktar','miktar','adet','stok']);
-    const nameCol = guess(['ürün adı','urun adi','başlık','baslik','ad']);
+    // Önce başlığın TAM eşleştiği sütun aranır ("Satıcı Stok Kodu" yanlışlıkla stok sütunu sayılmasın).
+    const exact = (names) => headers.findIndex(h => names.includes(h.trim().toLocaleLowerCase('tr')));
+    const barcodeCol = (() => { const e = exact(['satıcı stok kodu','stok kodu','barkod']); return e >= 0 ? e : guess(['barkod','sku','stok kod','ürün kod','urun kod']); })();
+    const stockCol = (() => { const e = exact(['stok','stok adedi','stok miktarı','miktar','adet']); return e >= 0 ? e : guess(['stok adedi','stok miktar','miktar','adet']); })();
+    const nameCol = (() => { const e = exact(['ürün adı','urun adi','ürün ismi','başlık','baslik']); return e >= 0 ? e : guess(['ürün adı','urun adi','başlık','baslik']); })();
     const priceCol = guess(['fiyat','price','satış fiyat','satis fiyat']);
     const dataRows = rows.slice(1).filter(r => r.some(c => String(c).trim() !== ''));
     const parsed = dataRows.map(r => ({
