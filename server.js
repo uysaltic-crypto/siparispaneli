@@ -814,10 +814,12 @@ function parseCompetitorHtml(html) {
         for (const o of os) {
           const price = Number(o?.price || o?.lowPrice);
           if (!(price > 0)) continue;
-          let seller = o?.seller?.name || null;
-          // Satıcısı belirtilmeyen teklif, ana satıcının fiyatıyla aynıysa ana satıcıya aittir.
-          if (!seller && mainSeller && mainPrice && Math.abs(price - mainPrice) < 0.005) seller = mainSeller;
-          offers.push({ seller, price, src: "jsonld" });
+          // Hepsiburada JSON-LD'sinde seller.name çoğunlukla MARKA adıdır (örn. "Samet"). Ürün sayfasının
+          // JSON-LD teklifi görünen (buybox) teklife aittir; ana satıcı biliniyorsa satıcı odur.
+          const rawSeller = o?.seller?.name || null;
+          const seller = mainSeller || rawSeller;
+          if (!mainPrice) mainPrice = price;
+          offers.push({ seller, price, src: "jsonld", rawSeller });
         }
       }
     } catch (_) { /* geç */ }
@@ -904,7 +906,18 @@ app.get("/api/competitor-debug", requireAuth, async (req, res) => {
     const resp = await axios.get(target, { timeout: tpl ? 60000 : 15000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept-Language": "tr-TR,tr;q=0.9" }, maxRedirects: 5 });
     const html = String(resp.data);
     const p = parseCompetitorHtml(html);
-    res.json({ ok: true, ownTokens: ownSellerTokens(), htmlUzunluk: html.length, ...p });
+    // ?q=HOBİDABİ gibi bir metin verilirse ham HTML'de (script/JSON dahil) nerelerde geçtiğini gösterir.
+    let ornekler;
+    const q = String(req.query.q || "").trim();
+    if (q) {
+      const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      ornekler = [];
+      for (const m of html.matchAll(new RegExp(esc, "gi"))) {
+        ornekler.push(html.slice(Math.max(0, m.index - 300), m.index + 300).replace(/\s+/g, " "));
+        if (ornekler.length >= 4) break;
+      }
+    }
+    res.json({ ok: true, ownTokens: ownSellerTokens(), htmlUzunluk: html.length, ...p, ...(q ? { aranan: q, ornekler } : {}) });
   } catch (e) { res.json({ ok: false, error: e.response?.status ? `HTTP ${e.response.status}` : e.message }); }
 });
 
