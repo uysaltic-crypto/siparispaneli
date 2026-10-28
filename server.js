@@ -767,6 +767,96 @@ async function pushPriceToTrendyol(barcode, salePrice, quantity) {
    (schema.org Product/Offer) verisine verilir çünkü bu, görsel
    tasarım değişse bile genelde aynı kalan yapısal bir veridir.
 ================================================================== */
+
+// Kendi satıcı adın: rakip sayfasında kendi teklifin rakip sayılmasın. Render'da OWN_SELLER_NAMES
+// (virgülle ayrılmış, büyük/küçük harf önemsiz, "içerir" eşleşmesi) ile değiştirilebilir.
+function ownSellerTokens() {
+  const raw = process.env.OWN_SELLER_NAMES || "uysal";
+  return raw.split(",").map((x) => x.trim().toLocaleLowerCase("tr")).filter(Boolean);
+}
+function isOwnSeller(name) {
+  const n = String(name || "").toLocaleLowerCase("tr");
+  return !!n && ownSellerTokens().some((t) => n.includes(t));
+}
+function parseTrPrice(str) {
+  const n = Number(String(str).replace(/\./g, "").replace(",", "."));
+  return n > 0 ? n : null;
+}
+
+// Sayfadaki TÜM satıcı tekliflerini çıkarır (JSON-LD + sayfa metni: ana satıcı, "Diğer satıcılar"),
+// kendi tekliflerini eler ve en düşük rakip fiyatı verir. Resmi API değil; best effort.
+function parseCompetitorHtml(html) {
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ");
+  const priceRe = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*TL/;
+
+  // Ana (buybox) satıcı + fiyatı: "Satıcı: UYSAL TİCARET SALİHLİ 9,3 ... 95,00 TL"
+  let mainSeller = null, mainPrice = null;
+  const sm = text.match(/Satıcı:\s*(.+?)\s+\d{1,2}[,.]\d\b/);
+  if (sm) {
+    mainSeller = sm[1].trim();
+    const after = text.slice(sm.index, sm.index + 600).match(priceRe);
+    if (after) mainPrice = parseTrPrice(after[1]);
+  }
+
+  const offers = []; // { seller, price, src }
+  // 1) JSON-LD
+  for (const m of html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const data = JSON.parse(m[1].trim());
+      const items = Array.isArray(data) ? data : data["@graph"] || [data];
+      for (const item of items) {
+        let os = item?.offers ? (Array.isArray(item.offers) ? item.offers : [item.offers]) : [];
+        os = os.flatMap((o) => (Array.isArray(o?.offers) ? o.offers : [o]));
+        for (const o of os) {
+          const price = Number(o?.price || o?.lowPrice);
+          if (!(price > 0)) continue;
+          let seller = o?.seller?.name || null;
+          // Satıcısı belirtilmeyen teklif, ana satıcının fiyatıyla aynıysa ana satıcıya aittir.
+          if (!seller && mainSeller && mainPrice && Math.abs(price - mainPrice) < 0.005) seller = mainSeller;
+          offers.push({ seller, price, src: "jsonld" });
+        }
+      }
+    } catch (_) { /* geç */ }
+  }
+  // 2) Sayfa metni: ana teklif
+  if (mainSeller && mainPrice) offers.push({ seller: mainSeller, price: mainPrice, src: "main" });
+  // 3) Sayfa metni: "Diğer satıcılar" bölümü (her teklif "Ürüne git" ile biter)
+  const di = text.search(/Diğer satıcılar/i);
+  if (di >= 0) {
+    const seg = text.slice(di, di + 2500).replace(/^Diğer satıcılar/i, "");
+    seg.split(/Ürüne git/i).forEach((chunk) => {
+      const pm = [...chunk.matchAll(new RegExp(priceRe.source, "g"))].pop();
+      if (!pm) return;
+      const nm = chunk.trim().match(/^(.+?)\s+\d{1,2}[,.]\d\b/);
+      offers.push({ seller: nm ? nm[1].trim() : null, price: parseTrPrice(pm[1]), src: "diger" });
+    });
+  }
+  // 4) Yedek: meta fiyat (satıcı bilinmez)
+  if (!offers.length) {
+    const mm = html.match(/<meta[^>]+(?:property|name)=["'](?:og:price:amount|product:price:amount)["'][^>]+content=["']([\d.,]+)["']/i);
+    if (mm) { const pr = parseTrPrice(mm[1]); if (pr) offers.push({ seller: null, price: pr, src: "meta" }); }
+  }
+
+  const valid = offers.filter((o) => o.price > 0);
+  const others = valid.filter((o) => !isOwnSeller(o.seller));
+  // Ana satıcı sen isen, satıcısı bilinmeyen JSON-LD/meta fiyatı da senin ana fiyatındır → rakip sayma.
+  const mainIsOwn = mainSeller && isOwnSeller(mainSeller);
+  const competitors = others.filter((o) => !(mainIsOwn && !o.seller && mainPrice && Math.abs(o.price - mainPrice) < 0.005));
+  const unattributedOnlyWhileMainOwn = mainIsOwn && !competitors.length;
+  const best = competitors.sort((a, b) => a.price - b.price)[0] || null;
+  return {
+    price: best ? best.price : null,
+    sellerName: best ? best.seller : null,
+    ownOnly: !best && (unattributedOnlyWhileMainOwn || (valid.length > 0 && !others.length)),
+    mainSeller, mainPrice, offers: valid,
+    digerSaticilarVar: di >= 0,
+  };
+}
+
 async function fetchCompetitorPrice(url) {
   try {
     // İsteğe bağlı: bulut IP'si engelleniyorsa, bir "scraping" servisi/proxy üzerinden çek.
@@ -791,32 +881,11 @@ async function fetchCompetitorPrice(url) {
       maxRedirects: 5,
     });
     const html = String(resp.data);
-
-    // 1) JSON-LD (schema.org Product/Offer) — en güvenilir yol
-    const ldBlocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
-    for (const m of ldBlocks) {
-      try {
-        let data = JSON.parse(m[1].trim());
-        const items = Array.isArray(data) ? data : data["@graph"] || [data];
-        for (const item of items) {
-          const offers = item?.offers ? (Array.isArray(item.offers) ? item.offers : [item.offers]) : null;
-          if (offers) {
-            const price = offers.map((o) => Number(o.price || o.lowPrice)).find((n) => !isNaN(n) && n > 0);
-            if (price) return { ok: true, price, sellerName: offers[0]?.seller?.name || null };
-          }
-        }
-      } catch (_) {
-        /* bu blok JSON-LD değilse yoksay, diğerine bak */
-      }
+    const parsed = parseCompetitorHtml(html);
+    if (parsed.ownOnly) {
+      return { ok: true, price: null, sellerName: null, note: "Sayfada kendi teklifin dışında satıcı bulunamadı; rakip fiyatı yok." };
     }
-
-    // 2) Yedek: meta etiketi (og:price:amount / product:price:amount)
-    const metaMatch = html.match(/<meta[^>]+(?:property|name)=["'](?:og:price:amount|product:price:amount)["'][^>]+content=["']([\d.,]+)["']/i);
-    if (metaMatch) {
-      const price = Number(metaMatch[1].replace(/\./g, "").replace(",", "."));
-      if (price > 0) return { ok: true, price, sellerName: null };
-    }
-
+    if (parsed.price) return { ok: true, price: parsed.price, sellerName: parsed.sellerName || null };
     return { ok: false, error: "Sayfadan fiyat okunamadı (yapı değişmiş olabilir)." };
   } catch (err) {
     const status = err.response?.status;
@@ -824,6 +893,20 @@ async function fetchCompetitorPrice(url) {
     return { ok: false, error: err.message };
   }
 }
+
+// Tanı: rakip sayfasından neler okunuyor? /api/competitor-debug?url=https://www.hepsiburada.com/...
+app.get("/api/competitor-debug", requireAuth, async (req, res) => {
+  const url = String(req.query.url || "").trim();
+  if (!/^https:\/\//i.test(url)) return res.status(400).json({ ok: false, error: "url gerekli (https://...)" });
+  try {
+    const tpl = process.env.COMPETITOR_FETCH_TEMPLATE;
+    const target = tpl && tpl.includes("{url}") ? tpl.replace("{url}", encodeURIComponent(url)) : url;
+    const resp = await axios.get(target, { timeout: tpl ? 60000 : 15000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept-Language": "tr-TR,tr;q=0.9" }, maxRedirects: 5 });
+    const html = String(resp.data);
+    const p = parseCompetitorHtml(html);
+    res.json({ ok: true, ownTokens: ownSellerTokens(), htmlUzunluk: html.length, ...p });
+  } catch (e) { res.json({ ok: false, error: e.response?.status ? `HTTP ${e.response.status}` : e.message }); }
+});
 
 // Otomatik fiyatlandırmanın fiyat göndereceği platformlar (ürün bazında). Eski kayıtlarda yoksa Trendyol.
 function autoPlatforms(prod) {
@@ -852,9 +935,9 @@ async function repriceProduct(code) {
       const r = await fetchCompetitorPrice(c.url);
       c.lastCheckedAt = new Date().toISOString();
       if (r.ok) {
-        c.lastPrice = r.price;
-        c.sellerName = r.sellerName || c.sellerName;
-        c.lastError = null;
+        c.lastPrice = r.price ?? null; // price null: sayfada yalnızca kendi teklifin var → eski fiyat kalmasın
+        c.sellerName = r.price ? r.sellerName || c.sellerName : c.sellerName;
+        c.lastError = r.note || null;
       } else {
         c.lastError = r.error;
       }
