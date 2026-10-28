@@ -1896,10 +1896,92 @@ async function replyKoctas(id, text) {
   }
 }
 
+
+/* ------------------------------------------------------------------
+   HEPSİBURADA — "Satıcıya Sor" (müşteri soruları). Resmi doküman: developers.hepsiburada.com
+   - Ayrı servis: https://api-asktoseller-merchant.hepsiburada.com  (test: ...-merchant-sit...)
+   - Soru detayı: GET /api/v1.0/issues/{number}   |   Statü sayıları: GET /api/v1.0/issues/count
+   - merchantId HEADER ile gönderilir. Statü: 1 = cevap bekleyen, 2 = cevaplanan.
+   - Soru LİSTESİ ucu (GET /api/v1.0/issues + status/size/page/sortBy/desc) ve soru CEVAPLAMA ucu
+     dokümandaki parametrelerden çıkarıldı; cevaplama ucu henüz doğrulanmadığı için kapalıdır.
+------------------------------------------------------------------ */
+function hbAskHost() {
+  return process.env.HB_ENV === "test" ? "api-asktoseller-merchant-sit.hepsiburada.com" : "api-asktoseller-merchant.hepsiburada.com";
+}
+function hbAskReq() {
+  const a = hbAuthConfig();
+  return { auth: a.auth, headers: { "User-Agent": a.userAgent, Accept: "application/json", merchantId: process.env.HB_MERCHANT_ID }, timeout: 20000 };
+}
+async function hbAskList(statuses) {
+  // status birden çok kez tekrarlanır (status=2&status=4); axios dizileri status[] yazdığı için sorgu elle kurulur.
+  const qs = [...statuses.map((s) => `status=${s}`), "size=50", "page=1", "sortBy=0", "desc=true"].join("&");
+  return axios.get(`https://${hbAskHost()}/api/v1.0/issues?${qs}`, hbAskReq());
+}
+
+async function fetchHepsiburadaMessages() {
+  if (!hbConfigured()) return { platform: "hb", error: "Hepsiburada API bilgileri eksik.", messages: [] };
+  const messages = [];
+  try {
+    for (const [status, answered] of [[1, false], [2, true]]) {
+      const resp = await hbAskList([status]);
+      const d = resp.data;
+      const items = Array.isArray(d) ? d : d?.data || d?.items || d?.issues || d?.content || d?.result || [];
+      (Array.isArray(items) ? items : []).forEach((q) => {
+        const conv = (q.conversations || [])
+          .map((c) => ({ from: /merchant/i.test(String(c.from)) ? "shop" : "customer", text: c.content || "", date: c.createdAt ? new Date(c.createdAt).getTime() : null }))
+          .sort((a, b) => (a.date || 0) - (b.date || 0));
+        const lastShop = [...conv].reverse().find((m) => m.from === "shop");
+        const firstCustomer = conv.find((m) => m.from === "customer");
+        messages.push({
+          platform: "hb",
+          id: String(q.issueNumber ?? q.number ?? q.id ?? ""),
+          customer: "Hepsiburada müşterisi",
+          subject: q.product?.name || q.subject?.description || q.subject?.Description || "",
+          image: q.product?.imageUrl && /^https:\/\//i.test(q.product.imageUrl) ? q.product.imageUrl : null,
+          text: (answered ? firstCustomer?.text : q.lastContent || firstCustomer?.text) || q.lastContent || "",
+          date: q.createdAt ? new Date(q.createdAt).getTime() : null,
+          answered,
+          answerText: answered ? lastShop?.text || q.lastContent || "" : "",
+          thread: conv,
+        });
+      });
+    }
+    return { platform: "hb", error: null, messages: messages.filter((m) => m.id) };
+  } catch (err) {
+    const st = err.response?.status;
+    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 250)}` : "";
+    const msg =
+      st === 401 || st === 403
+        ? `Hepsiburada soruları: kimlik doğrulama/yetki hatası (${st})${detail}`
+        : st === 404
+        ? `Hepsiburada soruları: adres bulunamadı (404)${detail}`
+        : `Hepsiburada soruları hata: ${st ? "HTTP " + st + detail : err.message}`;
+    return { platform: "hb", error: msg, messages: [] };
+  }
+}
+
+async function replyHepsiburada() {
+  // Cevaplama ucu (yöntem + gövde) resmi dokümandan henüz doğrulanmadı; tahminle istek atılmaz.
+  return { ok: false, message: "Hepsiburada soru cevaplama henüz bağlanmadı; şimdilik Hepsiburada satıcı panelinden cevapla." };
+}
+
+// Tanı: ham yanıtı gör. /api/hb/raw-questions?status=1  veya  ?number=12345 (tek soru detayı)
+app.get("/api/hb/raw-questions", requireAuth, async (req, res) => {
+  if (!hbConfigured()) return res.json({ ok: false, error: "HB API bilgileri eksik." });
+  try {
+    const number = String(req.query.number || "").trim();
+    const r = number
+      ? await axios.get(`https://${hbAskHost()}/api/v1.0/issues/${encodeURIComponent(number)}`, { ...hbAskReq(), validateStatus: () => true })
+      : await axios.get(`https://${hbAskHost()}/api/v1.0/issues?status=${Number(req.query.status) || 1}&size=3&page=1&sortBy=0&desc=true`, { ...hbAskReq(), validateStatus: () => true });
+    res.json({ ok: true, durum: r.status, govde: JSON.stringify(r.data).slice(0, 3000) });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
 // Yeni bir platformun mesajlarını eklemek için buraya bir satır ekle.
 const MESSAGING = {
   ty: { fetch: fetchTrendyolMessages, reply: replyTrendyol, verified: true },
   koctas: { fetch: fetchKoctasMessages, reply: replyKoctas, verified: false },
+  hb: { fetch: fetchHepsiburadaMessages, reply: replyHepsiburada, verified: false },
 };
 
 let messagesCache = { fetchedAt: 0, messages: [], errors: [] };
