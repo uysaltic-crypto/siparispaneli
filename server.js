@@ -1208,11 +1208,40 @@ function csHost() {
   return process.env.CS_ENV === "test" ? "sandbox-apis.ciceksepeti.com" : "apis.ciceksepeti.com";
 }
 
+// Render'a yapıştırılan değerlerde gizli boşluk/satır sonu/tırnak kalabiliyor (401'in sık nedeni).
+const csClean = (v) => String(v ?? "").trim().replace(/^["']|["']$/g, "").trim();
 function csHeaders() {
-  const { CS_API_KEY, CS_SUPPLIER_ID, CS_INTEGRATOR_NAME } = process.env;
-  const userAgent = CS_INTEGRATOR_NAME ? `${CS_SUPPLIER_ID}-${CS_INTEGRATOR_NAME}` : String(CS_SUPPLIER_ID);
-  return { "x-api-key": CS_API_KEY, "user-agent": userAgent, "Content-Type": "application/json", Accept: "application/json" };
+  const apiKey = csClean(process.env.CS_API_KEY);
+  const supplierId = csClean(process.env.CS_SUPPLIER_ID);
+  const integrator = csClean(process.env.CS_INTEGRATOR_NAME);
+  const userAgent = integrator ? `${supplierId}-${integrator}` : supplierId;
+  return { "x-api-key": apiKey, "user-agent": userAgent, "Content-Type": "application/json", Accept: "application/json" };
 }
+
+// Tanı (anahtar maskeli): /api/cs-debug — hangi değerlerle istek atılıyor ve Çiçeksepeti ne yanıt veriyor?
+app.get("/api/cs-debug", requireAuth, async (req, res) => {
+  const raw = {
+    key: String(process.env.CS_API_KEY ?? ""),
+    supplier: String(process.env.CS_SUPPLIER_ID ?? ""),
+    integrator: String(process.env.CS_INTEGRATOR_NAME ?? ""),
+  };
+  const h = csHeaders();
+  const mask = (k) => (k.length > 8 ? `${k.slice(0, 3)}…${k.slice(-2)}` : k ? "(çok kısa)" : "(boş)");
+  const out = {
+    ortam: process.env.CS_ENV === "test" ? "test (sandbox)" : "canlı",
+    anahtar: { uzunluk: h["x-api-key"].length, maske: mask(h["x-api-key"]), temizlenenBosluk: raw.key.length !== h["x-api-key"].length },
+    saticiId: h["user-agent"].split("-")[0],
+    userAgent: h["user-agent"],
+    entegratorAdi: raw.integrator ? raw.integrator.trim() : "(tanımlı değil)",
+  };
+  try {
+    const r = await axios.post(`https://${csHost()}/api/v1/Order/GetOrders`,
+      { startDate: new Date(Date.now() - 86400000).toISOString(), endDate: new Date().toISOString(), pageSize: 1, page: 0 },
+      { headers: h, timeout: 20000, validateStatus: () => true });
+    out.sonuc = { durum: r.status, yanit: JSON.stringify(r.data).slice(0, 300) };
+  } catch (e) { out.sonuc = { hata: e.message }; }
+  res.json({ ok: true, ...out });
+});
 
 async function fetchCiceksepetiOrders() {
   if (!csConfigured())
