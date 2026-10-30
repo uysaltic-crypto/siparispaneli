@@ -1928,7 +1928,7 @@ async function fetchHepsiburadaMessages() {
       const items = Array.isArray(d) ? d : d?.data || d?.items || d?.issues || d?.content || d?.result || [];
       (Array.isArray(items) ? items : []).forEach((q) => {
         const conv = (q.conversations || [])
-          .map((c) => ({ from: /merchant/i.test(String(c.from)) ? "shop" : "customer", text: c.content || "", date: c.createdAt ? new Date(c.createdAt).getTime() : null }))
+          .map((c) => ({ from: /merchant/i.test(String(c.from)) ? "shop" : "customer", text: String(c.content || "").trim(), date: c.createdAt ? new Date(c.createdAt).getTime() : null }))
           .sort((a, b) => (a.date || 0) - (b.date || 0));
         const lastShop = [...conv].reverse().find((m) => m.from === "shop");
         const firstCustomer = conv.find((m) => m.from === "customer");
@@ -1936,12 +1936,17 @@ async function fetchHepsiburadaMessages() {
           platform: "hb",
           id: String(q.issueNumber ?? q.number ?? q.id ?? ""),
           customer: "Hepsiburada müşterisi",
-          subject: q.product?.name || q.subject?.description || q.subject?.Description || "",
-          image: q.product?.imageUrl && /^https:\/\//i.test(q.product.imageUrl) ? q.product.imageUrl : null,
-          text: (answered ? firstCustomer?.text : q.lastContent || firstCustomer?.text) || q.lastContent || "",
+          subject:
+            (q.product?.name || q.subject?.description || q.subject?.Description || "") +
+            (!answered && q.expireDate
+              ? " · son cevap: " + new Date(q.expireDate).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+              : ""),
+          // Hepsiburada görsel adresinde {size} yer tutucusu gelir; gerçek bir boyutla değiştirilir.
+          image: q.product?.imageUrl && /^https:\/\//i.test(q.product.imageUrl) ? q.product.imageUrl.replace("{size}", "500") : null,
+          text: String((answered ? firstCustomer?.text : q.lastContent || firstCustomer?.text) || q.lastContent || "").trim(),
           date: q.createdAt ? new Date(q.createdAt).getTime() : null,
           answered,
-          answerText: answered ? lastShop?.text || q.lastContent || "" : "",
+          answerText: answered ? String(lastShop?.text || q.lastContent || "").trim() : "",
           thread: conv,
         });
       });
@@ -1977,11 +1982,220 @@ app.get("/api/hb/raw-questions", requireAuth, async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
 
+
+/* ------------------------------------------------------------------
+   ÇİÇEKSEPETİ — Ürün soruları (resmi doküman: Soru Cevap Yönetimi)
+   - Liste:   GET /api/v1/sellerquestions?CreateStartDate&CreateEndDate&Page  (tarih aralığı en çok 32 gün)
+   - Cevap:   PUT /api/v1/sellerquestions/{id}  { answer, branchActionId: 1 }
+     branchActionId=1 "Soru ve cevabı yayınla" → cevap ürün sayfasında herkese görünür.
+   - Aynı istek gövdesiyle 10 sn, farklı gövdeyle 5 sn'de 1 istek hakkı vardır.
+------------------------------------------------------------------ */
+const csDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+function csGetQuestions(params) {
+  return axios.get(`https://${csHost()}/api/v1/sellerquestions`, { headers: csHeaders(), params, timeout: 20000, validateStatus: () => true });
+}
+
+async function fetchCiceksepetiMessages() {
+  if (!csConfigured()) return { platform: "cs", error: "Çiçeksepeti API bilgisi eksik.", messages: [] };
+  const messages = [];
+  try {
+    const now = Date.now();
+    const start = now - 30 * 86400000; // sınır 32 gün
+    const end = now + 86400000; // bugünü de kapsasın
+    for (let page = 1; page <= 3; page++) {
+      // Doküman tarihleri "timestamp(ms)" diye yazıyor, örnek istek ise YYYY-MM-DD kullanıyor; önce örnek biçimi dene.
+      let r = await csGetQuestions({ CreateStartDate: csDay(start), CreateEndDate: csDay(end), Page: page });
+      if (r.status === 400) {
+        await sleep(5200);
+        r = await csGetQuestions({ CreateStartDate: start, CreateEndDate: end, Page: page });
+      }
+      if (r.status === 429) break; // hız sınırı: elimizdekiyle devam et
+      if (r.status !== 200) {
+        const detail = r.data ? ` — ${JSON.stringify(r.data).slice(0, 250)}` : "";
+        return { platform: "cs", error: `Çiçeksepeti soruları: HTTP ${r.status}${detail}`, messages };
+      }
+      const d = r.data;
+      const items = Array.isArray(d?.items) ? d.items : Array.isArray(d) ? d : [];
+      items.forEach((q) => {
+        const answered = q.answered === true || !!q.answer;
+        const qDate = q.questionDate ? new Date(q.questionDate).getTime() : null;
+        const aDate = q.answerDate ? new Date(q.answerDate).getTime() : null;
+        const img = q.product?.imageUrl || q.imageUrl || "";
+        messages.push({
+          platform: "cs",
+          id: String(q.id || ""),
+          customer: "Çiçeksepeti müşterisi",
+          subject: q.product?.name || q.name || q.product?.code || q.code || "",
+          image: /^https:\/\//i.test(img) ? img : null,
+          text: String(q.question || "").trim(),
+          date: qDate,
+          answered,
+          answerText: answered ? String(q.answer || "").trim() : "",
+          thread: [
+            { from: "customer", text: String(q.question || "").trim(), date: qDate },
+            ...(answered && q.answer ? [{ from: "shop", text: String(q.answer).trim(), date: aDate }] : []),
+          ],
+        });
+      });
+      if (!d?.hasNextPage) break;
+      await sleep(5200); // farklı gövde: 5 sn'de 1 istek
+    }
+    return { platform: "cs", error: null, messages: messages.filter((m) => m.id) };
+  } catch (err) {
+    return { platform: "cs", error: `Çiçeksepeti soruları hata: ${err.message}`, messages };
+  }
+}
+
+async function replyCiceksepeti(id, text) {
+  if (!csConfigured()) return { ok: false, message: "Çiçeksepeti API bilgisi eksik." };
+  try {
+    const r = await axios.put(
+      `https://${csHost()}/api/v1/sellerquestions/${encodeURIComponent(id)}`,
+      { answer: text, branchActionId: 1 }, // 1 = soru ve cevabı yayınla (answer zorunlu; diğer alanlar boş olmalı)
+      { headers: csHeaders(), timeout: 20000, validateStatus: () => true }
+    );
+    if (r.status >= 200 && r.status < 300) return { ok: true, message: "Cevap gönderildi (ürün sayfasında yayınlanır)" };
+    return { ok: false, message: `Çiçeksepeti HTTP ${r.status}${r.data ? " — " + JSON.stringify(r.data).slice(0, 250) : ""}` };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+// Tanı: /api/cs/raw-questions  (ham yanıt)   |   /api/cs/raw-questions?actions=1  (işlem türü karşılıkları)
+app.get("/api/cs/raw-questions", requireAuth, async (req, res) => {
+  if (!csConfigured()) return res.json({ ok: false, error: "CS API bilgisi eksik." });
+  try {
+    const r = req.query.actions
+      ? await axios.get(`https://${csHost()}/api/v1/sellerquestions/actions`, { headers: csHeaders(), timeout: 20000, validateStatus: () => true })
+      : await csGetQuestions({ CreateStartDate: csDay(Date.now() - 30 * 86400000), CreateEndDate: csDay(Date.now() + 86400000), Page: 1 });
+    res.json({ ok: true, durum: r.status, govde: JSON.stringify(r.data).slice(0, 3000) });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+/* ------------------------------------------------------------------
+   N11 — Ürün Soru-Cevap Servisi (SOAP, resmi doküman: Ürün Soru-Cevap Servisi)
+   - WSDL: https://api.n11.com/ws/productService.wsdl
+   - GetProductQuestionList (status OPEN/CLOSED, startDate/endDate DD/MM/YYYY) — DAKİKADA 1 KEZ listelenebilir
+   - SaveProductAnswerRequest: bir soru bir kez cevaplanır (1-2048 karakter), sonra CLOSED olur.
+------------------------------------------------------------------ */
+let n11SoapUrl = null;
+async function n11ProductServiceUrl() {
+  if (n11SoapUrl) return n11SoapUrl;
+  try {
+    const r = await axios.get("https://api.n11.com/ws/productService.wsdl", { timeout: 15000, responseType: "text" });
+    const m = String(r.data).match(/<(?:\w+:)?address[^>]+location="([^"]+)"/i);
+    if (m) n11SoapUrl = m[1].replace(/^http:\/\//i, "https://");
+  } catch (_) { /* varsayılana düş */ }
+  return n11SoapUrl || "https://api.n11.com/ws/productService/";
+}
+const qaXmlEsc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function xmlTag(block, tag) {
+  const m = String(block).match(new RegExp(`<(?:\\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?${tag}>`));
+  if (!m) return "";
+  return m[1].replace(/^<!\[CDATA\[|\]\]>$/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&").trim();
+}
+async function n11Soap(requestName, innerXml) {
+  const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+  const body =
+    `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:sch="http://www.n11.com/ws/schemas"><soapenv:Header/><soapenv:Body>` +
+    `<sch:${requestName}><auth><appKey>${qaXmlEsc(N11_APP_KEY)}</appKey><appSecret>${qaXmlEsc(N11_APP_SECRET)}</appSecret></auth>${innerXml}</sch:${requestName}>` +
+    `</soapenv:Body></soapenv:Envelope>`;
+  const r = await axios.post(await n11ProductServiceUrl(), body, {
+    headers: { "Content-Type": "text/xml; charset=utf-8", SOAPAction: "" },
+    timeout: 25000, responseType: "text", validateStatus: () => true,
+  });
+  return { status: r.status, xml: String(r.data) };
+}
+const n11Day = (ms) => new Date(ms).toLocaleDateString("en-GB", { timeZone: "Europe/Istanbul" }); // GG/AA/YYYY
+
+// Dakikada 1 liste hakkı: her yenilemede en çok 1 çağrı; sonuçlar önbellekte tutulur.
+const n11Q = { lastCallAt: 0, open: [], closed: [], openAt: 0, closedAt: 0, error: null };
+function n11ParseQuestions(xml, closed) {
+  return (String(xml).match(/<productQuestion>[\s\S]*?<\/productQuestion>/g) || []).map((b) => {
+    const question = xmlTag(b, "question");
+    const answer = xmlTag(b, "answer");
+    const subj = xmlTag(b, "questionSubject");
+    return {
+      platform: "n11",
+      id: xmlTag(b, "id"),
+      customer: "N11 müşterisi",
+      subject: xmlTag(b, "productTitle") + (subj ? " · " + subj : ""),
+      image: null,
+      text: question,
+      date: null, // liste servisi soru tarihi vermez (yalnızca detay servisi verir)
+      answered: closed,
+      answerText: closed ? answer : "",
+      thread: [{ from: "customer", text: question, date: null }, ...(closed && answer ? [{ from: "shop", text: answer, date: null }] : [])],
+    };
+  }).filter((m) => m.id);
+}
+async function fetchN11Messages() {
+  if (!n11Configured()) return { platform: "n11", error: "N11 API bilgisi eksik.", messages: [] };
+  const now = Date.now();
+  if (now - n11Q.lastCallAt >= 65000) {
+    // Açık sorular öncelikli; kapananlar 10 dakikada bir tazelenir.
+    const status = n11Q.openAt && now - n11Q.closedAt > 10 * 60 * 1000 ? "CLOSED" : "OPEN";
+    n11Q.lastCallAt = now;
+    try {
+      const days = Number(process.env.N11_QA_DAYS) || 14;
+      const r = await n11Soap(
+        "GetProductQuestionListRequest",
+        `<productQuestionSearch><status>${status}</status><startDate>${n11Day(now - days * 86400000)}</startDate><endDate>${n11Day(now + 86400000)}</endDate></productQuestionSearch><pagingData><currentPage>0</currentPage><pageSize>50</pageSize></pagingData>`
+      );
+      if (xmlTag(r.xml, "status") === "success") {
+        const list = n11ParseQuestions(r.xml, status === "CLOSED");
+        if (status === "OPEN") { n11Q.open = list; n11Q.openAt = now; } else { n11Q.closed = list; n11Q.closedAt = now; }
+        n11Q.error = null;
+      } else {
+        const em = xmlTag(r.xml, "errorMessage") || `HTTP ${r.status}`;
+        // Hız sınırı uyarısı hata sayılmaz; önbellekteki sonuçlar gösterilir.
+        n11Q.error = /dakika|kez|limit|sık/i.test(em) ? n11Q.error : `N11 soruları: ${em}`;
+      }
+    } catch (err) {
+      n11Q.error = `N11 soruları hata: ${err.message}`;
+    }
+  }
+  return { platform: "n11", error: n11Q.error, messages: [...n11Q.open, ...n11Q.closed] };
+}
+
+async function replyN11(id, text) {
+  if (!n11Configured()) return { ok: false, message: "N11 API bilgisi eksik." };
+  if (text.length > 2048) return { ok: false, message: "N11 cevabı en fazla 2048 karakter olabilir." };
+  try {
+    const r = await n11Soap("SaveProductAnswerRequest", `<productQuestionId>${qaXmlEsc(id)}</productQuestionId><answer>${qaXmlEsc(text)}</answer>`);
+    if (xmlTag(r.xml, "status") !== "success") return { ok: false, message: xmlTag(r.xml, "errorMessage") || `N11 cevap gönderilemedi (HTTP ${r.status})` };
+    // Önbellekte soruyu "cevaplandı" olarak taşı (bir sonraki liste çağrısı ≥1 dk sonra olabilir).
+    const i = n11Q.open.findIndex((m) => m.id === String(id));
+    if (i >= 0) {
+      const [m] = n11Q.open.splice(i, 1);
+      n11Q.closed.unshift({ ...m, answered: true, answerText: text, thread: [...m.thread, { from: "shop", text, date: Date.now() }] });
+    }
+    return { ok: true, message: "Cevap gönderildi" };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+// Tanı: /api/n11/raw-questions?status=OPEN|CLOSED  (dakikada 1 liste hakkını kullanır)
+app.get("/api/n11/raw-questions", requireAuth, async (req, res) => {
+  if (!n11Configured()) return res.json({ ok: false, error: "N11 API bilgisi eksik." });
+  try {
+    const status = String(req.query.status || "OPEN").toUpperCase() === "CLOSED" ? "CLOSED" : "OPEN";
+    const now = Date.now();
+    n11Q.lastCallAt = now; // panelin kendi çağrısı hız sınırına takılmasın
+    const r = await n11Soap("GetProductQuestionListRequest",
+      `<productQuestionSearch><status>${status}</status><startDate>${n11Day(now - 14 * 86400000)}</startDate><endDate>${n11Day(now + 86400000)}</endDate></productQuestionSearch><pagingData><currentPage>0</currentPage><pageSize>10</pageSize></pagingData>`);
+    res.json({ ok: true, adres: await n11ProductServiceUrl(), durum: r.status, govde: r.xml.slice(0, 3000) });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
 // Yeni bir platformun mesajlarını eklemek için buraya bir satır ekle.
 const MESSAGING = {
   ty: { fetch: fetchTrendyolMessages, reply: replyTrendyol, verified: true },
   koctas: { fetch: fetchKoctasMessages, reply: replyKoctas, verified: false },
   hb: { fetch: fetchHepsiburadaMessages, reply: replyHepsiburada, verified: false },
+  cs: { fetch: fetchCiceksepetiMessages, reply: replyCiceksepeti, verified: false },
+  n11: { fetch: fetchN11Messages, reply: replyN11, verified: false },
 };
 
 let messagesCache = { fetchedAt: 0, messages: [], errors: [] };
