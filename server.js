@@ -1991,6 +1991,7 @@ app.get("/api/hb/raw-questions", requireAuth, async (req, res) => {
    - Aynı istek gövdesiyle 10 sn, farklı gövdeyle 5 sn'de 1 istek hakkı vardır.
 ------------------------------------------------------------------ */
 const csDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+let csQVariant = 0;
 function csGetQuestions(params) {
   return axios.get(`https://${csHost()}/api/v1/sellerquestions`, { headers: csHeaders(), params, timeout: 20000, validateStatus: () => true });
 }
@@ -2000,15 +2001,25 @@ async function fetchCiceksepetiMessages() {
   const messages = [];
   try {
     const now = Date.now();
-    const start = now - 30 * 86400000; // sınır 32 gün
-    const end = now + 86400000; // bugünü de kapsasın
+    // Zaman damgası (ms) biçimi Çiçeksepeti tarafından reddediliyor; YYYY-MM-DD kullanılır. Hangi aralığın kabul
+    // edildiği bilinmediği için sırayla denenir (farklı gövde: 5 sn'de 1 istek) ve çalışan hatırlanır.
+    const DAY = 86400000;
+    const days = Number(process.env.CS_QA_DAYS) || 14;
+    const variants = [
+      { CreateStartDate: csDay(now - days * DAY), CreateEndDate: csDay(now + DAY) },
+      { CreateStartDate: csDay(now - days * DAY), CreateEndDate: csDay(now) },
+      { CreateStartDate: csDay(now - 7 * DAY), CreateEndDate: csDay(now) },
+    ];
+    const tried = [];
     for (let page = 1; page <= 3; page++) {
-      // Doküman tarihleri "timestamp(ms)" diye yazıyor, örnek istek ise YYYY-MM-DD kullanıyor; önce örnek biçimi dene.
-      let r = await csGetQuestions({ CreateStartDate: csDay(start), CreateEndDate: csDay(end), Page: page });
-      if (r.status === 400) {
-        await sleep(5200);
-        r = await csGetQuestions({ CreateStartDate: start, CreateEndDate: end, Page: page });
+      let r;
+      for (let vi = csQVariant; vi < variants.length; vi++) {
+        r = await csGetQuestions({ ...variants[vi], Page: page });
+        if (r.status !== 400) { csQVariant = vi; break; }
+        tried.push(`${variants[vi].CreateStartDate}→${variants[vi].CreateEndDate}: ${JSON.stringify(r.data).slice(0, 160)}`);
+        if (vi < variants.length - 1) await sleep(5200);
       }
+      if (r.status === 400) return { platform: "cs", error: `Çiçeksepeti soruları: HTTP 400 — denenen aralıklar: ${tried.join(" | ")}`, messages };
       if (r.status === 429) break; // hız sınırı: elimizdekiyle devam et
       if (r.status !== 200) {
         const detail = r.data ? ` — ${JSON.stringify(r.data).slice(0, 250)}` : "";
@@ -2061,13 +2072,18 @@ async function replyCiceksepeti(id, text) {
   }
 }
 
-// Tanı: /api/cs/raw-questions  (ham yanıt)   |   /api/cs/raw-questions?actions=1  (işlem türü karşılıkları)
+// Tanı: /api/cs/raw-questions  (ham yanıt; ?start=2026-10-16&end=2026-10-30 ile tarih biçimi denenebilir)
+//        /api/cs/raw-questions?actions=1  (işlem türü karşılıkları)
 app.get("/api/cs/raw-questions", requireAuth, async (req, res) => {
   if (!csConfigured()) return res.json({ ok: false, error: "CS API bilgisi eksik." });
   try {
     const r = req.query.actions
       ? await axios.get(`https://${csHost()}/api/v1/sellerquestions/actions`, { headers: csHeaders(), timeout: 20000, validateStatus: () => true })
-      : await csGetQuestions({ CreateStartDate: csDay(Date.now() - 30 * 86400000), CreateEndDate: csDay(Date.now() + 86400000), Page: 1 });
+      : await csGetQuestions({
+          CreateStartDate: String(req.query.start || csDay(Date.now() - 14 * 86400000)),
+          CreateEndDate: String(req.query.end || csDay(Date.now())),
+          Page: 1,
+        });
     res.json({ ok: true, durum: r.status, govde: JSON.stringify(r.data).slice(0, 3000) });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
