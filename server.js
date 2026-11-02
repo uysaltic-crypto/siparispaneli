@@ -290,7 +290,7 @@ async function fetchHepsiburadaOrders() {
     for (let page = 0; page < 40; page++) {
       const resp = await axios.get(url, {
         auth: hbAuth.auth,
-        params: { timespan: 24, limit, offset: page * limit },
+        params: { timespan: Number(process.env.HB_TIMESPAN_HOURS) || 96, limit, offset: page * limit },
         headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
         timeout: 20000,
       });
@@ -2590,7 +2590,7 @@ app.get("/api/hb/raw-packages", requireAuth, async (req, res) => {
     const host = HB_ENV === "test" ? "oms-external-sit.hepsiburada.com" : "oms-external.hepsiburada.com";
     const resp = await axios.get(`https://${host}/packages/merchantid/${HB_MERCHANT_ID}`, {
       auth: hbAuth.auth,
-      params: { timespan: 24, limit: Math.min(10, Number(req.query.max) || 3), offset: 0 },
+      params: { timespan: Number(process.env.HB_TIMESPAN_HOURS) || 96, limit: Math.min(10, Number(req.query.max) || 3), offset: 0 },
       headers: { "User-Agent": hbAuth.userAgent, Accept: "application/json" },
       timeout: 20000,
     });
