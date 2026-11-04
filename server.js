@@ -1446,8 +1446,13 @@ async function csFlushStockQueue() {
   persistCsLastPush();
   let ok = true;
   let message = "Gönderildi";
+  let batchId = null;
   try {
-    await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
+    const r = await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
+    const d = r.data;
+    batchId = (d && typeof d === "object" ? d.batchId ?? d.BatchId ?? d.batchRequestId ?? d.id : typeof d === "string" ? d : null) || null;
+    if (batchId) message = `Gönderildi (BatchID: ${batchId})`;
+    else console.log("[cs] stok yanıtı:", JSON.stringify(d).slice(0, 300));
   } catch (err) {
     ok = false;
     message = err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message;
@@ -1458,7 +1463,7 @@ async function csFlushStockQueue() {
     name: `${items.length} ürün (Çiçeksepeti toplu gönderim)`,
     centralStock: null,
     trigger: "cs-toplu",
-    results: { cs: ok ? { ok: true } : { ok: false, message } },
+    results: { cs: ok ? { ok: true, message, batchId } : { ok: false, message } },
   });
   persistPushLog();
   return { ok, message };
@@ -2025,6 +2030,7 @@ app.get("/api/hb/raw-questions", requireAuth, async (req, res) => {
 ------------------------------------------------------------------ */
 const csDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 let csQVariant = 0;
+let csSeenKeys = "";
 function csGetQuestions(params) {
   return axios.get(`https://${csHost()}/api/v1/sellerquestions`, { headers: csHeaders(), params, timeout: 20000, validateStatus: () => true });
 }
@@ -2060,9 +2066,12 @@ async function fetchCiceksepetiMessages() {
       }
       const d = r.data;
       const items = csExtractList(d);
+      if (items.length && page === 1) csSeenKeys = Object.keys(items[0]).join(",");
       items.forEach((q) => {
-        const answered = q.answered === true || !!q.answer;
-        const qDate = q.questionDate ? new Date(q.questionDate).getTime() : null;
+        q = { ...q, id: q.id ?? q.questionId ?? q.sellerQuestionId ?? q.Id, question: q.question ?? q.questionText ?? q.text ?? q.message ?? q.body, answer: q.answer ?? q.answerText ?? q.reply };
+        const answered = q.answered === true || q.isAnswered === true || !!q.answer;
+        const qd = q.questionDate || q.createDate || q.createdDate || q.date;
+        const qDate = qd ? new Date(qd).getTime() : null;
         const aDate = q.answerDate ? new Date(q.answerDate).getTime() : null;
         const img = q.product?.imageUrl || q.imageUrl || "";
         messages.push({
@@ -2084,7 +2093,10 @@ async function fetchCiceksepetiMessages() {
       if (!d?.hasNextPage) break;
       await sleep(5200); // farklı gövde: 5 sn'de 1 istek
     }
-    return { platform: "cs", error: null, messages: messages.filter((m) => m.id) };
+    const ok = messages.filter((m) => m.id);
+    if (messages.length && !ok.length)
+      return { platform: "cs", error: `Çiçeksepeti: ${messages.length} soru geldi ama kimlik alanı okunamadı. Alanlar: ${csSeenKeys}`, messages: [] };
+    return { platform: "cs", error: null, messages: ok };
   } catch (err) {
     return { platform: "cs", error: `Çiçeksepeti soruları hata: ${err.message}`, messages };
   }
