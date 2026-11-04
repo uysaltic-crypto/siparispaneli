@@ -1466,7 +1466,7 @@ async function csFlushStockQueue() {
     results: { cs: ok ? { ok: true, message, batchId } : { ok: false, message } },
   });
   persistPushLog();
-  return { ok, message };
+  return { ok, message, batchId };
 }
 
 function csScheduleFlush(delayMs) {
