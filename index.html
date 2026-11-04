@@ -2224,6 +2224,7 @@ function renderLog() {
       return `<span class="badge ${res.ok ? 'ok' : 'fail'}">${pm.name} ${res.ok ? '✓' : '✗'}</span>`;
     }).join(' ');
     const failMsgs = Object.entries(entry.results || {}).filter(([,res]) => !res.ok).map(([id,res]) => `${platformMeta(id).name}: ${res.message}`).join(' | ');
+    const okMsgs = Object.entries(entry.results || {}).filter(([,res]) => res.ok && res.batchId).map(([id,res]) => `${platformMeta(id).name} BatchID: <span style="user-select:all;font-family:monospace;">${escAttr(String(res.batchId))}</span>`).join(' | ');
     const div = document.createElement('div');
     div.className = 'logrow';
     div.innerHTML = `
@@ -2232,6 +2233,7 @@ function renderLog() {
         <span class="muted" style="font-family:monospace;"> ${entry.barcode}</span>
         <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : entry.trigger === 'eşleştirme' ? 'Eşleştirme sonrası' : entry.trigger === 'mağaza' ? 'Mağaza siparişi / iptali' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
         ${failMsgs ? `<div class="muted" style="color:var(--danger)">${failMsgs}</div>` : ''}
+        ${okMsgs ? `<div class="muted">${okMsgs}</div>` : ''}
       </div>
       <div style="text-align:right;">
         <div>${badges}</div>
