@@ -1256,8 +1256,7 @@ async function fetchCiceksepetiOrders() {
       { startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page: 0 },
       { headers: csHeaders(), timeout: 20000 }
     );
-    const orders = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
-    return { platform: "cs", error: null, orders: (Array.isArray(orders) ? orders : []).map(normalizeCsPackage) };
+    return { platform: "cs", error: null, orders: csOrdersFromResponse(resp.data) };
   } catch (err) {
     const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
     const msg =
@@ -1270,25 +1269,59 @@ async function fetchCiceksepetiOrders() {
   }
 }
 
+// Çiçeksepeti yanıtında sipariş listesi hangi anahtarda gelirse gelsin bulunur
+// (supplierOrderListWithBranch, orders, ... ya da yanıttaki ilk nesne dizisi).
+function csExtractList(data) {
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== "object") return [];
+  for (const k of ["supplierOrderListWithBranch", "orders", "Orders", "result", "data", "content", "items", "orderList"]) {
+    if (Array.isArray(data[k])) return data[k];
+    if (data[k] && typeof data[k] === "object") { const inner = csExtractList(data[k]); if (inner.length) return inner; }
+  }
+  for (const v of Object.values(data)) if (Array.isArray(v) && v.length && typeof v[0] === "object") return v;
+  return [];
+}
+
+// Liste elemanları ya tam sipariş (içinde kalemler) ya da tek kalemdir (aynı orderId'ler birleştirilir).
+function csOrdersFromResponse(data) {
+  const list = csExtractList(data);
+  const groups = new Map();
+  list.forEach((el, i) => {
+    if (!el || typeof el !== "object") return;
+    const nested = el.orderItems || el.items || el.lines;
+    if (Array.isArray(nested)) { groups.set("n" + i, { head: el, items: nested }); return; }
+    const gid = String(el.orderId ?? el.orderNo ?? el.orderNumber ?? "i" + i);
+    if (!groups.has(gid)) groups.set(gid, { head: el, items: [] });
+    groups.get(gid).items.push(el);
+  });
+  return [...groups.values()].map((g) => normalizeCsPackage({ ...g.head, orderItems: g.items }));
+}
+
 function normalizeCsPackage(pkg) {
   const items = pkg.orderItems || pkg.items || pkg.lines || [];
-  const lines = items
-    .map((it) => ({
-      barcode: String(it.stockCode || it.barcode || "").trim(),
-      quantity: Number(it.quantity || 1),
-      name: it.productName || it.stockCode || "",
-    }))
-    .filter((l) => csCodeAllowed(l.barcode));
+  const allLines = items.map((it) => ({
+    barcode: String(it.stockCode || it.StockCode || it.code || it.barcode || "").trim(),
+    quantity: Number(it.quantity || it.Quantity || 1),
+    name: it.productName || it.ProductName || it.name || it.stockCode || "",
+  }));
+  // Önek filtresine uyan satır varsa sadece onlar; hiçbiri uymuyorsa siparişi yine de göster (kaybolmasın).
+  const filtered = allLines.filter((l) => csCodeAllowed(l.barcode));
+  const lines = filtered.length ? filtered : allLines;
+  const num = (v) => { const n = Number(String(v ?? "").replace(",", ".")); return Number.isFinite(n) ? n : 0; };
+  const amount = num(pkg.totalPrice ?? pkg.TotalPrice ?? pkg.amount) || items.reduce((t, it) => t + num(it.totalPrice ?? it.TotalPrice ?? it.itemPrice), 0);
+  const rawDate = pkg.orderCreateDate || pkg.orderDate || pkg.createdDate || pkg.OrderDate || null;
+  const dt = rawDate ? new Date(rawDate).getTime() : null;
+  const name = (v) => (typeof v === "string" ? v : "");
   return {
     platform: "cs",
-    orderNumber: pkg.orderNo || pkg.orderNumber || String(pkg.orderId || "—"),
+    orderNumber: String(pkg.orderNo || pkg.orderNumber || pkg.orderId || "—"),
     packageId: String(pkg.orderId || pkg.orderNo || ""),
-    customer: pkg.receiverName || pkg.customerName || "Müşteri",
-    city: pkg.city || pkg.address?.city || "",
+    customer: name(pkg.receiverName) || name(pkg.receiver) || name(pkg.customerName) || name(pkg.senderName) || "Müşteri",
+    city: name(pkg.receiverCity) || name(pkg.city) || name(pkg.deliveryCity) || pkg.address?.city || "",
     productSummary: lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ") || "—",
-    amount: Number(pkg.totalPrice || pkg.amount || 0),
-    status: pkg.status || pkg.orderStatus || "—",
-    date: pkg.orderDate ? new Date(pkg.orderDate).getTime() : null,
+    amount,
+    status: String(pkg.orderItemStatus || pkg.status || pkg.orderStatus || pkg.orderItemStatusId || "—"),
+    date: Number.isFinite(dt) ? dt : null,
     lines,
     ...pickCargo(pkg),
   };
@@ -2026,7 +2059,7 @@ async function fetchCiceksepetiMessages() {
         return { platform: "cs", error: `Çiçeksepeti soruları: HTTP ${r.status}${detail}`, messages };
       }
       const d = r.data;
-      const items = Array.isArray(d?.items) ? d.items : Array.isArray(d) ? d : [];
+      const items = csExtractList(d);
       items.forEach((q) => {
         const answered = q.answered === true || !!q.answer;
         const qDate = q.questionDate ? new Date(q.questionDate).getTime() : null;
@@ -2452,10 +2485,9 @@ async function fetchOrdersRange(pid, from, to) {
         if (!first) await sleepMs(5300); // Çiçeksepeti: aynı uca 5 saniyede 1 istek
         first = false;
         const resp = await axios.post(url, { startDate: new Date(a).toISOString(), endDate: new Date(b).toISOString(), pageSize: 100, page }, { headers: csHeaders(), timeout: 30000 });
-        const c = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
-        const arr = Array.isArray(c) ? c : [];
-        out.push(...arr.map(normalizeCsPackage));
-        if (arr.length < 100) break;
+        const arr = csOrdersFromResponse(resp.data);
+        out.push(...arr);
+        if (csExtractList(resp.data).length < 100) break;
       }
     });
   } else if (pid === "koctas") {
