@@ -1256,7 +1256,8 @@ async function fetchCiceksepetiOrders() {
       { startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page: 0 },
       { headers: csHeaders(), timeout: 20000 }
     );
-    return { platform: "cs", error: null, orders: csOrdersFromResponse(resp.data) };
+    const orders = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
+    return { platform: "cs", error: null, orders: (Array.isArray(orders) ? orders : []).map(normalizeCsPackage) };
   } catch (err) {
     const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
     const msg =
@@ -1269,59 +1270,25 @@ async function fetchCiceksepetiOrders() {
   }
 }
 
-// Çiçeksepeti yanıtında sipariş listesi hangi anahtarda gelirse gelsin bulunur
-// (supplierOrderListWithBranch, orders, ... ya da yanıttaki ilk nesne dizisi).
-function csExtractList(data) {
-  if (Array.isArray(data)) return data;
-  if (!data || typeof data !== "object") return [];
-  for (const k of ["supplierOrderListWithBranch", "orders", "Orders", "result", "data", "content", "items", "orderList"]) {
-    if (Array.isArray(data[k])) return data[k];
-    if (data[k] && typeof data[k] === "object") { const inner = csExtractList(data[k]); if (inner.length) return inner; }
-  }
-  for (const v of Object.values(data)) if (Array.isArray(v) && v.length && typeof v[0] === "object") return v;
-  return [];
-}
-
-// Liste elemanları ya tam sipariş (içinde kalemler) ya da tek kalemdir (aynı orderId'ler birleştirilir).
-function csOrdersFromResponse(data) {
-  const list = csExtractList(data);
-  const groups = new Map();
-  list.forEach((el, i) => {
-    if (!el || typeof el !== "object") return;
-    const nested = el.orderItems || el.items || el.lines;
-    if (Array.isArray(nested)) { groups.set("n" + i, { head: el, items: nested }); return; }
-    const gid = String(el.orderId ?? el.orderNo ?? el.orderNumber ?? "i" + i);
-    if (!groups.has(gid)) groups.set(gid, { head: el, items: [] });
-    groups.get(gid).items.push(el);
-  });
-  return [...groups.values()].map((g) => normalizeCsPackage({ ...g.head, orderItems: g.items }));
-}
-
 function normalizeCsPackage(pkg) {
   const items = pkg.orderItems || pkg.items || pkg.lines || [];
-  const allLines = items.map((it) => ({
-    barcode: String(it.stockCode || it.StockCode || it.code || it.barcode || "").trim(),
-    quantity: Number(it.quantity || it.Quantity || 1),
-    name: it.productName || it.ProductName || it.name || it.stockCode || "",
-  }));
-  // Önek filtresine uyan satır varsa sadece onlar; hiçbiri uymuyorsa siparişi yine de göster (kaybolmasın).
-  const filtered = allLines.filter((l) => csCodeAllowed(l.barcode));
-  const lines = filtered.length ? filtered : allLines;
-  const num = (v) => { const n = Number(String(v ?? "").replace(",", ".")); return Number.isFinite(n) ? n : 0; };
-  const amount = num(pkg.totalPrice ?? pkg.TotalPrice ?? pkg.amount) || items.reduce((t, it) => t + num(it.totalPrice ?? it.TotalPrice ?? it.itemPrice), 0);
-  const rawDate = pkg.orderCreateDate || pkg.orderDate || pkg.createdDate || pkg.OrderDate || null;
-  const dt = rawDate ? new Date(rawDate).getTime() : null;
-  const name = (v) => (typeof v === "string" ? v : "");
+  const lines = items
+    .map((it) => ({
+      barcode: String(it.stockCode || it.barcode || "").trim(),
+      quantity: Number(it.quantity || 1),
+      name: it.productName || it.stockCode || "",
+    }))
+    .filter((l) => csCodeAllowed(l.barcode));
   return {
     platform: "cs",
-    orderNumber: String(pkg.orderNo || pkg.orderNumber || pkg.orderId || "—"),
+    orderNumber: pkg.orderNo || pkg.orderNumber || String(pkg.orderId || "—"),
     packageId: String(pkg.orderId || pkg.orderNo || ""),
-    customer: name(pkg.receiverName) || name(pkg.receiver) || name(pkg.customerName) || name(pkg.senderName) || "Müşteri",
-    city: name(pkg.receiverCity) || name(pkg.city) || name(pkg.deliveryCity) || pkg.address?.city || "",
+    customer: pkg.receiverName || pkg.customerName || "Müşteri",
+    city: pkg.city || pkg.address?.city || "",
     productSummary: lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ") || "—",
-    amount,
-    status: String(pkg.orderItemStatus || pkg.status || pkg.orderStatus || pkg.orderItemStatusId || "—"),
-    date: Number.isFinite(dt) ? dt : null,
+    amount: Number(pkg.totalPrice || pkg.amount || 0),
+    status: pkg.status || pkg.orderStatus || "—",
+    date: pkg.orderDate ? new Date(pkg.orderDate).getTime() : null,
     lines,
     ...pickCargo(pkg),
   };
@@ -1446,13 +1413,8 @@ async function csFlushStockQueue() {
   persistCsLastPush();
   let ok = true;
   let message = "Gönderildi";
-  let batchId = null;
   try {
-    const r = await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
-    const d = r.data;
-    batchId = (d && typeof d === "object" ? d.batchId ?? d.BatchId ?? d.batchRequestId ?? d.id : typeof d === "string" ? d : null) || null;
-    if (batchId) message = `Gönderildi (BatchID: ${batchId})`;
-    else console.log("[cs] stok yanıtı:", JSON.stringify(d).slice(0, 300));
+    await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
   } catch (err) {
     ok = false;
     message = err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message;
@@ -1463,10 +1425,10 @@ async function csFlushStockQueue() {
     name: `${items.length} ürün (Çiçeksepeti toplu gönderim)`,
     centralStock: null,
     trigger: "cs-toplu",
-    results: { cs: ok ? { ok: true, message, batchId } : { ok: false, message } },
+    results: { cs: ok ? { ok: true } : { ok: false, message } },
   });
   persistPushLog();
-  return { ok, message, batchId };
+  return { ok, message };
 }
 
 function csScheduleFlush(delayMs) {
@@ -2030,7 +1992,6 @@ app.get("/api/hb/raw-questions", requireAuth, async (req, res) => {
 ------------------------------------------------------------------ */
 const csDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 let csQVariant = 0;
-let csSeenKeys = "";
 function csGetQuestions(params) {
   return axios.get(`https://${csHost()}/api/v1/sellerquestions`, { headers: csHeaders(), params, timeout: 20000, validateStatus: () => true });
 }
@@ -2065,13 +2026,10 @@ async function fetchCiceksepetiMessages() {
         return { platform: "cs", error: `Çiçeksepeti soruları: HTTP ${r.status}${detail}`, messages };
       }
       const d = r.data;
-      const items = csExtractList(d);
-      if (items.length && page === 1) csSeenKeys = Object.keys(items[0]).join(",");
+      const items = Array.isArray(d?.items) ? d.items : Array.isArray(d) ? d : [];
       items.forEach((q) => {
-        q = { ...q, id: q.id ?? q.questionId ?? q.sellerQuestionId ?? q.Id, question: q.question ?? q.questionText ?? q.text ?? q.message ?? q.body, answer: q.answer ?? q.answerText ?? q.reply };
-        const answered = q.answered === true || q.isAnswered === true || !!q.answer;
-        const qd = q.questionDate || q.createDate || q.createdDate || q.date;
-        const qDate = qd ? new Date(qd).getTime() : null;
+        const answered = q.answered === true || !!q.answer;
+        const qDate = q.questionDate ? new Date(q.questionDate).getTime() : null;
         const aDate = q.answerDate ? new Date(q.answerDate).getTime() : null;
         const img = q.product?.imageUrl || q.imageUrl || "";
         messages.push({
@@ -2093,10 +2051,7 @@ async function fetchCiceksepetiMessages() {
       if (!d?.hasNextPage) break;
       await sleep(5200); // farklı gövde: 5 sn'de 1 istek
     }
-    const ok = messages.filter((m) => m.id);
-    if (messages.length && !ok.length)
-      return { platform: "cs", error: `Çiçeksepeti: ${messages.length} soru geldi ama kimlik alanı okunamadı. Alanlar: ${csSeenKeys}`, messages: [] };
-    return { platform: "cs", error: null, messages: ok };
+    return { platform: "cs", error: null, messages: messages.filter((m) => m.id) };
   } catch (err) {
     return { platform: "cs", error: `Çiçeksepeti soruları hata: ${err.message}`, messages };
   }
@@ -2497,9 +2452,10 @@ async function fetchOrdersRange(pid, from, to) {
         if (!first) await sleepMs(5300); // Çiçeksepeti: aynı uca 5 saniyede 1 istek
         first = false;
         const resp = await axios.post(url, { startDate: new Date(a).toISOString(), endDate: new Date(b).toISOString(), pageSize: 100, page }, { headers: csHeaders(), timeout: 30000 });
-        const arr = csOrdersFromResponse(resp.data);
-        out.push(...arr);
-        if (csExtractList(resp.data).length < 100) break;
+        const c = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
+        const arr = Array.isArray(c) ? c : [];
+        out.push(...arr.map(normalizeCsPackage));
+        if (arr.length < 100) break;
       }
     });
   } else if (pid === "koctas") {
@@ -4388,7 +4344,8 @@ function startBulkPush(changes, label, opts = {}) {
     await Promise.all(
       Object.entries(byPlatform).map(async ([pid, list]) => {
         const stat = (bulkPushJob.perPlatform[pid] = { ok: 0, fail: 0, total: list.length });
-        for (const c of list) {
+        for (let li = 0; li < list.length; li++) {
+          const c = list[li];
           try {
             const prod = products[c.code];
             const qty = Number(products[resolveRoot(c.code)]?.centralStock) || 0;
@@ -4404,7 +4361,7 @@ function startBulkPush(changes, label, opts = {}) {
             if (bulkPushJob.errors.length < 20) bulkPushJob.errors.push(`${pid} · ${c.code}: ${e.message}`);
           }
           bulkPushJob.done++;
-          await sleep(delayFor(pid));
+          if (li < list.length - 1) await sleep(delayFor(pid)); // son üründen sonra bekleme yok: kilit hemen açılsın
         }
       })
     );
