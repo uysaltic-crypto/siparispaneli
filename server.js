@@ -1965,9 +1965,31 @@ async function fetchHepsiburadaMessages() {
   }
 }
 
-async function replyHepsiburada() {
-  // Cevaplama ucu (yöntem + gövde) resmi dokümandan henüz doğrulanmadı; tahminle istek atılmaz.
-  return { ok: false, message: "Hepsiburada soru cevaplama henüz bağlanmadı; şimdilik Hepsiburada satıcı panelinden cevapla." };
+async function replyHepsiburada(id, text) {
+  // Resmi doküman: POST /api/v1.0/issues/{number}/answer — multipart/form-data, alan: Answer (en fazla 2000 karakter).
+  // Soru için verilen süre (expireDate) dolduysa Hepsiburada isteği reddeder; hata mesajı olduğu gibi gösterilir.
+  if (!hbConfigured()) return { ok: false, message: "Hepsiburada API bilgisi eksik." };
+  const answer = String(text || "").trim();
+  if (!answer) return { ok: false, message: "Cevap metni boş." };
+  if (answer.length > 2000) return { ok: false, message: `Hepsiburada cevabı en fazla 2000 karakter olabilir (şu an ${answer.length}).` };
+  const boundary = "----hbanswer" + Date.now().toString(16);
+  const body = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="Answer"\r\n\r\n${answer}\r\n--${boundary}--\r\n`,
+    "utf8"
+  );
+  try {
+    const req = hbAskReq();
+    const resp = await axios.post(`https://${hbAskHost()}/api/v1.0/issues/${encodeURIComponent(id)}/answer`, body, {
+      ...req,
+      headers: { ...req.headers, "Content-Type": `multipart/form-data; boundary=${boundary}` },
+      validateStatus: () => true,
+    });
+    if (resp.status >= 200 && resp.status < 300) return { ok: true, message: "Cevap Hepsiburada'ya gönderildi." };
+    const detail = resp.data ? (typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data)).slice(0, 250) : "";
+    return { ok: false, message: `Hepsiburada cevabı reddetti (HTTP ${resp.status})${detail ? " — " + detail : ""}` };
+  } catch (err) {
+    return { ok: false, message: "Hepsiburada cevap hatası: " + err.message };
+  }
 }
 
 // Tanı: ham yanıtı gör. /api/hb/raw-questions?status=1  veya  ?number=12345 (tek soru detayı)
