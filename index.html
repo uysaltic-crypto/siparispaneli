@@ -1904,8 +1904,19 @@ async function toggleStatus(barcode, platformId, currentStatus) {
 }
 
 async function updateCentral(barcode, value) {
-  await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, centralStock: value }) });
-  await loadProducts();
+  // Kayıt sessizce başarısız olmasın: oturum düşmüşse ya da sunucu hata verdiyse uyar,
+  // başarılıysa sunucunun kaydettiği değeri doğrula.
+  try {
+    const r = await fetch('/api/products', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ barcode, centralStock: value }) });
+    if (r.status === 401) { toast('Oturum süresi dolmuş — sayfayı yenileyip tekrar giriş yap, stok kaydedilmedi.'); return; }
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) { toast('Stok kaydedilemedi: ' + ((j && j.error) || ('HTTP ' + r.status))); return; }
+    if (Number(j.product?.centralStock) !== Number(value)) toast('Uyarı: sunucu stoğu ' + j.product?.centralStock + ' olarak kaydetti.');
+  } catch (e) {
+    toast('Stok kaydedilemedi: ' + e.message);
+    return;
+  }
+  await loadProducts(true);
 }
 
 async function updateStoreField(code, fields) {
@@ -2224,7 +2235,6 @@ function renderLog() {
       return `<span class="badge ${res.ok ? 'ok' : 'fail'}">${pm.name} ${res.ok ? '✓' : '✗'}</span>`;
     }).join(' ');
     const failMsgs = Object.entries(entry.results || {}).filter(([,res]) => !res.ok).map(([id,res]) => `${platformMeta(id).name}: ${res.message}`).join(' | ');
-    const okMsgs = Object.entries(entry.results || {}).filter(([,res]) => res.ok && res.batchId).map(([id,res]) => `${platformMeta(id).name} BatchID: <span style="user-select:all;font-family:monospace;">${escAttr(String(res.batchId))}</span>`).join(' | ');
     const div = document.createElement('div');
     div.className = 'logrow';
     div.innerHTML = `
@@ -2233,7 +2243,6 @@ function renderLog() {
         <span class="muted" style="font-family:monospace;"> ${entry.barcode}</span>
         <div class="muted">${entry.trigger === 'sipariş' ? 'Sipariş kaynaklı' : entry.trigger === 'eşleştirme' ? 'Eşleştirme sonrası' : entry.trigger === 'mağaza' ? 'Mağaza siparişi / iptali' : 'Manuel gönderim'} — yeni stok: ${entry.centralStock}</div>
         ${failMsgs ? `<div class="muted" style="color:var(--danger)">${failMsgs}</div>` : ''}
-        ${okMsgs ? `<div class="muted">${okMsgs}</div>` : ''}
       </div>
       <div style="text-align:right;">
         <div>${badges}</div>
