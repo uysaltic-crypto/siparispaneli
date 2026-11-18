@@ -928,9 +928,10 @@ function printOrders(orders) {
       </table>
     </section>`;
   });
-  // A4 kağıda her sayfada 2 sipariş (üst + alt yarı)
+  // Her sayfaya TEK sipariş. (Sayfa başına 2 sipariş istenirse 1 yerine 2 yazılır.)
+  const PER_PAGE = 1;
   let pages = '';
-  for (let i = 0; i < sections.length; i += 2) pages += `<div class="page">${sections[i]}${sections[i + 1] || ''}</div>`;
+  for (let i = 0; i < sections.length; i += PER_PAGE) pages += `<div class="page">${sections.slice(i, i + PER_PAGE).join('')}</div>`;
 
   const html = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Sipariş Yazdır</title>
   <style>
@@ -938,7 +939,7 @@ function printOrders(orders) {
     * { box-sizing: border-box; }
     body { font-family: Arial, Helvetica, sans-serif; color:#000; margin:0; width:210mm; }
     /* A4: soldan 1 cm boşluk, sayfada 2 sipariş (her biri yarım sayfa) */
-    .page { width:210mm; padding:5mm 10mm 0 10mm; page-break-after:always; break-after:page; }
+    .page { width:210mm; height:296mm; overflow:hidden; padding:5mm 10mm 0 10mm; page-break-after:always; break-after:page; }
     .page:last-child { page-break-after:auto; break-after:auto; }
     .order { width:90mm; min-height:143mm; border:0; padding:3mm; margin:0; break-inside:avoid; page-break-inside:avoid; }
     .order + .order { border-top:1px dashed #999; margin-top:2mm; padding-top:5mm; }
