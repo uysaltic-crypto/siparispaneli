@@ -1243,6 +1243,18 @@ app.get("/api/cs-debug", requireAuth, async (req, res) => {
   res.json({ ok: true, ...out });
 });
 
+// Tanı: son N günün ham Çiçeksepeti sipariş yanıtı. /api/cs/raw-orders?days=7
+app.get("/api/cs/raw-orders", requireAuth, async (req, res) => {
+  if (!csConfigured()) return res.json({ ok: false, error: "CS API bilgisi eksik." });
+  const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+  try {
+    const r = await axios.post(`https://${csHost()}/api/v1/Order/GetOrders`,
+      { startDate: new Date(Date.now() - days * 86400000).toISOString(), endDate: new Date().toISOString(), pageSize: 3, page: 0 },
+      { headers: csHeaders(), timeout: 20000, validateStatus: () => true });
+    res.json({ ok: true, durum: r.status, govde: JSON.stringify(r.data).slice(0, 3500) });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
 async function fetchCiceksepetiOrders() {
   if (!csConfigured())
     return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", orders: [] };
@@ -1256,7 +1268,9 @@ async function fetchCiceksepetiOrders() {
       { startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page: 0 },
       { headers: csHeaders(), timeout: 20000 }
     );
-    const orders = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
+    // Gerçek yanıt (/api/cs-debug ile doğrulandı): { orderListCount, pageCount, supplierOrderListWithBranch: [...], warningMessage }
+    const d = resp.data || {};
+    const orders = d.supplierOrderListWithBranch || d.SupplierOrderListWithBranch || d.orders || d.Orders || d.result || d.data || d.content || [];
     return { platform: "cs", error: null, orders: (Array.isArray(orders) ? orders : []).map(normalizeCsPackage) };
   } catch (err) {
     const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
@@ -1271,7 +1285,9 @@ async function fetchCiceksepetiOrders() {
 }
 
 function normalizeCsPackage(pkg) {
-  const items = pkg.orderItems || pkg.items || pkg.lines || [];
+  // Satır dizisinin adı doğrulanmadı: bilinen adlar denenir; hiçbiri yoksa kaydın kendisi tek satır sayılır.
+  let items = pkg.orderItems || pkg.OrderItems || pkg.products || pkg.items || pkg.lines || [];
+  if (!Array.isArray(items) || !items.length) items = pkg.stockCode || pkg.productName ? [pkg] : [];
   const lines = items
     .map((it) => ({
       barcode: String(it.stockCode || it.barcode || "").trim(),
