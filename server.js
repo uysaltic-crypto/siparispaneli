@@ -1235,22 +1235,46 @@ app.get("/api/cs-debug", requireAuth, async (req, res) => {
     entegratorAdi: raw.integrator ? raw.integrator.trim() : "(tanımlı değil)",
   };
   try {
-    const r = await axios.post(`https://${csHost()}/api/v1/Order/GetOrders`,
-      { startDate: new Date(Date.now() - 86400000).toISOString(), endDate: new Date().toISOString(), pageSize: 1, page: 0 },
-      { headers: h, timeout: 20000, validateStatus: () => true });
+    const r = await csOrdersCall({ startDate: new Date(Date.now() - 86400000).toISOString(), endDate: new Date().toISOString(), pageSize: 1, page: 0 });
     out.sonuc = { durum: r.status, yanit: JSON.stringify(r.data).slice(0, 300) };
   } catch (e) { out.sonuc = { hata: e.message }; }
   res.json({ ok: true, ...out });
 });
+
+// Çiçeksepeti GetOrders: "farklı istekleri 5 saniyede 1 kez" kabul ediyor. Tüm çağrılar (otomatik yenileme,
+// Yenile düğmesi, geçmiş aralık sorgusu, tanı uçları) tek sıraya alınır ve aralarında en az 5,5 sn bırakılır;
+// "Limit aşımı" yanıtında bekleyip bir kez daha denenir.
+let csOrdersChain = Promise.resolve();
+let csOrdersLastAt = 0;
+function csOrdersCall(body, timeout = 20000) {
+  const run = async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const wait = csOrdersLastAt + 5500 - Date.now();
+      if (wait > 0) await sleep(wait);
+      csOrdersLastAt = Date.now();
+      const r = await axios.post(`https://${csHost()}/api/v1/Order/GetOrders`, body, { headers: csHeaders(), timeout, validateStatus: () => true });
+      const limited = r.status === 429 || /limit a[sş][ıi]m/i.test(JSON.stringify(r.data || ""));
+      if (limited && attempt === 0) { await sleep(6000); continue; }
+      return r;
+    }
+  };
+  const p = csOrdersChain.then(run, run);
+  csOrdersChain = p.catch(() => {});
+  return p;
+}
+const csOrderList = (d) => {
+  const x = d || {};
+  const l = x.supplierOrderListWithBranch || x.SupplierOrderListWithBranch || x.orders || x.Orders || x.result || x.data || x.content || [];
+  return Array.isArray(l) ? l : [];
+};
+let csLastOrders = { at: 0, orders: [] };
 
 // Tanı: son N günün ham Çiçeksepeti sipariş yanıtı. /api/cs/raw-orders?days=7
 app.get("/api/cs/raw-orders", requireAuth, async (req, res) => {
   if (!csConfigured()) return res.json({ ok: false, error: "CS API bilgisi eksik." });
   const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
   try {
-    const r = await axios.post(`https://${csHost()}/api/v1/Order/GetOrders`,
-      { startDate: new Date(Date.now() - days * 86400000).toISOString(), endDate: new Date().toISOString(), pageSize: 3, page: 0 },
-      { headers: csHeaders(), timeout: 20000, validateStatus: () => true });
+    const r = await csOrdersCall({ startDate: new Date(Date.now() - days * 86400000).toISOString(), endDate: new Date().toISOString(), pageSize: 3, page: 0 });
     res.json({ ok: true, durum: r.status, govde: JSON.stringify(r.data).slice(0, 3500) });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
@@ -1258,29 +1282,31 @@ app.get("/api/cs/raw-orders", requireAuth, async (req, res) => {
 async function fetchCiceksepetiOrders() {
   if (!csConfigured())
     return { platform: "cs", error: "Çiçeksepeti API bilgisi .env dosyasında eksik (CS_API_KEY, CS_SUPPLIER_ID).", orders: [] };
-  const url = `https://${csHost()}/api/v1/Order/GetOrders`;
   const endDate = new Date();
   const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
+  const keepLast = (msg) =>
+    // Geçici hatada (örn. limit) listeyi boşaltma: son başarılı çekimi göster (en çok 1 saat eski).
+    ({ platform: "cs", error: msg, orders: Date.now() - csLastOrders.at < 3600000 ? csLastOrders.orders : [] });
   try {
-    const resp = await axios.post(
-      url,
-      { startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page: 0 },
-      { headers: csHeaders(), timeout: 20000 }
-    );
-    // Gerçek yanıt (/api/cs-debug ile doğrulandı): { orderListCount, pageCount, supplierOrderListWithBranch: [...], warningMessage }
-    const d = resp.data || {};
-    const orders = d.supplierOrderListWithBranch || d.SupplierOrderListWithBranch || d.orders || d.Orders || d.result || d.data || d.content || [];
-    return { platform: "cs", error: null, orders: (Array.isArray(orders) ? orders : []).map(normalizeCsPackage) };
+    const all = [];
+    for (let page = 0; page < 20; page++) {
+      const resp = await csOrdersCall({ startDate: startDate.toISOString(), endDate: endDate.toISOString(), pageSize: 100, page });
+      if (resp.status < 200 || resp.status >= 300) {
+        const detail = resp.data ? ` — ${JSON.stringify(resp.data).slice(0, 300)}` : "";
+        if (resp.status === 401 || resp.status === 403) return { platform: "cs", error: `Çiçeksepeti kimlik doğrulama hatası (${resp.status})${detail}`, orders: [] };
+        return keepLast(`Çiçeksepeti hata (HTTP ${resp.status})${detail}`);
+      }
+      if (resp.data && typeof resp.data === "object" && resp.data.Message && !csOrderList(resp.data).length && /limit/i.test(resp.data.Message))
+        return keepLast(`Çiçeksepeti hata: ${JSON.stringify(resp.data).slice(0, 200)}`);
+      const batch = csOrderList(resp.data);
+      all.push(...batch);
+      if (batch.length < 100) break;
+    }
+    const orders = all.map(normalizeCsPackage);
+    csLastOrders = { at: Date.now(), orders };
+    return { platform: "cs", error: null, orders };
   } catch (err) {
-    const detail = err.response?.data ? ` — ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
-    const msg =
-      err.response?.status === 401 || err.response?.status === 403
-        ? `Çiçeksepeti kimlik doğrulama hatası (${err.response.status})${detail}`
-        : err.response?.data
-        ? `Çiçeksepeti hata: ${JSON.stringify(err.response.data).slice(0, 300)}`
-        : `Çiçeksepeti bağlantı hatası: ${err.message}`;
-    return { platform: "cs", error: msg, orders: [] };
+    return keepLast(`Çiçeksepeti bağlantı hatası: ${err.message}`);
   }
 }
 
@@ -2483,15 +2509,11 @@ async function fetchOrdersRange(pid, from, to) {
     });
   } else if (pid === "cs") {
     if (!csConfigured()) throw new Error("Çiçeksepeti API bilgisi eksik.");
-    const url = `https://${csHost()}/api/v1/Order/GetOrders`;
-    let first = true;
     for (const [a, b] of windows(7 * DAY)) await tryWin("Çiçeksepeti", async () => {
       for (let page = 0; page < 30; page++) {
-        if (!first) await sleepMs(5300); // Çiçeksepeti: aynı uca 5 saniyede 1 istek
-        first = false;
-        const resp = await axios.post(url, { startDate: new Date(a).toISOString(), endDate: new Date(b).toISOString(), pageSize: 100, page }, { headers: csHeaders(), timeout: 30000 });
-        const c = resp.data?.orders || resp.data?.Orders || resp.data?.result || resp.data?.data || resp.data?.content || [];
-        const arr = Array.isArray(c) ? c : [];
+        const resp = await csOrdersCall({ startDate: new Date(a).toISOString(), endDate: new Date(b).toISOString(), pageSize: 100, page }, 30000);
+        if (resp.status < 200 || resp.status >= 300) throw new Error(`Çiçeksepeti HTTP ${resp.status}: ${JSON.stringify(resp.data).slice(0, 200)}`);
+        const arr = csOrderList(resp.data);
         out.push(...arr.map(normalizeCsPackage));
         if (arr.length < 100) break;
       }
