@@ -1302,7 +1302,7 @@ async function fetchCiceksepetiOrders() {
       all.push(...batch);
       if (batch.length < 100) break;
     }
-    const orders = all.map(normalizeCsPackage);
+    const orders = csGroupOrders(all);
     csLastOrders = { at: Date.now(), orders };
     return { platform: "cs", error: null, orders };
   } catch (err) {
@@ -1310,30 +1310,69 @@ async function fetchCiceksepetiOrders() {
   }
 }
 
+// Çiçeksepeti GetOrders (ham yanıtla doğrulandı 18.11.2026): supplierOrderListWithBranch içindeki HER KAYIT bir ürün
+// satırıdır (düz alanlar): orderId, orderItemId, code (stok kodu), productCode (kcm…), name, miktar, totalPrice,
+// receiverName/City/Address/Phone, cargoCompany, orderCreateDate "gg/aa/yyyy" + orderCreateTime "SS:dd",
+// orderProductStatus. Aynı orderId'li satırlar tek sipariş olarak birleştirilir.
+function csParseDate(d, t) {
+  const m = String(d || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const tm = String(t || "").match(/^(\d{1,2}):(\d{2})/);
+  // Türkiye saati (UTC+3, yaz/kış saati yok)
+  const ms = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), tm ? Number(tm[1]) : 0, tm ? Number(tm[2]) : 0) - 3 * 3600000;
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function normalizeCsRow(it) {
+  const code = String(it.code || it.stockCode || it.barcode || "").trim();
+  const qty = Number(it.miktar ?? it.quantity ?? 1) || 1;
+  const name = String(it.name || it.productName || code || "").trim();
+  const total = Number(it.totalPrice ?? it.itemPrice ?? it.amount ?? 0) || 0;
+  return { code, productCode: String(it.productCode || "").trim(), qty, name, total };
+}
+
 function normalizeCsPackage(pkg) {
-  // Satır dizisinin adı doğrulanmadı: bilinen adlar denenir; hiçbiri yoksa kaydın kendisi tek satır sayılır.
-  let items = pkg.orderItems || pkg.OrderItems || pkg.products || pkg.items || pkg.lines || [];
-  if (!Array.isArray(items) || !items.length) items = pkg.stockCode || pkg.productName ? [pkg] : [];
-  const lines = items
-    .map((it) => ({
-      barcode: String(it.stockCode || it.barcode || "").trim(),
-      quantity: Number(it.quantity || 1),
-      name: it.productName || it.stockCode || "",
-    }))
-    .filter((l) => csCodeAllowed(l.barcode));
+  // Eski/alternatif biçim: kayıt içinde satır dizisi varsa onu, yoksa kaydın kendisini tek satır say.
+  const nested = pkg.orderItems || pkg.OrderItems || pkg.items || pkg.lines;
+  const rows = (Array.isArray(nested) && nested.length ? nested : [pkg]).map(normalizeCsRow);
+  const lines = rows
+    .filter((r) => r.code || r.name)
+    .filter((r) => csCodeAllowed(r.code, r.productCode))
+    .map((r) => ({ barcode: r.code, quantity: r.qty, name: r.name }));
+  const summary = rows.filter((r) => r.code || r.name).map((r) => `${r.name || r.code} x${r.qty}`).join(", ");
+  const amount = rows.reduce((a, r) => a + r.total, 0);
   return {
     platform: "cs",
-    orderNumber: pkg.orderNo || pkg.orderNumber || String(pkg.orderId || "—"),
+    orderNumber: String(pkg.orderId || pkg.orderNo || pkg.orderNumber || "—"),
     packageId: String(pkg.orderId || pkg.orderNo || ""),
     customer: pkg.receiverName || pkg.customerName || "Müşteri",
-    city: pkg.city || pkg.address?.city || "",
-    productSummary: lines.map((l) => `${l.name || l.barcode || "Ürün"} x${l.quantity}`).join(", ") || "—",
-    amount: Number(pkg.totalPrice || pkg.amount || 0),
-    status: pkg.status || pkg.orderStatus || "—",
-    date: pkg.orderDate ? new Date(pkg.orderDate).getTime() : null,
+    city: pkg.receiverCity || pkg.city || pkg.address?.city || "",
+    address: String(pkg.receiverAddress || "").trim(),
+    phone: String(pkg.receiverPhone || "").trim(),
+    productSummary: summary || "—",
+    amount,
+    status: pkg.orderProductStatus || pkg.status || pkg.orderStatus || "—",
+    date: csParseDate(pkg.orderCreateDate, pkg.orderCreateTime) || (pkg.orderDate ? new Date(pkg.orderDate).getTime() : null),
     lines,
+    _rows: rows,
     ...pickCargo(pkg),
   };
+}
+
+// Aynı orderId'li satırları tek siparişte topla (çok ürünlü siparişler).
+function csGroupOrders(list) {
+  const map = new Map();
+  for (const rec of list) {
+    const o = normalizeCsPackage(rec);
+    const key = o.packageId || o.orderNumber;
+    const ex = map.get(key);
+    if (!ex) { map.set(key, o); continue; }
+    ex.lines.push(...o.lines);
+    ex.amount += o.amount;
+    ex.productSummary = ex.productSummary === "—" ? o.productSummary : o.productSummary === "—" ? ex.productSummary : `${ex.productSummary}, ${o.productSummary}`;
+    if (!ex.trackingNumber && o.trackingNumber) ex.trackingNumber = o.trackingNumber;
+  }
+  return [...map.values()].map(({ _rows, ...o }) => o);
 }
 
 // Ürün Listeleme — ciceksepeti.dev resmi dokümanına göre doğrulandı (25.09.2026):
@@ -2514,7 +2553,7 @@ async function fetchOrdersRange(pid, from, to) {
         const resp = await csOrdersCall({ startDate: new Date(a).toISOString(), endDate: new Date(b).toISOString(), pageSize: 100, page }, 30000);
         if (resp.status < 200 || resp.status >= 300) throw new Error(`Çiçeksepeti HTTP ${resp.status}: ${JSON.stringify(resp.data).slice(0, 200)}`);
         const arr = csOrderList(resp.data);
-        out.push(...arr.map(normalizeCsPackage));
+        out.push(...csGroupOrders(arr));
         if (arr.length < 100) break;
       }
     });
