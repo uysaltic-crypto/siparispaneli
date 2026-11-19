@@ -231,6 +231,7 @@
         <button onclick="invIssue()">Seçilenlere Logo'dan fatura kes</button>
         <button class="ghost" onclick="invMark(true)">Faturalandı işaretle</button>
         <button class="ghost" onclick="invMark(false)">İşareti kaldır</button>
+        <button class="ghost" onclick="invGib()">GİB portalı için hazırla</button>
         <button class="ghost" onclick="invCsv()">CSV indir (seçilen / listelenen)</button>
         <button class="ghost" onclick="invStatus()">Durumları güncelle</button>
         <button class="ghost" onclick="invLogoTest()">Logo bağlantı testi</button>
@@ -760,6 +761,63 @@ async function invLogoTest() {
   const d = await r.json().catch(() => ({}));
   toast(r.ok ? 'Logo bağlantısı başarılı (' + d.url + ')' : (d.error || 'Bağlantı kurulamadı.') + (d.url ? ' — ' + d.url : ''));
 }
+// GİB e-Arşiv Portal'ında elle fatura keserken kopyala-yapıştır için sipariş bilgileri.
+// Portala bağlanmaz, fatura kesmez; yalnızca bilgileri hazırlar. Kesince "Faturalandı işaretle" kullanılır.
+function invGib() {
+  const vat = invVatRate();
+  let list = invOrders();
+  if (invSel.size) list = list.filter(o => invSel.has(orderKey(o)));
+  if (!list.length) { toast('Önce sipariş seçin ya da listede sipariş olsun.'); return; }
+  if (list.length > 30) { toast('Tek seferde en fazla 30 sipariş hazırlanır; seçimi küçültün.'); return; }
+  const m = n => Number(n).toFixed(2).replace('.', ',');
+  const old = document.getElementById('gibOverlay'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'gibOverlay';
+  ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:9999; overflow:auto; padding:20px;';
+  const field = (label, value) => `<div style="display:flex; gap:8px; align-items:center; margin:3px 0;">
+      <span class="muted" style="width:130px; flex:none; font-size:12px;">${escHtml(label)}</span>
+      <span style="flex:1; min-width:0; word-break:break-word;">${escHtml(value || '—')}</span>
+      <button class="ghost" style="padding:2px 8px; font-size:11px;" data-copy="${escAttr(value || '')}">Kopyala</button></div>`;
+  const cards = list.map(o => {
+    const total = Number(o.amount) || 0, net = total / (1 + vat / 100);
+    const lines = (o.lines && o.lines.length) ? o.lines : [];
+    const single = lines.length === 1 ? lines[0] : null;
+    const prodText = lines.length ? lines.map(l => l.quantity + ' x ' + (l.name || l.barcode)).join('\n') : (o.productSummary || '');
+    return `<div style="border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:12px; background:var(--panel, #181a20);">
+      <div style="font-weight:700; margin-bottom:6px;">${escHtml(platformMeta(o.platform).name)} · ${escHtml(String(o.orderNumber))} · ${o.date ? new Date(o.date).toLocaleDateString('tr-TR') : ''}</div>
+      ${field('Alıcı adı soyadı', o.customer)}
+      ${field('Adres', [o.address, o.city].filter(Boolean).join(' '))}
+      ${field('Şehir', o.city)}
+      ${o.phone ? field('Telefon', o.phone) : ''}
+      ${field('Ürün(ler)', prodText)}
+      ${single ? field('Birim fiyat (KDV hariç)', m(net / (Number(single.quantity) || 1))) : ''}
+      ${single ? field('Miktar', String(single.quantity)) : ''}
+      ${field('Matrah (KDV hariç)', m(net))}
+      ${field('KDV %' + vat, m(total - net))}
+      ${field('Toplam (KDV dahil)', m(total))}
+      ${lines.length > 1 ? '<div class="muted" style="font-size:11px; margin-top:4px;">Birden fazla ürün: satır fiyatları platformdan gelmiyor; toplamı ürünlere kendin paylaştır.</div>' : ''}
+    </div>`;
+  }).join('');
+  ov.innerHTML = `<div style="max-width:780px; margin:0 auto;">
+    <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+      <b style="font-size:16px; flex:1;">GİB e-Arşiv Portal için bilgiler (${list.length} sipariş)</b>
+      <a href="https://earsivportal.efatura.gov.tr/intragiris.html" target="_blank" rel="noopener">Portalı aç</a>
+      <button class="ghost" id="gibClose">Kapat</button>
+    </div>
+    <div class="muted" style="font-size:12px; margin-bottom:12px;">Pazaryerleri alıcının TC/vergi numarasını vermez; portalda bireysel alıcı için genelde 11111111111 girilir (mali müşavirine doğrula). Faturayı portalda kestikten sonra bu pencereyi kapatıp siparişleri seçerek "Faturalandı işaretle"ye bas.</div>
+    ${cards}</div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener('click', async e => {
+    if (e.target.id === 'gibClose') { ov.remove(); return; }
+    const t = e.target.closest('[data-copy]'); if (!t) return;
+    const v = t.getAttribute('data-copy');
+    try { await navigator.clipboard.writeText(v); } catch (err) {
+      const ta = document.createElement('textarea'); ta.value = v; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch (e2) {} ta.remove();
+    }
+    const old = t.textContent; t.textContent = 'Kopyalandı ✓'; setTimeout(() => { t.textContent = old; }, 1200);
+  });
+}
+
 function invCsv() {
   const vat = invVatRate();
   let list = invOrders();
