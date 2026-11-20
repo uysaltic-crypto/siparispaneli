@@ -32,6 +32,10 @@
   .count { color: var(--muted); font-size: 13px; }
   .search { margin-top: 8px; width: 100%; height: 46px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 0 14px; font-size: 16px; outline: none; }
   .search:focus { border-color: var(--accent); }
+  .tools { display: flex; gap: 8px; margin-top: 8px; }
+  .tools .search { margin-top: 0; flex: 1; min-width: 0; }
+  .sort { height: 46px; flex: none; max-width: 46%; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 0 10px; font-size: 15px; outline: none; }
+  .sort:focus { border-color: var(--accent); }
   main { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; max-width: 640px; margin: 0 auto; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
   .card.pending { border-color: var(--warn); }
@@ -84,7 +88,15 @@
       <span class="count" id="count"></span>
       <button class="send ghost" id="reload" style="height:36px; padding:0 12px; font-size:13px;">Yenile</button>
     </div>
-    <input class="search" id="q" type="search" inputmode="search" placeholder="Ürün adı, kod ya da barkod ara…" autocomplete="off" enterkeyhint="search">
+    <div class="tools">
+      <input class="search" id="q" type="search" inputmode="search" placeholder="Ara: ad, kod, barkod" autocomplete="off" enterkeyhint="search">
+      <select class="sort" id="sort" aria-label="Sıralama">
+        <option value="name-asc">A → Z</option>
+        <option value="name-desc">Z → A</option>
+        <option value="stock-desc">Stok: çoktan aza</option>
+        <option value="stock-asc">Stok: azdan çoğa</option>
+      </select>
+    </div>
   </header>
   <main id="list"></main>
   <div class="bar" id="bar">
@@ -108,6 +120,8 @@
   var timers = {};        // kod -> bekleyen kayıt zamanlayıcısı
   var shown = PAGE;
   var query = '';
+  var sortKey = 'name-asc';
+  try { var saved = localStorage.getItem('stokSort'); if (saved) sortKey = saved; } catch (e) {}
 
   var $ = function (id) { return document.getElementById(id); };
   var norm = function (s) { return String(s == null ? '' : s).toLocaleLowerCase('tr').replace(/\s+/g, ' ').trim(); };
@@ -139,12 +153,26 @@
       if (old && (pending[p.code] || timers[p.code])) p.centralStock = old.centralStock;
       p._hay = norm([p.name, p.code, Object.values(p.skus || {}).join(' '), Object.values(p.productCodes || {}).join(' ')].join(' '));
     });
-    list.sort(function (a, b) { return String(a.name || a.code).localeCompare(String(b.name || b.code), 'tr'); });
     products = list;
+    sortProducts();
     byCode = {};
     list.forEach(function (p) { byCode[p.code] = p; });
     showApp();
     render();
+  }
+
+  // Sıralama yalnızca açılışta, "Yenile"de ve sıralama seçilince yapılır; stok düzenlerken kartlar yer değiştirmez.
+  function sortProducts() {
+    var nm = function (p) { return String(p.name || p.code); };
+    var st = function (p) { var n = Number(p.centralStock); return isFinite(n) ? n : 0; };
+    products.sort(function (a, b) {
+      var d = 0;
+      if (sortKey === 'stock-desc') d = st(b) - st(a);
+      else if (sortKey === 'stock-asc') d = st(a) - st(b);
+      else if (sortKey === 'name-desc') d = nm(b).localeCompare(nm(a), 'tr');
+      if (d !== 0) return d;
+      return sortKey === 'name-desc' ? 0 : nm(a).localeCompare(nm(b), 'tr');
+    });
   }
 
   function platformLine(p) {
@@ -322,6 +350,15 @@
     if (!e.target.classList.contains('qty')) return;
     var code = e.target.closest('.card').getAttribute('data-code');
     if (e.target.value === '') e.target.value = Number(byCode[code].centralStock) || 0;
+  });
+
+  $('sort').value = sortKey;
+  if ($('sort').value !== sortKey) { sortKey = 'name-asc'; $('sort').value = sortKey; }
+  $('sort').addEventListener('change', function (e) {
+    sortKey = e.target.value;
+    try { localStorage.setItem('stokSort', sortKey); } catch (err) {}
+    sortProducts(); shown = PAGE; render();
+    window.scrollTo(0, 0);
   });
 
   var qTimer;
