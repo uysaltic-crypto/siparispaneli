@@ -5486,6 +5486,9 @@ app.get("/magaza.html", (req, res) => res.sendFile(path.join(__dirname, "magaza.
 // GÜVENLİK: eskiden express.static(__dirname) kullanılıyordu; bu, server.js, package.json ve
 // data/ klasörünü (products.json vb.) şifresiz herkese açıyordu. Artık yalnızca gereken dosyalar sunulur.
 app.use("/logos", express.static(path.join(__dirname, "logos"), { index: false, dotfiles: "deny" }));
+// Telefon için sadeleştirilmiş stok düzenleme sayfası (aynı giriş/çerez ve aynı API'ler).
+app.get("/stok", (req, res) => res.sendFile(path.join(__dirname, "stok.html")));
+app.get("/stok.html", (req, res) => res.sendFile(path.join(__dirname, "stok.html")));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.get("/index.html", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
 

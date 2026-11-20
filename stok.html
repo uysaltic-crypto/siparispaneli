@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Stok">
+<title>Stok</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #14161a; --muted: #6b7280; --border: #e3e5ea;
+    --accent: #ff6a00; --accent-text: #ffffff; --ok: #12915a; --warn: #b45309; --err: #c62828; --input: #f4f5f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --card: #181b21; --text: #eceef2; --muted: #98a0ad; --border: #2a2f38;
+      --accent: #ff7a1a; --accent-text: #111; --ok: #3ccf91; --warn: #f2b45a; --err: #ff7b72; --input: #0f1115;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #181b21; --text: #eceef2; --muted: #98a0ad; --border: #2a2f38;
+    --accent: #ff7a1a; --accent-text: #111; --ok: #3ccf91; --warn: #f2b45a; --err: #ff7b72; --input: #0f1115;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { min-height: 100vh; padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  header { position: sticky; top: 0; z-index: 10; background: var(--bg); padding: calc(10px + env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--border); }
+  .row { display: flex; align-items: center; gap: 10px; }
+  h1 { font-size: 18px; margin: 0; flex: 1; }
+  .count { color: var(--muted); font-size: 13px; }
+  .search { margin-top: 8px; width: 100%; height: 46px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 0 14px; font-size: 16px; outline: none; }
+  .search:focus { border-color: var(--accent); }
+  main { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; max-width: 640px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
+  .card.pending { border-color: var(--warn); }
+  .top { display: flex; gap: 12px; align-items: flex-start; }
+  .thumb { width: 52px; height: 52px; border-radius: 10px; background: var(--input); object-fit: cover; flex: none; }
+  .info { flex: 1; min-width: 0; }
+  .name { font-size: 15px; font-weight: 600; line-height: 1.3; word-break: break-word; }
+  .code { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-all; font-variant-numeric: tabular-nums; }
+  .plat { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .plat b { color: var(--text); font-weight: 600; }
+  .plat .diff { color: var(--warn); }
+  .ctrl { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .step { width: 52px; height: 48px; border-radius: 12px; border: 1px solid var(--border); background: var(--input); color: var(--text); font-size: 26px; line-height: 1; cursor: pointer; touch-action: manipulation; }
+  .step:active { background: var(--border); }
+  .qty { flex: 1; min-width: 0; height: 48px; text-align: center; font-size: 22px; font-weight: 700; border-radius: 12px; border: 1px solid var(--border); background: var(--input); color: var(--text); -moz-appearance: textfield; font-variant-numeric: tabular-nums; }
+  .qty::-webkit-outer-spin-button, .qty::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .qty:focus { outline: none; border-color: var(--accent); }
+  .send { height: 48px; padding: 0 14px; border-radius: 12px; border: 0; background: var(--accent); color: var(--accent-text); font-weight: 700; font-size: 15px; cursor: pointer; touch-action: manipulation; }
+  .send:disabled { opacity: .55; }
+  .send.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .status { font-size: 12px; margin-top: 6px; min-height: 16px; color: var(--muted); }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); } .status.warn { color: var(--warn); }
+  .more, .empty { text-align: center; color: var(--muted); padding: 18px 0; font-size: 14px; }
+  .more button { height: 44px; padding: 0 20px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 15px; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; background: var(--card); border-top: 1px solid var(--border); padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); display: none; }
+  .bar.show { display: block; }
+  .bar .inner { max-width: 640px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+  .bar .txt { flex: 1; font-size: 14px; }
+  .bar .txt small { display: block; color: var(--muted); font-size: 12px; }
+  #login { display: none; padding: 40px 20px; max-width: 360px; margin: 0 auto; }
+  #login h2 { margin: 0 0 14px; }
+  #login input { width: 100%; height: 48px; border-radius: 12px; border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 0 14px; font-size: 16px; margin-bottom: 10px; }
+  #login button { width: 100%; }
+  #login .err { color: var(--err); font-size: 14px; min-height: 18px; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>Giriş</h2>
+  <input type="password" id="pw" placeholder="Panel şifresi" autocomplete="current-password">
+  <button class="send" id="loginBtn">Giriş yap</button>
+  <p class="err" id="loginErr"></p>
+</div>
+
+<div id="app" style="display:none;">
+  <header>
+    <div class="row">
+      <h1>Stok</h1>
+      <span class="count" id="count"></span>
+      <button class="send ghost" id="reload" style="height:36px; padding:0 12px; font-size:13px;">Yenile</button>
+    </div>
+    <input class="search" id="q" type="search" inputmode="search" placeholder="Ürün adı, kod ya da barkod ara…" autocomplete="off" enterkeyhint="search">
+  </header>
+  <main id="list"></main>
+  <div class="bar" id="bar">
+    <div class="inner">
+      <div class="txt"><span id="barTxt"></span><small id="barSub">Platformlara henüz gönderilmedi</small></div>
+      <button class="send" id="sendAll">Hepsini gönder</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var PLATFORMS = { hb: 'Hepsiburada', ty: 'Trendyol', n11: 'N11', cs: 'Çiçeksepeti', koctas: 'Koçtaş' };
+  var SHORT = { hb: 'H', ty: 'T', n11: 'N11', cs: 'Ç', koctas: 'K' };
+  var PAGE = 40;
+
+  var products = [];      // sadece ana ürünler
+  var byCode = {};
+  var pending = {};       // kod -> true: stok değişti, platformlara gönderilmedi
+  var timers = {};        // kod -> bekleyen kayıt zamanlayıcısı
+  var shown = PAGE;
+  var query = '';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var norm = function (s) { return String(s == null ? '' : s).toLocaleLowerCase('tr').replace(/\s+/g, ' ').trim(); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+
+  function showLogin(msg) {
+    $('app').style.display = 'none';
+    $('login').style.display = 'block';
+    $('loginErr').textContent = msg || '';
+  }
+  function showApp() {
+    $('login').style.display = 'none';
+    $('app').style.display = 'block';
+  }
+
+  async function api(url, opts) {
+    var r = await fetch(url, opts);
+    if (r.status === 401) { showLogin(); throw new Error('login'); }
+    return r;
+  }
+
+  async function load() {
+    var r = await api('/api/products');
+    var d = await r.json();
+    var list = (d.products || []).filter(function (p) { return !p.mergedInto; });
+    list.forEach(function (p) {
+      var old = byCode[p.code];
+      // Düzenlenmekte/gönderilmemiş ürünün yerel değerini sunucudan gelenle ezme
+      if (old && (pending[p.code] || timers[p.code])) p.centralStock = old.centralStock;
+      p._hay = norm([p.name, p.code, Object.values(p.skus || {}).join(' '), Object.values(p.productCodes || {}).join(' ')].join(' '));
+    });
+    list.sort(function (a, b) { return String(a.name || a.code).localeCompare(String(b.name || b.code), 'tr'); });
+    products = list;
+    byCode = {};
+    list.forEach(function (p) { byCode[p.code] = p; });
+    showApp();
+    render();
+  }
+
+  function platformLine(p) {
+    var central = Number(p.centralStock) || 0;
+    var parts = [];
+    Object.keys(PLATFORMS).forEach(function (id) {
+      var v = p.stocks && p.stocks[id];
+      if (v === undefined || v === null || v === '') return;
+      var diff = Number(v) !== central;
+      parts.push('<span class="' + (diff ? 'diff' : '') + '">' + SHORT[id] + ' <b>' + esc(v) + '</b></span>');
+    });
+    return parts.length ? 'Platformlarda: ' + parts.join(' · ') : '';
+  }
+
+  function cardHtml(p) {
+    var img = p.image ? '<img class="thumb" loading="lazy" src="' + esc(p.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<div class="thumb"></div>';
+    var qty = Number(p.centralStock);
+    if (!isFinite(qty)) qty = 0;
+    return '<div class="card' + (pending[p.code] ? ' pending' : '') + '" data-code="' + esc(p.code) + '">' +
+      '<div class="top">' + img +
+        '<div class="info"><div class="name">' + esc(p.name || 'İsimsiz ürün') + '</div>' +
+        '<div class="code">' + esc(p.code) + '</div>' +
+        '<div class="plat" data-role="plat">' + platformLine(p) + '</div></div>' +
+      '</div>' +
+      '<div class="ctrl">' +
+        '<button class="step" data-act="minus" aria-label="Azalt">−</button>' +
+        '<input class="qty" type="number" inputmode="numeric" pattern="[0-9]*" min="0" step="1" value="' + qty + '" aria-label="Merkezi stok">' +
+        '<button class="step" data-act="plus" aria-label="Artır">+</button>' +
+        '<button class="send" data-act="send">Gönder</button>' +
+      '</div>' +
+      '<div class="status" data-role="status">' + (pending[p.code] ? 'Kaydedildi · platformlara gönderilmedi' : '') + '</div>' +
+    '</div>';
+  }
+
+  function filtered() {
+    var q = norm(query);
+    if (!q) return products;
+    var words = q.split(' ');
+    return products.filter(function (p) { return words.every(function (w) { return p._hay.indexOf(w) !== -1; }); });
+  }
+
+  function render() {
+    var list = filtered();
+    $('count').textContent = list.length + ' ürün';
+    var html = list.slice(0, shown).map(cardHtml).join('');
+    if (!list.length) html = '<div class="empty">Ürün bulunamadı.</div>';
+    else if (list.length > shown) html += '<div class="more"><button id="moreBtn">Daha fazla göster (' + (list.length - shown) + ')</button></div>';
+    $('list').innerHTML = html;
+    updateBar();
+  }
+
+  function updateBar() {
+    var n = Object.keys(pending).length;
+    $('bar').classList.toggle('show', n > 0);
+    $('barTxt').textContent = n + ' ürün değişti';
+  }
+
+  function cardEl(code) {
+    var els = document.querySelectorAll('.card');
+    for (var i = 0; i < els.length; i++) if (els[i].getAttribute('data-code') === code) return els[i];
+    return null;
+  }
+  function setStatus(code, text, cls) {
+    var c = cardEl(code); if (!c) return;
+    var s = c.querySelector('[data-role="status"]');
+    s.textContent = text || '';
+    s.className = 'status' + (cls ? ' ' + cls : '');
+  }
+  function refreshCard(code) {
+    var c = cardEl(code), p = byCode[code]; if (!c || !p) return;
+    c.classList.toggle('pending', !!pending[code]);
+    c.querySelector('[data-role="plat"]').innerHTML = platformLine(p);
+  }
+
+  // ---- stok kaydetme (kısa gecikmeyle, art arda dokunuşları tek istekte birleştirir) ----
+  function setQty(code, value) {
+    var p = byCode[code]; if (!p) return;
+    value = Math.max(0, Math.floor(Number(value) || 0));
+    p.centralStock = value;
+    var c = cardEl(code);
+    if (c) { var inp = c.querySelector('.qty'); if (document.activeElement !== inp || inp.value !== String(value)) inp.value = value; }
+    setStatus(code, 'Kaydediliyor…', '');
+    clearTimeout(timers[code]);
+    timers[code] = setTimeout(function () { saveNow(code); }, 600);
+  }
+
+  async function saveNow(code) {
+    var p = byCode[code]; if (!p) return;
+    delete timers[code];
+    var value = p.centralStock;
+    try {
+      var r = await api('/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: code, centralStock: value }) });
+      var d = await r.json().catch(function () { return {}; });
+      if (!r.ok || d.ok === false) throw new Error(d.error || ('HTTP ' + r.status));
+      if (p.centralStock !== value) return; // bu arada tekrar değişti; yeni kayıt zaten yolda
+      pending[code] = true;
+      setStatus(code, 'Kaydedildi · platformlara gönderilmedi', 'warn');
+      refreshCard(code);
+      updateBar();
+    } catch (e) {
+      if (e.message !== 'login') setStatus(code, 'Kaydedilemedi: ' + e.message, 'err');
+    }
+  }
+
+  // ---- platformlara gönderme ----
+  async function pushOne(code) {
+    var p = byCode[code]; if (!p) return false;
+    if (timers[code]) { clearTimeout(timers[code]); await saveNow(code); }
+    setStatus(code, 'Gönderiliyor…', '');
+    try {
+      var r = await api('/api/products/' + encodeURIComponent(code) + '/push', { method: 'POST' });
+      var d = await r.json().catch(function () { return {}; });
+      var res = d.results || {};
+      var ids = Object.keys(res);
+      var allOk = ids.length > 0 && ids.every(function (id) { return res[id].ok; });
+      var text = ids.map(function (id) { return (PLATFORMS[id] || id) + ' ' + (res[id].ok ? '✓' : '✗'); }).join('  ');
+      if (!ids.length) { setStatus(code, 'Gönderilecek platform yok.', 'warn'); return false; }
+      if (allOk) { delete pending[code]; }
+      p.stocks = p.stocks || {};
+      ids.forEach(function (id) { if (res[id].ok) p.stocks[id] = Number(p.centralStock) || 0; });
+      setStatus(code, text, allOk ? 'ok' : 'err');
+      if (!allOk) {
+        var bad = ids.filter(function (id) { return !res[id].ok; })[0];
+        if (res[bad].message) setStatus(code, text + ' — ' + res[bad].message, 'err');
+      }
+      refreshCard(code);
+      updateBar();
+      return allOk;
+    } catch (e) {
+      if (e.message !== 'login') setStatus(code, 'Gönderilemedi: ' + e.message, 'err');
+      return false;
+    }
+  }
+
+  async function sendAll() {
+    var codes = Object.keys(pending);
+    if (!codes.length) return;
+    var btn = $('sendAll');
+    btn.disabled = true;
+    var done = 0, fail = 0;
+    for (var i = 0; i < codes.length; i++) {
+      $('barSub').textContent = 'Gönderiliyor ' + (i + 1) + ' / ' + codes.length + '…';
+      var ok = await pushOne(codes[i]);
+      if (ok) done++; else fail++;
+    }
+    btn.disabled = false;
+    $('barSub').textContent = fail ? (done + ' gönderildi, ' + fail + ' üründe hata var') : 'Platformlara henüz gönderilmedi';
+    updateBar();
+  }
+
+  // ---- olaylar ----
+  $('list').addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]');
+    if (t) {
+      var card = t.closest('.card'), code = card.getAttribute('data-code'), act = t.getAttribute('data-act');
+      var p = byCode[code];
+      if (act === 'plus') setQty(code, (Number(p.centralStock) || 0) + 1);
+      else if (act === 'minus') setQty(code, (Number(p.centralStock) || 0) - 1);
+      else if (act === 'send') { t.disabled = true; pushOne(code).then(function () { t.disabled = false; }); }
+      return;
+    }
+    if (e.target.id === 'moreBtn') { shown += PAGE; render(); }
+  });
+  $('list').addEventListener('input', function (e) {
+    if (!e.target.classList.contains('qty')) return;
+    var code = e.target.closest('.card').getAttribute('data-code');
+    if (e.target.value === '') return;
+    setQty(code, e.target.value);
+  });
+  $('list').addEventListener('focusin', function (e) { if (e.target.classList.contains('qty')) e.target.select(); });
+  $('list').addEventListener('keydown', function (e) {
+    if (e.target.classList.contains('qty') && e.key === 'Enter') e.target.blur();
+  });
+  $('list').addEventListener('focusout', function (e) {
+    if (!e.target.classList.contains('qty')) return;
+    var code = e.target.closest('.card').getAttribute('data-code');
+    if (e.target.value === '') e.target.value = Number(byCode[code].centralStock) || 0;
+  });
+
+  var qTimer;
+  $('q').addEventListener('input', function (e) {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(function () { query = e.target.value; shown = PAGE; render(); }, 200);
+  });
+  $('reload').addEventListener('click', function () { load().catch(function () {}); });
+  $('sendAll').addEventListener('click', sendAll);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && $('app').style.display !== 'none' && document.activeElement.tagName !== 'INPUT') load().catch(function () {});
+  });
+
+  async function doLogin() {
+    var pw = $('pw').value;
+    try {
+      var r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+      var d = await r.json().catch(function () { return {}; });
+      if (d.ok) { $('pw').value = ''; await load(); } else $('loginErr').textContent = d.error || 'Giriş başarısız.';
+    } catch (e) { $('loginErr').textContent = 'Bağlantı hatası.'; }
+  }
+  $('loginBtn').addEventListener('click', doLogin);
+  $('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+
+  window.addEventListener('beforeunload', function (e) {
+    if (Object.keys(timers).length) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  load().catch(function (e) { if (e.message !== 'login') { $('app').style.display = 'block'; $('list').innerHTML = '<div class="empty">Yüklenemedi: ' + esc(e.message) + '</div>'; } });
+})();
+</script>
+</body>
+</html>
