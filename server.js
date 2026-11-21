@@ -2957,6 +2957,124 @@ async function logoLogin() {
 }
 async function logoLogout(sid) { try { await logoSoap("Logout", `<tem:Logout><tem:sessionID>${sid}</tem:sessionID></tem:Logout>`); } catch (_) {} }
 
+/* ---------------- BirFatura (edonustur OutEBelgeV2 REST) ---------------- */
+function invoiceProvider() { return String(process.env.INVOICE_PROVIDER || "logo").toLowerCase() === "birfatura" ? "birfatura" : "logo"; }
+function bfConfigured() { return !!(process.env.BIRFATURA_API_KEY && process.env.BIRFATURA_SECRET_KEY && process.env.BIRFATURA_INTEGRATION_KEY); }
+function bfBase() { return (process.env.BIRFATURA_URL || "https://uygulama.edonustur.com").replace(/\/+$/, ""); }
+function bfSystemType() { return process.env.BIRFATURA_SYSTEM_TYPE || "EARSIV"; }
+async function bfPost(action, body) {
+  if (!bfConfigured()) throw new Error("BIRFATURA_API_KEY / BIRFATURA_SECRET_KEY / BIRFATURA_INTEGRATION_KEY ortam değişkenleri tanımlı değil.");
+  const r = await axios.post(`${bfBase()}/api/outEBelgeV2/${action}`, body || {}, {
+    headers: { "X-Api-Key": process.env.BIRFATURA_API_KEY, "X-Secret-Key": process.env.BIRFATURA_SECRET_KEY, "X-Integration-Key": process.env.BIRFATURA_INTEGRATION_KEY, "Content-Type": "application/json" },
+    timeout: 45000, validateStatus: () => true,
+  });
+  let data = r.data;
+  if (typeof data === "string") { try { data = JSON.parse(data); } catch (_) {} }
+  console.log(`[birfatura] ${action} → HTTP ${r.status}`, JSON.stringify(data).slice(0, 600));
+  return { status: r.status, data };
+}
+// Yanıt biçimi belgelenmemiş olduğundan toleranslı çözümleme: ilk bulunan alanı döndürür
+function bfDeepFind(o, names, depth = 0) {
+  if (!o || typeof o !== "object" || depth > 5) return undefined;
+  for (const n of names) for (const k of Object.keys(o)) if (k.toLowerCase() === n.toLowerCase() && o[k] != null && o[k] !== "" && typeof o[k] !== "object") return o[k];
+  for (const k of Object.keys(o)) { const v = bfDeepFind(o[k], names, depth + 1); if (v !== undefined) return v; }
+  return undefined;
+}
+function bfDeepFindArr(o, depth = 0) {
+  if (!o || typeof o !== "object" || depth > 4) return null;
+  if (Array.isArray(o)) return o;
+  for (const k of Object.keys(o)) { const v = bfDeepFindArr(o[k], depth + 1); if (v) return v; }
+  return null;
+}
+function bfFailure(r) {
+  const d = r.data;
+  const msg = () => bfDeepFind(d, ["message", "Message", "errorMessage", "error", "description", "title"]) || (typeof d === "string" ? d.slice(0, 200) : "");
+  if (r.status === 401 || r.status === 403) return "BirFatura anahtarları kabul edilmedi (HTTP " + r.status + "). " + msg();
+  if (r.status >= 400) return `BirFatura HTTP ${r.status}: ${msg() || "bilinmeyen hata"}`;
+  if (d && typeof d === "object") {
+    const ok = bfDeepFind(d, ["success", "isSuccess", "Success"]);
+    if (ok === false || ok === "false") return msg() || "BirFatura işlemi reddetti.";
+    const err = bfDeepFind(d, ["hasError", "isError"]);
+    if (err === true || err === "true") return msg() || "BirFatura hata döndürdü.";
+  }
+  return "";
+}
+const bfDate = (t) => new Date(t + 3 * 3600 * 1000).toISOString().slice(0, 10); // TR saati
+function bfInvoiceModel(order, vatRate, uuid) {
+  const total = Number(order.amount) || 0;
+  if (total <= 0) throw new Error("Sipariş tutarı 0.");
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const net = r2(total / (1 + vatRate / 100));
+  const clean = (v, n) => String(v || "").replace(/\s+/g, " ").trim().slice(0, n);
+  const name = clean(order.customer, 100) || "Müşteri";
+  const city = clean(order.city, 50) || "Merkez", town = clean(order.district, 50) || city;
+  const addr = clean(order.address, 300) || `${town} / ${city}`;
+  const platName = ({ hb: "Hepsiburada", ty: "Trendyol", n11: "N11", cs: "Çiçeksepeti", koctas: "Koçtaş", store: "Mağaza" })[order.platform] || order.platform;
+  const prodLabel = (() => {
+    const fromLines = (order.lines || []).map((l) => { const n = clean(l.name, 200); return n ? (Number(l.quantity) > 1 ? `${n} x${Number(l.quantity)}` : n) : ""; }).filter(Boolean).join(", ");
+    const ps = clean(order.productSummary, 250);
+    return (fromLines || (ps && ps !== "—" ? ps : "")).slice(0, 250);
+  })();
+  const dateStr = bfDate(order.date || Date.now()), today = bfDate(Date.now());
+  const phone = clean(order.phone, 25) || null;
+  return { Invoice: {
+    OrderCode: clean(order.orderNumber, 50), OrderDate: dateStr, InvoiceDate: today,
+    InvoiceExplanation: `${platName} siparişi: ${clean(order.orderNumber, 50)}`,
+    EInvoiceId: "", IsDocumentNoAuto: true, ETTN: uuid, ReceiverTag: null,
+    BillingName: name, BillingAddress: addr, BillingTown: town, BillingCity: city,
+    BillingMobilePhone: phone, BillingPhone: phone, BillingPhone2: null,
+    TaxOffice: "", TaxNo: /^\d{11}$/.test(String(order.tckn || "")) ? order.tckn : (process.env.BIRFATURA_DEFAULT_TAXNO || ""),
+    Email: clean(order.email, 100) || null,
+    ShipCompany: clean(order.cargo, 50) || platName, CargoCampaignCode: "",
+    ShippingName: name, ShippingAddress: addr, ShippingTown: town, ShippingCity: city, ShippingCountry: "Türkiye", ShippingZipCode: "", ShippingPhone: phone,
+    DeliveryFeeType: Number(process.env.BIRFATURA_DELIVERY_FEE_TYPE) || 3,
+    PaymentType: process.env.BIRFATURA_PAYMENT_TYPE || "Kredi Kartı",
+    Currency: "TRY", CurrencyRate: 1.0,
+    TotalPaidTaxExcluding: net, TotalPaidTaxIncluding: r2(total),
+    ProductsTotalTaxExcluding: net, ProductsTotalTaxIncluding: r2(total),
+    ShippingChargeTotalTaxExcluding: 0, ShippingChargeTotalTaxIncluding: 0,
+    InstallmentChargeTotalTaxExcluding: 0, InstallmentChargeTotalTaxIncluding: 0,
+    BankTransferDiscountTotalTaxExcluding: 0, BankTransferDiscountTotalTaxIncluding: 0,
+    PayingAtTheDoorChargeTotalTaxExcluding: 0, PayingAtTheDoorChargeTotalTaxIncluding: 0,
+    DiscountTotalTaxExcluding: 0, DiscountTotalTaxIncluding: 0,
+    OrderDetails: [{
+      ProductCode: clean(order.orderNumber, 50), Barcode: "", ProductBrand: "",
+      ProductName: prodLabel || `Satış bedeli (${platName} ${clean(order.orderNumber, 50)})`,
+      ProductNote: "", ProductQuantityType: "Adet", ProductQuantity: 1, VatRate: vatRate,
+      ProductUnitPriceTaxExcluding: net, ProductUnitPriceTaxIncluding: r2(total),
+      DiscountIsPercentUnit: 0, DiscountRateUnit: 0, DiscountUnitTaxExcluding: 0, DiscountUnitTaxIncluding: 0,
+    }],
+  } };
+}
+async function bfSendInvoice(order, vatRate) {
+  const uuid = crypto.randomUUID();
+  const r = await bfPost("SendBasicInvoiceFromModel", bfInvoiceModel(order, vatRate, uuid));
+  const fail = bfFailure(r);
+  if (fail) throw new Error(fail);
+  const no = bfDeepFind(r.data, ["invoiceNo", "documentNo", "documentNumber", "invoiceNumber", "eInvoiceId", "id"]);
+  const retUuid = bfDeepFind(r.data, ["uuid", "ettn", "documentUUID"]) || uuid;
+  return { invoiceNo: no ? String(no) : "", uuid: String(retUuid), raw: r.data };
+}
+async function bfStatusOf(uuids) {
+  const r = await bfPost("GetOutBoxDocumentStatusesWithUUIDs", { uuids });
+  const fail = bfFailure(r);
+  if (fail) throw new Error(fail);
+  return r.data;
+}
+
+app.post("/api/invoices/provider-test", requireAuth, async (req, res) => {
+  try {
+    if (invoiceProvider() !== "birfatura") return res.json({ ok: true, provider: "logo", message: "Sağlayıcı e-Logo (INVOICE_PROVIDER=birfatura değil)." });
+    const r = await bfPost("GetNumberOfCredits", {});
+    const fail = bfFailure(r);
+    if (fail) return res.status(502).json({ ok: false, provider: "birfatura", error: fail });
+    const credits = bfDeepFind(r.data, ["numberOfCredits", "credits", "credit", "kontor", "remaining", "data", "result"]);
+    res.json({ ok: true, provider: "birfatura", credits: credits !== undefined ? credits : null, raw: r.data });
+  } catch (e) {
+    res.status(502).json({ ok: false, provider: "birfatura", error: e.message });
+  }
+});
+
 // Bağlantı testi: giriş yapıp çıkar
 app.post("/api/invoices/logo-test", requireAuth, async (req, res) => {
   try {
@@ -2969,7 +3087,8 @@ app.post("/api/invoices/logo-test", requireAuth, async (req, res) => {
 });
 
 app.get("/api/invoices", requireAuth, (req, res) => {
-  res.json({ invoices: invoicedOrders, logoConfigured: !!(process.env.LOGO_USER && process.env.LOGO_PASS) });
+  const prov = invoiceProvider();
+  res.json({ invoices: invoicedOrders, provider: prov, providerConfigured: prov === "birfatura" ? bfConfigured() : !!(process.env.LOGO_USER && process.env.LOGO_PASS), logoConfigured: !!(process.env.LOGO_USER && process.env.LOGO_PASS) });
 });
 
 // Elle işaretleme (fatura Logo portalından kesildiyse) ya da işareti kaldırma
@@ -3167,6 +3286,31 @@ app.post("/api/invoices/issue", requireAuth, async (req, res) => {
   const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys.slice(0, 100) : [];
   const vat = Number(req.body && req.body.vat);
   const vatRate = vat >= 0 && vat <= 100 ? vat : 20;
+  if (invoiceProvider() === "birfatura") {
+    try {
+      if (!bfConfigured()) throw new Error("BirFatura anahtarları (BIRFATURA_API_KEY / BIRFATURA_SECRET_KEY / BIRFATURA_INTEGRATION_KEY) tanımlı değil.");
+      const byKey = new Map((cache.orders || []).map((o) => [orderKeyOf(o), o]));
+      const results = [];
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i], o = byKey.get(k);
+        if (!o) { results.push({ key: k, ok: false, error: "Sipariş bulunamadı." }); continue; }
+        if (invoicedOrders[k]) { results.push({ key: k, ok: false, error: "Zaten faturalandı." }); continue; }
+        try {
+          const r = await bfSendInvoice(o, vatRate);
+          invoicedOrders[k] = { at: Date.now(), by: "birfatura", no: r.invoiceNo || undefined, uuid: r.uuid, vat: vatRate, customer: o.customer || undefined };
+          saveJSON("invoices.json", invoicedOrders); // her faturadan sonra kaydet (çift kesimi önler)
+          results.push({ key: k, ok: true, invoiceNo: r.invoiceNo });
+        } catch (e) {
+          results.push({ key: k, ok: false, error: e.message });
+        }
+        if (i < keys.length - 1) await sleepMs(400);
+      }
+      scheduleInvoicesDriveSave();
+      return res.json({ ok: results.every((r) => r.ok), results, invoices: invoicedOrders });
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: e.message });
+    }
+  }
   let sid;
   try {
     const sup = logoSupplier();
@@ -3245,6 +3389,18 @@ async function logoGetPdf(sid, uuid) {
 
 app.get("/api/invoices/pdf", requireAuth, async (req, res) => {
   const inv = invoicedOrders[String(req.query.key || "")];
+  if (inv && inv.by === "birfatura" && inv.uuid) {
+    try {
+      const r = await bfPost("GetPDFLinkByUUID", { uuids: [inv.uuid], systemType: bfSystemType() });
+      const fail = bfFailure(r);
+      if (fail) throw new Error(fail);
+      const link = (JSON.stringify(r.data).match(/https?:\/\/[^"\s\\]+/) || [])[0];
+      if (!link) throw new Error("PDF bağlantısı henüz hazır değil (fatura GİB'e iletilirken bekleyin ve tekrar deneyin).");
+      return res.redirect(link);
+    } catch (e) {
+      return res.status(502).type("text/plain; charset=utf-8").send("Fatura PDF'i alınamadı: " + e.message);
+    }
+  }
   if (!inv || inv.by !== "logo" || !inv.uuid) return res.status(404).type("text/plain; charset=utf-8").send("Bu sipariş için Logo faturası bulunamadı.");
   let sid;
   try {
@@ -3275,6 +3431,33 @@ app.get("/api/invoices/pdf", requireAuth, async (req, res) => {
 
 // Gönderilen faturaların GİB durumunu güncelle
 app.post("/api/invoices/status", requireAuth, async (req, res) => {
+  if (invoiceProvider() === "birfatura") {
+    try {
+      const pend = Object.entries(invoicedOrders).filter(([, v]) => v.by === "birfatura" && v.uuid && v.status !== 2 && v.status !== -1);
+      for (let i = 0; i < pend.length; i += 50) {
+        const chunk = pend.slice(i, i + 50);
+        const data = await bfStatusOf(chunk.map(([, v]) => v.uuid));
+        const arr = Array.isArray(data) ? data : (Array.isArray(bfDeepFindArr(data)) ? bfDeepFindArr(data) : []);
+        for (const it of arr) {
+          const u = String(it.uuid || it.UUID || it.ettn || it.ETTN || it.documentUUID || "").toLowerCase();
+          const hit = chunk.find(([, v]) => String(v.uuid).toLowerCase() === u);
+          if (!hit) continue;
+          const v = hit[1];
+          const code = it.statusCode != null ? it.statusCode : (it.StatusCode != null ? it.StatusCode : it.status);
+          const desc = it.statusDescription || it.StatusDescription || it.description || it.Description || it.statusName || "";
+          if (desc) v.description = String(desc);
+          if (code != null && !isNaN(Number(code))) v.code = Number(code);
+          if (it.invoiceNo || it.documentNo || it.InvoiceNo || it.DocumentNo) v.no = String(it.invoiceNo || it.documentNo || it.InvoiceNo || it.DocumentNo);
+          v.raw = it;
+        }
+      }
+      saveJSON("invoices.json", invoicedOrders);
+      scheduleInvoicesDriveSave();
+      return res.json({ ok: true, invoices: invoicedOrders });
+    } catch (e) {
+      return res.status(502).json({ ok: false, error: e.message });
+    }
+  }
   let sid;
   try {
     sid = await logoLogin();

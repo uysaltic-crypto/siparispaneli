@@ -228,13 +228,13 @@
         <span id="invSelInfo" class="muted"></span>
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:14px;">
-        <button onclick="invIssue()">Seçilenlere Logo'dan fatura kes</button>
+        <button id="invIssueBtn" onclick="invIssue()">Seçilenlere Logo'dan fatura kes</button>
         <button class="ghost" onclick="invMark(true)">Faturalandı işaretle</button>
         <button class="ghost" onclick="invMark(false)">İşareti kaldır</button>
         <button class="ghost" onclick="invGib()">GİB portalı için hazırla</button>
         <button class="ghost" onclick="invCsv()">CSV indir (seçilen / listelenen)</button>
         <button class="ghost" onclick="invStatus()">Durumları güncelle</button>
-        <button class="ghost" onclick="invLogoTest()">Logo bağlantı testi</button>
+        <button class="ghost" id="invTestBtn" onclick="invLogoTest()">Logo bağlantı testi</button>
         <span style="flex-basis:100%; height:0;"></span>
         <span class="muted">Eski sipariş:</span>
         <select id="invBackfillPlatform">
@@ -655,9 +655,16 @@ function platformMeta(id) {
 
 /* ---------------- Faturalar (platform bazlı) ---------------- */
 let invoicedMap = {};
+let invProvider = 'logo';
+function invProvName() { return invProvider === 'birfatura' ? 'BirFatura' : 'Logo'; }
+function invApplyProvider() {
+  const b = document.getElementById('invIssueBtn'), t = document.getElementById('invTestBtn');
+  if (b) b.textContent = 'Seçilenlere ' + (invProvider === 'birfatura' ? 'BirFatura' : "Logo'dan") + ' ile fatura kes';
+  if (t) t.textContent = invProvName() + ' bağlantı testi';
+}
 const invSel = new Set();
 async function loadInvoices() {
-  try { const r = await fetch('/api/invoices'); if (r.ok) invoicedMap = (await r.json()).invoices || {}; } catch (e) {}
+  try { const r = await fetch('/api/invoices'); if (r.ok) { const j = await r.json(); invoicedMap = j.invoices || {}; invProvider = j.provider || 'logo'; invApplyProvider(); } } catch (e) {}
   renderInvoices();
 }
 function invVatRate() { const v = parseFloat(String(document.getElementById('invVat').value).replace(',', '.')); return v >= 0 && v <= 100 ? v : 20; }
@@ -696,7 +703,7 @@ function renderInvoices() {
           <td>${escHtml(String(o.orderNumber))}</td><td>${escHtml(o.customer || '')}${o.city ? ' <span class="muted">/ ' + escHtml(o.city) + '</span>' : ''}</td>
           <td style="text-align:right;">${money(o.amount || 0)} ₺</td>
           <td class="muted">${o.date ? new Date(o.date).toLocaleDateString('tr-TR') : ''}</td>
-          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>${inv.demo ? ' <span class="badge">TEST</span>' : ''} ${(inv.by === 'logo' && inv.uuid) ? ' <a href="/api/invoices/pdf?key=' + escAttr(encodeURIComponent(k)) + '" target="_blank" rel="noopener" style="font-size:12px;">PDF indir</a>' : ''}${inv.code ? ' <span class="muted" title="' + escAttr(inv.description || '') + '">GİB: ' + inv.code + '</span>' : ''}` : '<span class="muted">—</span>'}</td></tr>`;
+          <td>${inv ? `<span class="badge ok">Faturalandı${inv.no ? ' · ' + escHtml(inv.no) : ''}</span>${inv.demo ? ' <span class="badge">TEST</span>' : ''} ${((inv.by === 'logo' || inv.by === 'birfatura') && inv.uuid) ? ' <a href="/api/invoices/pdf?key=' + escAttr(encodeURIComponent(k)) + '" target="_blank" rel="noopener" style="font-size:12px;">PDF indir</a>' : ''}${inv.code ? ' <span class="muted" title="' + escAttr(inv.description || '') + '">GİB: ' + inv.code + '</span>' : ''}` : '<span class="muted">—</span>'}</td></tr>`;
       }).join('')}</tbody></table></div>`;
   }).join('');
   document.getElementById('invEmpty').style.display = list.length ? 'none' : 'block';
@@ -713,7 +720,7 @@ async function invMark(on) {
 async function invIssue() {
   const keys = [...invSel];
   if (!keys.length) { toast('Önce sipariş seçin.'); return; }
-  if (!confirm(keys.length + ' sipariş için Logo üzerinden e-Arşiv faturası kesilsin mi? (Canlı adres ayarlıysa geri alınamaz.)')) return;
+  if (!confirm(keys.length + ' sipariş için ' + invProvName() + ' üzerinden e-Arşiv faturası kesilsin mi? (Canlı hesapta geri alınamaz, kontör düşer.)')) return;
   const r = await fetch('/api/invoices/issue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys, vat: invVatRate() }) });
   const d = await r.json().catch(() => ({}));
   if (d.invoices) invoicedMap = d.invoices;
@@ -757,6 +764,12 @@ async function invBackfill() {
   toast(msgs.join(' | '));
 }
 async function invLogoTest() {
+  if (invProvider === 'birfatura') {
+    const r = await fetch('/api/invoices/provider-test', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    toast(r.ok ? 'BirFatura bağlantısı başarılı' + (d.credits != null ? ' · kalan kontör: ' + d.credits : ' · yanıt: ' + JSON.stringify(d.raw || {}).slice(0, 150)) : (d.error || 'Bağlantı kurulamadı.'));
+    return;
+  }
   const r = await fetch('/api/invoices/logo-test', { method: 'POST' });
   const d = await r.json().catch(() => ({}));
   toast(r.ok ? 'Logo bağlantısı başarılı (' + d.url + ')' : (d.error || 'Bağlantı kurulamadı.') + (d.url ? ' — ' + d.url : ''));
