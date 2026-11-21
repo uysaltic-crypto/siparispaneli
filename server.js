@@ -3387,17 +3387,55 @@ async function logoGetPdf(sid, uuid) {
   throw new Error(lastMsg || "PDF alınamadı.");
 }
 
+// Fatura dosya adı: müşteri adı (kayıt yoksa siparişten bulunur), o da yoksa fatura no / uuid.
+function invoiceNiceName(key, inv) {
+  const ord = (cache.orders || []).find((o) => orderKeyOf(o) === key);
+  const cust = String((inv && inv.customer) || (ord && ord.customer) || "").replace(/\s+/g, " ").trim();
+  const fallback = String((inv && (inv.no || inv.uuid)) || "fatura").replace(/[^\w.-]/g, "_");
+  const clean = cust.replace(/[\\/:*?"<>|\x00-\x1f]/g, "").trim().slice(0, 80);
+  return clean || fallback;
+}
+function asciiFileName(n) {
+  return String(n)
+    .replace(/ğ/g, "g").replace(/Ğ/g, "G").replace(/ü/g, "u").replace(/Ü/g, "U")
+    .replace(/ş/g, "s").replace(/Ş/g, "S").replace(/ı/g, "i").replace(/İ/g, "I")
+    .replace(/ö/g, "o").replace(/Ö/g, "O").replace(/ç/g, "c").replace(/Ç/g, "C")
+    .replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+}
+function sendAttachment(res, buf, niceName, ext, mime) {
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Content-Disposition", `attachment; filename="${asciiFileName(niceName)}.${ext}"; filename*=UTF-8''${encodeURIComponent(niceName)}.${ext}`);
+  res.send(buf);
+}
+
+// BirFatura: PDF bağlantısını al, dosyayı sunucuda indir (dosya adını biz verebilelim diye).
+async function bfPdfLink(uuid) {
+  const r = await bfPost("GetPDFLinkByUUID", { uuids: [uuid], systemType: bfSystemType() });
+  const fail = bfFailure(r);
+  if (fail) throw new Error(fail);
+  const link = (JSON.stringify(r.data).match(/https?:\/\/[^"\s\\]+/) || [])[0];
+  if (!link) throw new Error("PDF bağlantısı henüz hazır değil (fatura GİB'e iletilirken bekleyin ve tekrar deneyin).");
+  return link;
+}
+async function bfPdfBuffer(uuid) {
+  const link = await bfPdfLink(uuid);
+  const r = await axios.get(link, { responseType: "arraybuffer", timeout: 45000, maxRedirects: 5, validateStatus: () => true });
+  const buf = Buffer.from(r.data || []);
+  if (r.status >= 200 && r.status < 300 && buf.subarray(0, 4).toString() === "%PDF") return { buf, link };
+  const err = new Error(`PDF indirilemedi (HTTP ${r.status}).`);
+  err.link = link;
+  throw err;
+}
+
 app.get("/api/invoices/pdf", requireAuth, async (req, res) => {
-  const inv = invoicedOrders[String(req.query.key || "")];
+  const key = String(req.query.key || "");
+  const inv = invoicedOrders[key];
   if (inv && inv.by === "birfatura" && inv.uuid) {
     try {
-      const r = await bfPost("GetPDFLinkByUUID", { uuids: [inv.uuid], systemType: bfSystemType() });
-      const fail = bfFailure(r);
-      if (fail) throw new Error(fail);
-      const link = (JSON.stringify(r.data).match(/https?:\/\/[^"\s\\]+/) || [])[0];
-      if (!link) throw new Error("PDF bağlantısı henüz hazır değil (fatura GİB'e iletilirken bekleyin ve tekrar deneyin).");
-      return res.redirect(link);
+      const { buf } = await bfPdfBuffer(inv.uuid);
+      return sendAttachment(res, buf, invoiceNiceName(key, inv), "pdf", "application/pdf");
     } catch (e) {
+      if (e.link) return res.redirect(e.link); // dosya sunucuda indirilemediyse eski davranış: doğrudan bağlantı
       return res.status(502).type("text/plain; charset=utf-8").send("Fatura PDF'i alınamadı: " + e.message);
     }
   }
@@ -3406,24 +3444,81 @@ app.get("/api/invoices/pdf", requireAuth, async (req, res) => {
   try {
     sid = await logoLogin();
     const pdf = await logoGetPdf(sid, inv.uuid);
-    res.setHeader("Content-Type", "application/pdf");
-    // Dosya adı: müşteri adı (eski faturalarda kayıt yoksa siparişten bulunur), yoksa fatura no
-    const key = String(req.query.key || "");
-    const ord = (cache.orders || []).find((o) => orderKeyOf(o) === key);
-    const custName = String(inv.customer || (ord && ord.customer) || "").replace(/\s+/g, " ").trim();
-    const fallback = String(inv.no || inv.uuid).replace(/[^\w.-]/g, "_");
-    const niceName = custName
-      ? custName.replace(/[\\/:*?"<>|\x00-\x1f]/g, "").trim().slice(0, 80) || fallback
-      : fallback;
-    const asciiName = niceName
-      .replace(/ğ/g, "g").replace(/Ğ/g, "G").replace(/ü/g, "u").replace(/Ü/g, "U")
-      .replace(/ş/g, "s").replace(/Ş/g, "S").replace(/ı/g, "i").replace(/İ/g, "I")
-      .replace(/ö/g, "o").replace(/Ö/g, "O").replace(/ç/g, "c").replace(/Ç/g, "C")
-      .replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-    res.setHeader("Content-Disposition", `attachment; filename="${asciiName}.pdf"; filename*=UTF-8''${encodeURIComponent(niceName)}.pdf`);
-    res.send(pdf);
+    sendAttachment(res, pdf, invoiceNiceName(key, inv), "pdf", "application/pdf");
   } catch (e) {
     res.status(502).type("text/plain; charset=utf-8").send("Fatura PDF'i alınamadı: " + e.message);
+  } finally {
+    if (sid) await logoLogout(sid);
+  }
+});
+
+// Birden çok dosyalık zip (UTF-8 dosya adları; PDF zaten sıkışık olduğundan küçülmezse "stored").
+function zipMulti(files) {
+  const locals = [], centrals = [];
+  let offset = 0;
+  const now = new Date(Date.now() + 3 * 3600000); // Türkiye saati
+  const dosTime = (now.getUTCHours() << 11) | (now.getUTCMinutes() << 5) | (now.getUTCSeconds() >> 1);
+  const dosDate = ((now.getUTCFullYear() - 1980) << 9) | ((now.getUTCMonth() + 1) << 5) | now.getUTCDate();
+  for (const f of files) {
+    const nameB = Buffer.from(f.name, "utf8"), crc = crc32(f.data);
+    let comp = zlib.deflateRawSync(f.data), method = 8;
+    if (comp.length >= f.data.length) { comp = f.data; method = 0; }
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0); lfh.writeUInt16LE(20, 4); lfh.writeUInt16LE(0x0800, 6); lfh.writeUInt16LE(method, 8);
+    lfh.writeUInt16LE(dosTime, 10); lfh.writeUInt16LE(dosDate, 12); lfh.writeUInt32LE(crc, 14); lfh.writeUInt32LE(comp.length, 18);
+    lfh.writeUInt32LE(f.data.length, 22); lfh.writeUInt16LE(nameB.length, 26); lfh.writeUInt16LE(0, 28);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(20, 4); cd.writeUInt16LE(20, 6); cd.writeUInt16LE(0x0800, 8); cd.writeUInt16LE(method, 10);
+    cd.writeUInt16LE(dosTime, 12); cd.writeUInt16LE(dosDate, 14); cd.writeUInt32LE(crc, 16); cd.writeUInt32LE(comp.length, 20);
+    cd.writeUInt32LE(f.data.length, 24); cd.writeUInt16LE(nameB.length, 28); cd.writeUInt32LE(offset, 42);
+    const local = Buffer.concat([lfh, nameB, comp]);
+    locals.push(local); centrals.push(Buffer.concat([cd, nameB]));
+    offset += local.length;
+  }
+  const central = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(central.length, 12); eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, central, eocd]);
+}
+
+// Seçili faturaların PDF'lerini müşteri adıyla tek ZIP olarak indirir. Aynı ada sahip olanlara (2), (3) eklenir.
+// Alınamayan faturalar ZIP içindeki HATALAR.txt dosyasında listelenir.
+app.post("/api/invoices/pdf-zip", requireAuth, async (req, res) => {
+  const keys = (Array.isArray(req.body && req.body.keys) ? req.body.keys : []).map(String).filter((k) => invoicedOrders[k] && invoicedOrders[k].uuid && (invoicedOrders[k].by === "logo" || invoicedOrders[k].by === "birfatura")).slice(0, 60);
+  if (!keys.length) return res.status(400).type("text/plain; charset=utf-8").send("PDF'i alınabilecek fatura seçilmedi.");
+  const files = [], errors = [], used = new Map();
+  const uniqueName = (base) => {
+    const n = (used.get(base) || 0) + 1;
+    used.set(base, n);
+    return n === 1 ? `${base}.pdf` : `${base} (${n}).pdf`;
+  };
+  let sid;
+  try {
+    const needLogo = keys.some((k) => invoicedOrders[k].by === "logo");
+    if (needLogo) sid = await logoLogin();
+    // Dosya adlarını önce sırayla ata (eşzamanlı çekimde sıra karışmasın), sonra PDF'leri çek.
+    const jobs = keys.map((k) => ({ key: k, inv: invoicedOrders[k], name: uniqueName(invoiceNiceName(k, invoicedOrders[k])) }));
+    let next = 0;
+    const worker = async () => {
+      while (next < jobs.length) {
+        const j = jobs[next++];
+        try {
+          const buf = j.inv.by === "birfatura" ? (await bfPdfBuffer(j.inv.uuid)).buf : await logoGetPdf(sid, j.inv.uuid);
+          files.push({ name: j.name, data: buf, order: jobs.indexOf(j) });
+        } catch (e) {
+          errors.push(`${j.name.replace(/\.pdf$/, "")}: ${e.message}`);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: needLogo ? 1 : 3 }, worker));
+    files.sort((a, b) => a.order - b.order);
+    if (errors.length) files.push({ name: "HATALAR.txt", data: Buffer.from("İndirilemeyen faturalar:\r\n" + errors.join("\r\n") + "\r\n", "utf8") });
+    if (!files.length) return res.status(502).type("text/plain; charset=utf-8").send("Hiçbir fatura PDF'i alınamadı.");
+    const d = new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10);
+    sendAttachment(res, zipMulti(files), `faturalar-${d}`, "zip", "application/zip");
+  } catch (e) {
+    res.status(502).type("text/plain; charset=utf-8").send("Faturalar alınamadı: " + e.message);
   } finally {
     if (sid) await logoLogout(sid);
   }
@@ -3966,9 +4061,9 @@ function doMerge(from, to, stockMode) {
      1) Aynı SKU/barkod dizesi (bir ürünün kodu ya da herhangi bir platformdaki
         SKU'su, başka bir ürününkiyle aynı),
      2) Aynı (normalize edilmiş) ürün adı — en az 12 karakter.
-   Güvenlik kuralları: birleşecek ürünlerin platformları birbirinden AYRI olmalı
-   (aynı platformda iki ayrı listeleme varsa farklı ürün/varyant sayılır ve
-   dokunulmaz); hiçbir platformda kaydı olmayan ürünler atlanır; kullanıcının
+   Güvenlik kuralları: SKU/barkod eşleşmesinde birleşecek ürünlerin platformları AYRI olmalı;
+   adlar birebir aynıysa aynı platformda iki listeleme olsa da birleştirilir; hiçbir
+   platformda kaydı olmayan ürünler atlanır; kullanıcının
    "Ayır" dediği çiftler bir daha otomatik birleştirilmez. Her birleştirme
    günlüğe yazılır ve panelden tek tıkla geri alınabilir.
 ------------------------------------------------------------------ */
@@ -4135,7 +4230,9 @@ function autoMatchProducts() {
     if (set.size > 1) tryAutoMergeGroup([...set], "aynı SKU/barkod", out);
   });
 
-  // Kural 2: aynı ürün adı
+  // Kural 2: aynı ürün adı. Aynı platformda iki ayrı listeleme (iki ayrı SKU) olsa bile birleştirilir:
+  // aile yapısı tam bunun için var, stok her SKU'ya ayrı gönderilir. Yanlış birleşirse panelden "Ayır"
+  // denir ve o çift bir daha otomatik birleştirilmez.
   const names = new Map();
   Object.keys(products)
     .filter((c) => !products[c].mergedInto)
@@ -4146,7 +4243,7 @@ function autoMatchProducts() {
       names.get(n).push(root);
     });
   names.forEach((list) => {
-    if (list.length > 1) tryAutoMergeGroup(list, "aynı ürün adı", out);
+    if (list.length > 1) tryAutoMergeGroup(list, "aynı ürün adı", out, true);
   });
 
   // Kural 3: adların sonu (asıl ürün tanımı) aynı, sadece başındaki marka/model
@@ -4301,8 +4398,8 @@ app.get("/api/products/match-explain", requireAuth, (req, res) => {
     if (!pa.size) notes.push(`${a} hiçbir platformda SKU kaydına sahip değil → otomatik eşleştirme kanıt bulamıyor ve atlıyor.`);
     if (!pb.size) notes.push(`${b} hiçbir platformda SKU kaydına sahip değil → otomatik eşleştirme kanıt bulamıyor ve atlıyor.`);
     const overlap = [...pa].filter((x) => pb.has(x));
-    if (overlap.length) notes.push(`Ortak platform(lar): ${overlap.join(", ")} — adlar birebir aynıysa (varyant ihtimali) birleştirilmez; farklıysa izin verilir.`);
-    if (overlap.length) { const sp = samePlatformSeparateListings(a, b); notes.push(`Aynı platformda ikisi de var → ${sp.ok ? "ayrı listeleme, birleşebilir (ad birebir aynıysa)" : "birleşmez: " + sp.note}`); }
+    if (overlap.length) notes.push(`Ortak platform(lar): ${overlap.join(", ")} — adlar birebir aynıysa aynı platformda olsalar da birleştirilir; adlar farklıysa (sıra/marka farkı) yine izin verilir.`);
+    if (overlap.length && !sameName) { const sp = samePlatformSeparateListings(a, b); notes.push(`Aynı platformda ikisi de var, adlar birebir aynı değil → ${sp.ok ? "ayrı listeleme olarak görünüyor" : "ek bilgi: " + sp.note}`); }
     const fz = fuzzyMatchScore(a, b);
     notes.push(`Bulanık ad benzerliği: ${(fz.sim * 100).toFixed(0)}%${fz.need ? ` (gereken ${(fz.need * 100).toFixed(0)}%)` : ""} · ${fz.note} → ${fz.ok ? "birleşir" : "birleşmez"}`);
     if (groupBlocked([ra, rb])) notes.push("Bu çift daha önce elle \"Ayır\" ile ayrılmış → otomatik eşleştirme bir daha birleştirmez.");

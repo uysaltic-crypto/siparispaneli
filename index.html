@@ -234,6 +234,7 @@
         <button class="ghost" onclick="invGib()">GİB portalı için hazırla</button>
         <button class="ghost" onclick="invCsv()">CSV indir (seçilen / listelenen)</button>
         <button class="ghost" onclick="invStatus()">Durumları güncelle</button>
+        <button class="ghost" onclick="invZip()" title="Seçili faturaların PDF'lerini müşteri adıyla tek ZIP olarak indirir">Faturaları indir (ZIP, müşteri adıyla)</button>
         <button class="ghost" id="invTestBtn" onclick="invLogoTest()">Logo bağlantı testi</button>
         <span style="flex-basis:100%; height:0;"></span>
         <span class="muted">Eski sipariş:</span>
@@ -728,6 +729,26 @@ async function invIssue() {
   toast(!r.ok ? (d.error || 'Fatura kesilemedi.') : bad.length ? bad.length + ' siparişte hata: ' + bad[0].error : 'Faturalar kesildi.');
   if (r.ok && !bad.length) invSel.clear();
   renderInvoices();
+}
+// Seçili (seçim yoksa listelenen) faturalanmış siparişlerin PDF'lerini müşteri adlarıyla tek ZIP olarak indirir.
+async function invZip() {
+  const ok = k => { const v = invoicedMap[k]; return v && v.uuid && (v.by === 'logo' || v.by === 'birfatura'); };
+  let keys = [...invSel].filter(ok);
+  if (!keys.length) keys = invOrders().map(orderKey).filter(ok);
+  if (!keys.length) { toast('İndirilecek fatura yok. "Faturalananları gizle" kutusunu kapatıp tarih aralığını seçin, sonra siparişleri işaretleyin.'); return; }
+  if (keys.length > 60) { toast('Tek seferde en fazla 60 fatura indirilir; ilk 60 alınıyor.'); keys = keys.slice(0, 60); }
+  toast(keys.length + ' fatura hazırlanıyor…');
+  try {
+    const r = await fetch('/api/invoices/pdf-zip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys }) });
+    if (!r.ok) { toast((await r.text().catch(() => '')) || 'Faturalar indirilemedi.'); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'faturalar-' + new Date().toISOString().slice(0, 10) + '.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast('ZIP indirildi (' + keys.length + ' fatura).');
+  } catch (e) { toast('Faturalar indirilemedi: ' + e.message); }
 }
 async function invStatus() {
   const r = await fetch('/api/invoices/status', { method: 'POST' });
