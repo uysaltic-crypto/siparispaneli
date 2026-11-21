@@ -430,6 +430,7 @@ async function fetchStockHepsiburada() {
   try {
     let offset = 0;
     const limit = 200;
+    let hbDone = false;
     for (let page = 0; page < 25; page++) {
       const resp = await axios.get(url, {
         auth: hbAuth.auth,
@@ -438,7 +439,7 @@ async function fetchStockHepsiburada() {
         timeout: 20000,
       });
       const items = resp.data?.listings || resp.data?.Listings || resp.data?.items || (Array.isArray(resp.data) ? resp.data : []);
-      if (!items.length) break;
+      if (!items.length) { hbDone = true; break; }
       items.forEach((it) => {
         const barcode = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "").trim();
         if (!barcode) return;
@@ -453,7 +454,7 @@ async function fetchStockHepsiburada() {
           productCode: it.HepsiburadaSku || it.hepsiburadaSku || it.HbSku || it.hbSku || undefined,
         });
       });
-      if (items.length < limit) break;
+      if (items.length < limit) { hbDone = true; break; }
       offset += limit;
     }
     // Ad gelmeyen satırlar için katalogdan Hepsiburada SKU'suna göre ad/görsel doldur (best-effort).
@@ -469,7 +470,8 @@ async function fetchStockHepsiburada() {
       if (cat.error) warning = `Ürün adları alınamadı (katalog hatası: ${cat.error}).`;
       else if (missing) warning = `${missing} ürünün adı katalogda bulunamadı (katalog ${cat.names.size} kayıt döndürdü).`;
     }
-    return { platform: "hb", error: null, rows, warning };
+    if (!hbDone) warning = ((warning ? warning + " " : "") + "Hepsiburada listesi 25 sayfa (5000 ürün) sınırında kesildi — liste eksik olabilir.");
+    return { platform: "hb", error: null, rows, warning, truncated: !hbDone };
   } catch (err) {
     const msg =
       err.response?.status === 401 || err.response?.status === 403
@@ -649,6 +651,7 @@ async function fetchStockTrendyol() {
   try {
     let page = 0;
     let nextPageToken = null;
+    let tyDone = false;
     for (let i = 0; i < 25; i++) {
       const params = nextPageToken ? { size: 100, nextPageToken } : { size: 100, page };
       const resp = await axios.get(url, {
@@ -676,9 +679,10 @@ async function fetchStockTrendyol() {
       nextPageToken = resp.data?.nextPageToken || null;
       const totalPages = resp.data?.totalPages ?? 1;
       page++;
-      if (!content.length || (!nextPageToken && page >= totalPages)) break;
+      if (!content.length || (!nextPageToken && page >= totalPages)) { tyDone = true; break; }
     }
-    return { platform: "ty", error: null, rows };
+    const tyWarn = tyDone ? null : "Trendyol listesi 25 sayfa (2500 ürün) sınırında kesildi — liste eksik olabilir.";
+    return { platform: "ty", error: null, rows, warning: tyWarn, truncated: !tyDone };
   } catch (err) {
     const msg =
       err.response?.status === 401 || err.response?.status === 403
@@ -4509,6 +4513,156 @@ app.post("/api/products/pull", requireAuth, async (req, res) => {
   const merged = mergeStockRows(platform, result.rows);
   const autoMatched = autoMatchProducts().length;
   res.json({ ok: true, ...merged, total: result.rows.length, autoMatched, warning: result.warning || null });
+});
+
+/* ------------------------------------------------------------------
+   Platform ↔ Panel karşılaştırma raporu
+   Seçilen platformdaki TÜM ürünler çekilir ve panelle karşılaştırılır:
+   - onlyPlatform: platformda var, panelde yok (satışta ama panel bilmiyor)
+   - onlyPanel   : panelde o platforma bağlı görünüyor, platformda yok
+   - stockDiff   : ikisinde de var, stok farklı
+   - priceDiff   : ikisinde de var, fiyat farklı
+   Hata/eksik veri durumunda rapor ÜRETİLMEZ (yanlış "panelde yok" sonucunu önlemek için).
+------------------------------------------------------------------ */
+const reconJobs = {}; // { pid: { status, startedAt, finishedAt, error, warning, report, rows } }
+const reconZeroJobs = {}; // { pid: { running, total, done, failed[], startedAt, finishedAt } }
+const RECON_LIST_CAP = 1000;
+
+function reconBuild(pid, rows) {
+  const idx = buildSkuIndex()[pid];
+  const platSkus = new Set();
+  const matchedCodes = new Set();
+  const onlyPlatform = [], stockDiff = [], priceDiff = [];
+  let matched = 0;
+  const seen = new Set();
+  rows.forEach((r) => {
+    const sku = String(r.barcode || "").trim();
+    if (!sku || seen.has(sku)) return;
+    seen.add(sku);
+    platSkus.add(sku);
+    const code = idx.get(sku);
+    if (!code || !products[code]) {
+      onlyPlatform.push({ sku, name: r.name || "", stock: Number(r.stock) || 0, price: Number(r.price) || null, productCode: r.productCode || "" });
+      return;
+    }
+    matched++;
+    matchedCodes.add(code);
+    const root = resolveRoot(code);
+    const p = products[code];
+    const central = Number(products[root]?.centralStock) || 0;
+    const platStock = Number(r.stock) || 0;
+    if (central !== platStock) stockDiff.push({ code, sku, name: p.name || r.name || "", panel: central, platform: platStock });
+    const pp = Number(p.prices?.[pid]) || 0, rp = Number(r.price) || 0;
+    if (pp > 0 && rp > 0 && Math.abs(pp - rp) > 0.009) priceDiff.push({ code, sku, name: p.name || r.name || "", panel: pp, platform: rp });
+  });
+  const onlyPanel = [];
+  Object.entries(products).forEach(([code, p]) => {
+    const explicit = p.skus?.[pid] || p.productCodes?.[pid];
+    if (!explicit) return; // hiçbir yere bağlanmamış / bu platformda kaydı olmayan ürünleri gürültü olmasın diye atla
+    const sku = skuForPlatform(code, pid);
+    if (!sku || platSkus.has(sku)) return;
+    if (pid === "cs" && !csCodeAllowed(sku, p.productCodes?.cs)) return; // Çiçeksepeti listesi önek filtreli
+    onlyPanel.push({ code, sku, name: p.name || "", panelStock: Number(p.stocks?.[pid]) || 0 });
+  });
+  const cap = (a) => ({ total: a.length, items: a.slice(0, RECON_LIST_CAP) });
+  return {
+    platform: pid,
+    fetchedAt: new Date().toISOString(),
+    platformCount: platSkus.size,
+    panelCount: Object.keys(products).length,
+    matched,
+    onlyPlatform: cap(onlyPlatform),
+    onlyPanel: cap(onlyPanel),
+    stockDiff: cap(stockDiff),
+    priceDiff: cap(priceDiff),
+  };
+}
+
+app.post("/api/reconcile/start", requireAuth, (req, res) => {
+  const pid = req.body?.platform;
+  const pl = PLATFORMS.find((p) => p.id === pid);
+  if (!pl) return res.status(400).json({ ok: false, error: "Geçersiz platform." });
+  if (!pl.fetchStock) return res.status(400).json({ ok: false, error: `${pl.name} için ürün listesi çekme desteklenmiyor.` });
+  if (!pl.configured()) return res.status(400).json({ ok: false, error: `${pl.name} API bilgileri eksik.` });
+  if (reconJobs[pid]?.status === "running") return res.json({ ok: true, already: true });
+  const job = (reconJobs[pid] = { status: "running", startedAt: new Date().toISOString(), finishedAt: null, error: null, warning: null, report: null, rows: null });
+  res.json({ ok: true });
+  (async () => {
+    try {
+      const result = await pl.fetchStock();
+      if (result.error) throw new Error(result.error);
+      if (result.truncated) throw new Error(result.warning || "Liste eksik çekildi — rapor güvenilir olmaz.");
+      if (!Array.isArray(result.rows) || !result.rows.length) throw new Error(`${pl.name} boş liste döndürdü — rapor üretilmedi (yanlış sonuç vermemek için).`);
+      job.rows = result.rows;
+      job.warning = result.warning || null;
+      job.report = reconBuild(pid, result.rows);
+      job.status = "done";
+    } catch (e) {
+      job.status = "error";
+      job.error = String(e.message || e).slice(0, 400);
+    }
+    job.finishedAt = new Date().toISOString();
+  })();
+});
+
+app.get("/api/reconcile/status", requireAuth, (req, res) => {
+  const pid = req.query.platform;
+  const job = reconJobs[pid];
+  const z = reconZeroJobs[pid] || null;
+  if (!job) return res.json({ ok: true, status: "none", zero: z });
+  res.json({ ok: true, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt, error: job.error, warning: job.warning, report: job.status === "done" ? job.report : null, zero: z });
+});
+
+// Platformda olup panelde olmayan seçili ürünleri panele ekler (stok/fiyat/ad platformdan).
+app.post("/api/reconcile/import", requireAuth, (req, res) => {
+  const { platform, skus } = req.body || {};
+  const job = reconJobs[platform];
+  if (!job || job.status !== "done" || !job.rows) return res.status(400).json({ ok: false, error: "Önce karşılaştırmayı çalıştır." });
+  if (!Array.isArray(skus) || !skus.length) return res.status(400).json({ ok: false, error: "Ürün seçilmedi." });
+  const want = new Set(skus.map((s) => String(s).trim()));
+  const known = buildSkuIndex()[platform];
+  const rows = job.rows.filter((r) => want.has(String(r.barcode || "").trim()) && !known.has(String(r.barcode || "").trim()));
+  if (!rows.length) return res.json({ ok: true, created: 0, updated: 0, autoMatched: 0 });
+  const merged = mergeStockRows(platform, rows);
+  const autoMatched = autoMatchProducts().length;
+  try { job.report = reconBuild(platform, job.rows); } catch (_) {}
+  res.json({ ok: true, ...merged, autoMatched, report: job.report });
+});
+
+// Platformda olup panelde olmayan seçili ürünlerin platform stoğunu 0'a çeker (satışı durdurur).
+// Sadece son raporun "panelde yok" listesindeki SKU'lar kabul edilir; en fazla 100 ürün.
+app.post("/api/reconcile/zero", requireAuth, (req, res) => {
+  const { platform, skus } = req.body || {};
+  const pl = PLATFORMS.find((p) => p.id === platform);
+  const job = reconJobs[platform];
+  if (!pl || !job || job.status !== "done" || !job.report) return res.status(400).json({ ok: false, error: "Önce karşılaştırmayı çalıştır." });
+  if (reconZeroJobs[platform]?.running) return res.status(409).json({ ok: false, error: "Bu platformda sıfırlama zaten çalışıyor." });
+  if (!Array.isArray(skus) || !skus.length) return res.status(400).json({ ok: false, error: "Ürün seçilmedi." });
+  const allowed = new Set(job.report.onlyPlatform.items.map((x) => x.sku));
+  const list = [...new Set(skus.map((s) => String(s).trim()))].filter((s) => allowed.has(s));
+  if (!list.length) return res.status(400).json({ ok: false, error: "Seçilen ürünler listede yok." });
+  if (list.length > 100) return res.status(400).json({ ok: false, error: "Tek seferde en fazla 100 ürün sıfırlanabilir." });
+  const z = (reconZeroJobs[platform] = { running: true, total: list.length, done: 0, failed: [], startedAt: new Date().toISOString(), finishedAt: null });
+  res.json({ ok: true, total: list.length });
+  (async () => {
+    const delay = platform === "koctas" ? 61000 : 400;
+    const results = {};
+    for (let i = 0; i < list.length; i++) {
+      if (i > 0) await sleepMs(delay);
+      try {
+        const r = await pl.pushStock(list[i], 0);
+        if (!r || !r.ok) z.failed.push({ sku: list[i], message: String((r && r.message) || "hata").slice(0, 160) });
+      } catch (e) {
+        z.failed.push({ sku: list[i], message: String(e.message || e).slice(0, 160) });
+      }
+      z.done++;
+    }
+    results[platform] = z.failed.length ? { ok: false, message: `${z.failed.length}/${list.length} başarısız` } : { ok: true };
+    pushLog.push({ time: new Date().toISOString(), barcode: "(panelde olmayan)", name: `${pl.name}: ${list.length} ürün stok 0'a çekildi`, centralStock: 0, trigger: "karşılaştırma", results });
+    persistPushLog();
+    z.running = false;
+    z.finishedAt = new Date().toISOString();
+  })();
 });
 
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.

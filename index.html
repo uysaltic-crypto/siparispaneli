@@ -186,6 +186,7 @@
         <div class="tab" data-tab="stock" onclick="showTab('stock')">Stok</div>
         <div class="tab" data-tab="messages" onclick="showTab('messages')">Mesajlar <span class="badge fail" id="msgBadge" style="display:none;"></span></div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
+        <div class="tab" data-tab="recon" onclick="showTab('recon')">Karşılaştır</div>
         <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
         <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
         <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
@@ -363,6 +364,18 @@
       <div id="matchEmpty" class="empty" style="display:none;">Bu platform için eşleştirilmemiş ürün yok — hepsi eşleşti.</div>
     </div>
 
+    <!-- KARŞILAŞTIR -->
+    <div class="panel" id="panel-recon">
+      <p class="muted" style="margin:0 0 10px; max-width:820px;">Seçtiğin platformdaki tüm ürünleri çekip panelle karşılaştırır: <b>panelde olmayıp platformda satışta olanları</b>, platformda olmayıp panelde bağlı görünenleri ve stok/fiyat farklarını gösterir. Çekme birkaç dakika sürebilir (Çiçeksepeti ve Koçtaş yavaştır); sayfayı açık bırakman yeterli.</p>
+      <div class="toolbar" style="gap:10px; align-items:center;">
+        <select id="reconPlat" onchange="reconLoad()"></select>
+        <button id="reconRun" onclick="reconStart()">Karşılaştır</button>
+        <span class="muted" id="reconInfo"></span>
+      </div>
+      <div id="reconWarn" class="warnbox" style="display:none; margin-top:10px;"></div>
+      <div id="reconBody" style="margin-top:12px;"></div>
+    </div>
+
     <!-- REKABET -->
     <div class="panel" id="panel-compete">
       <p class="muted" style="margin-bottom:10px;">
@@ -428,6 +441,7 @@ function showTab(name) {
   if (name === 'compete') { state.competeDirty = false; renderCompete(); }
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
   if (name === 'invoice') loadInvoices();
+  if (name === 'recon') { reconInitSelect(); reconPoll(true); }
 }
 
 let matchActivePlatform = null;
@@ -3015,6 +3029,184 @@ function toast(msg) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3000);
+}
+
+/* ---------- Karşılaştır sekmesi ---------- */
+let reconTimer = null;
+let reconCur = { report: null, tab: 'onlyPlatform', q: '', sel: new Set() };
+
+function reconPid() { return document.getElementById('reconPlat').value; }
+
+function reconInitSelect() {
+  const sel = document.getElementById('reconPlat');
+  if (sel.options.length === state.platforms.length) return;
+  const keep = sel.value;
+  sel.innerHTML = state.platforms.map(p => `<option value="${escAttr(p.id)}">${escHtml(p.name)}</option>`).join('');
+  if (keep) sel.value = keep;
+}
+
+function reconLoad() {
+  reconCur = { report: null, tab: 'onlyPlatform', q: '', sel: new Set() };
+  reconPoll(true);
+}
+
+async function reconStart() {
+  const pid = reconPid();
+  if (!pid) return;
+  const btn = document.getElementById('reconRun');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/reconcile/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: pid }) });
+    const d = await r.json();
+    if (!d.ok) { toast(d.error || 'Başlatılamadı'); btn.disabled = false; return; }
+    reconCur = { report: null, tab: 'onlyPlatform', q: '', sel: new Set() };
+    reconPoll(false);
+  } catch (e) { toast('Bağlantı hatası'); btn.disabled = false; }
+}
+
+async function reconPoll(single) {
+  clearTimeout(reconTimer);
+  const pid = reconPid();
+  if (!pid) return;
+  let d;
+  try {
+    const r = await fetch('/api/reconcile/status?platform=' + encodeURIComponent(pid));
+    if (r.status === 401) return;
+    d = await r.json();
+  } catch (e) { return; }
+  if (pid !== reconPid()) return;
+  const btn = document.getElementById('reconRun');
+  const info = document.getElementById('reconInfo');
+  const warn = document.getElementById('reconWarn');
+  const body = document.getElementById('reconBody');
+  warn.style.display = 'none';
+  const zr = d.zero && d.zero.running;
+  if (d.status === 'running') {
+    btn.disabled = true;
+    info.textContent = 'Platformdan ürünler çekiliyor…';
+    body.innerHTML = '<div class="empty">Çekiliyor, lütfen bekle…</div>';
+    reconTimer = setTimeout(() => reconPoll(false), 3000);
+    return;
+  }
+  btn.disabled = false;
+  if (d.status === 'none') { info.textContent = ''; body.innerHTML = '<div class="empty">Henüz karşılaştırma yapılmadı.</div>'; return; }
+  if (d.status === 'error') {
+    info.textContent = '';
+    warn.style.display = ''; warn.textContent = 'Rapor üretilemedi: ' + (d.error || 'bilinmeyen hata');
+    body.innerHTML = '';
+    return;
+  }
+  reconCur.report = d.report;
+  info.textContent = 'Son çekme: ' + new Date(d.finishedAt).toLocaleString('tr-TR');
+  if (d.warning) { warn.style.display = ''; warn.textContent = d.warning; }
+  reconRender(d.zero);
+  if (zr) reconTimer = setTimeout(() => reconPoll(false), 3000);
+}
+
+function reconRender(zero) {
+  const R = reconCur.report;
+  const body = document.getElementById('reconBody');
+  if (!R) return;
+  const pm = platformMeta(R.platform);
+  const tabs = [
+    ['onlyPlatform', 'Panelde YOK (platformda var)'],
+    ['onlyPanel', 'Platformda YOK (panelde var)'],
+    ['stockDiff', 'Stok farkı'],
+    ['priceDiff', 'Fiyat farkı'],
+  ];
+  const stats = `<div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+    <div class="stat"><div class="label">${escHtml(pm.name)} ÜRÜN</div><div>${R.platformCount}</div></div>
+    <div class="stat"><div class="label">EŞLEŞEN</div><div>${R.matched}</div></div>
+    ${tabs.map(([k, l]) => `<div class="stat"><div class="label">${l.toUpperCase()}</div><div>${R[k].total}</div></div>`).join('')}
+  </div>`;
+  const tabBar = `<div class="tabs" style="margin-bottom:10px;">${tabs.map(([k, l]) => `<div class="tab ${k === reconCur.tab ? 'active' : ''}" onclick="reconTab('${k}')">${l} <span class="badge">${R[k].total}</span></div>`).join('')}</div>`;
+  const L = R[reconCur.tab];
+  const q = reconCur.q.trim().toLocaleLowerCase('tr');
+  const items = q ? L.items.filter(x => (x.name + ' ' + x.sku + ' ' + (x.code || '')).toLocaleLowerCase('tr').includes(q)) : L.items;
+  const isOP = reconCur.tab === 'onlyPlatform';
+  let head, rowFn;
+  if (isOP) {
+    head = '<th></th><th>SKU/Barkod</th><th>Ad</th><th>Platform stok</th><th>Fiyat</th>';
+    rowFn = x => `<tr><td><input type="checkbox" ${reconCur.sel.has(x.sku) ? 'checked' : ''} onchange="reconToggle('${escAttr(x.sku)}', this.checked)"></td><td style="font-family:monospace;">${escHtml(x.sku)}</td><td>${escHtml(x.name)}</td><td>${x.stock}</td><td>${x.price ?? ''}</td></tr>`;
+  } else if (reconCur.tab === 'onlyPanel') {
+    head = '<th>Ürün kodu</th><th>Platform SKU</th><th>Ad</th><th>Panelde son bilinen stok</th>';
+    rowFn = x => `<tr><td style="font-family:monospace;">${escHtml(x.code)}</td><td style="font-family:monospace;">${escHtml(x.sku)}</td><td>${escHtml(x.name)}</td><td>${x.panelStock}</td></tr>`;
+  } else {
+    head = '<th>Ürün kodu</th><th>Ad</th><th>Panel</th><th>Platform</th>';
+    rowFn = x => `<tr><td style="font-family:monospace;">${escHtml(x.code)}</td><td>${escHtml(x.name)}</td><td>${x.panel}</td><td>${x.platform}</td></tr>`;
+  }
+  const trunc = L.total > L.items.length ? `<div class="warnbox">Liste ${L.items.length} / ${L.total} gösteriliyor. CSV tüm gösterilen satırları içerir.</div>` : '';
+  let actions = '';
+  if (isOP) {
+    const n = reconCur.sel.size;
+    const zline = zero && (zero.running || zero.finishedAt)
+      ? `<span class="muted">Sıfırlama: ${zero.done}/${zero.total}${zero.running ? ' sürüyor…' : ' bitti'}${zero.failed && zero.failed.length ? ' — ' + zero.failed.length + ' hata: ' + escHtml(zero.failed.slice(0, 3).map(f => f.sku + ' (' + f.message + ')').join('; ')) : ''}</span>` : '';
+    actions = `<div class="toolbar" style="gap:8px; margin:8px 0; align-items:center; flex-wrap:wrap;">
+      <button class="ghost small" onclick="reconSelAll(true)">Görünenlerin hepsini seç</button>
+      <button class="ghost small" onclick="reconSelAll(false)">Seçimi temizle</button>
+      <button class="small" ${n ? '' : 'disabled'} onclick="reconImport()">Seçilenleri panele ekle (${n})</button>
+      <button class="small" style="background:var(--danger); color:#fff;" ${n && !(zero && zero.running) ? '' : 'disabled'} onclick="reconZero()" title="Seçili ürünlerin platformdaki stoğunu 0 yapar (satış durur). Canlı ilanları etkiler.">Platformda stoğu 0 yap (${n})</button>
+      ${zline}
+    </div>`;
+  }
+  body.innerHTML = stats + tabBar
+    + `<div class="toolbar" style="gap:8px; margin-bottom:8px;"><input id="reconQ" placeholder="Ara: ad, SKU, kod" value="${escAttr(reconCur.q)}" oninput="reconSearch(this.value)" style="background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; color:var(--text); font-size:12px; min-width:240px;"><button class="ghost small" onclick="reconCsv()">CSV indir</button></div>`
+    + actions + trunc
+    + (items.length ? `<table><thead><tr>${head}</tr></thead><tbody>${items.map(rowFn).join('')}</tbody></table>` : '<div class="empty">Bu listede kayıt yok.</div>');
+  const qi = document.getElementById('reconQ');
+  if (qi && document.activeElement !== qi && reconCur._focusQ) { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); }
+  reconCur._zero = zero;
+}
+
+function reconTab(k) { reconCur.tab = k; reconCur._focusQ = false; reconRender(reconCur._zero); }
+function reconSearch(v) { reconCur.q = v; reconCur._focusQ = true; reconRender(reconCur._zero); }
+function reconToggle(sku, on) { on ? reconCur.sel.add(sku) : reconCur.sel.delete(sku); reconCur._focusQ = false; reconRender(reconCur._zero); }
+function reconSelAll(on) {
+  const L = reconCur.report.onlyPlatform.items;
+  const q = reconCur.q.trim().toLocaleLowerCase('tr');
+  L.filter(x => !q || (x.name + ' ' + x.sku).toLocaleLowerCase('tr').includes(q)).forEach(x => on ? reconCur.sel.add(x.sku) : reconCur.sel.delete(x.sku));
+  if (!on && !q) reconCur.sel.clear();
+  reconCur._focusQ = false; reconRender(reconCur._zero);
+}
+
+async function reconImport() {
+  const skus = [...reconCur.sel];
+  if (!skus.length) return;
+  if (!confirm(skus.length + ' ürün panele eklenecek (ad/stok/fiyat platformdan alınır). Devam?')) return;
+  const r = await fetch('/api/reconcile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: reconPid(), skus }) });
+  const d = await r.json();
+  if (!d.ok) { toast(d.error || 'Eklenemedi'); return; }
+  toast(`${d.created} ürün eklendi` + (d.autoMatched ? `, ${d.autoMatched} otomatik eşleşme` : ''));
+  reconCur.sel.clear();
+  if (d.report) reconCur.report = d.report;
+  if (typeof refresh === 'function') refresh(false);
+  reconRender(reconCur._zero);
+}
+
+async function reconZero() {
+  const skus = [...reconCur.sel];
+  if (!skus.length) return;
+  if (skus.length > 100) { toast('Tek seferde en fazla 100 ürün'); return; }
+  const pm = platformMeta(reconPid());
+  if (!confirm(`DİKKAT: ${skus.length} ürünün ${pm.name} stoğu 0 yapılacak ve satışı duracak.\n` + (reconPid() === 'koctas' ? 'Koçtaş dakikada 1 istek kabul ettiği için bu işlem yaklaşık ' + skus.length + ' dakika sürer.\n' : '') + 'Devam edilsin mi?')) return;
+  const r = await fetch('/api/reconcile/zero', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: reconPid(), skus }) });
+  const d = await r.json();
+  if (!d.ok) { toast(d.error || 'Başlatılamadı'); return; }
+  toast(d.total + ' ürün sıfırlanıyor…');
+  reconPoll(false);
+}
+
+function reconCsv() {
+  const R = reconCur.report; if (!R) return;
+  const L = R[reconCur.tab].items;
+  const keys = Object.keys(L[0] || { sku: '' });
+  const cell = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const csv = '﻿' + [keys.join(';'), ...L.map(x => keys.map(k => cell(x[k])).join(';'))].join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `karsilastirma-${R.platform}-${reconCur.tab}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
 checkAuth();
