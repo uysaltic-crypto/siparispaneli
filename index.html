@@ -128,6 +128,10 @@
   #loginBox p.err { color:var(--danger); font-size:12px; }
   .empty { text-align:center; color:#4B5563; padding:40px 0; }
   .fetchedAt { font-size:10px; color:var(--muted); font-family:monospace; }
+  .tn-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; }
+  .tn-grid label, .tn-lab { display:block; font-size:11px; color:var(--muted); }
+  .tn-lab { margin-top:10px; }
+  .tn-in, .tn-grid select { display:block; width:100%; box-sizing:border-box; margin-top:3px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:7px 9px; font-size:12px; color:var(--text); font-family:inherit; }
   .panel { display:none; }
   .panel.active { display:block; }
   .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
@@ -187,6 +191,7 @@
         <div class="tab" data-tab="messages" onclick="showTab('messages')">Mesajlar <span class="badge fail" id="msgBadge" style="display:none;"></span></div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
         <div class="tab" data-tab="recon" onclick="showTab('recon')">Karşılaştır</div>
+        <div class="tab" data-tab="tynew" onclick="showTab('tynew')">Trendyol'a Ürün Aç</div>
         <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
         <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
         <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
@@ -376,6 +381,55 @@
       <div id="reconBody" style="margin-top:12px;"></div>
     </div>
 
+    <!-- TRENDYOL ÜRÜN AÇ -->
+    <div class="panel" id="panel-tynew">
+      <p class="muted" style="margin:0 0 10px; max-width:860px;">Panelde kayıtlı bir ürünü seçip Trendyol'da <b>yeni ürün</b> olarak açar. Kategori ve markayı Trendyol'dan arayıp seçersin; kategoriye göre istenen özellikler aşağıda çıkar. Gönderince ürün Trendyol onayına girer — sonucu aşağıdan izleyebilirsin. Görseller https adresli olmalı (Trendyol 1200x1800 ister).</p>
+      <div id="tnMsg" class="warnbox" style="display:none;"></div>
+      <div class="stat" style="margin-bottom:12px;">
+        <div class="label">PANELDEKİ ÜRÜNDEN DOLDUR</div>
+        <input id="tnPick" placeholder="Ürün adı veya kod yaz…" oninput="tnPickSearch(this.value)" class="tn-in" style="width:100%; max-width:480px;">
+        <div id="tnPickList" style="margin-top:6px;"></div>
+      </div>
+      <div class="tn-grid">
+        <label>Barkod <input id="tnBarcode" class="tn-in"></label>
+        <label>Model kodu (productMainId) <input id="tnMain" class="tn-in"></label>
+        <label>Stok kodu <input id="tnStockCode" class="tn-in"></label>
+        <label style="grid-column:1/-1;">Başlık (en çok 100 karakter) <input id="tnTitle" class="tn-in" maxlength="100"></label>
+        <label>Stok <input id="tnQty" type="number" min="0" class="tn-in"></label>
+        <label>Satış fiyatı (TL) <input id="tnSale" type="number" step="0.01" min="0" class="tn-in"></label>
+        <label>Liste fiyatı (TL, boşsa satışla aynı) <input id="tnList" type="number" step="0.01" min="0" class="tn-in"></label>
+        <label>Desi <input id="tnDesi" type="number" step="0.01" min="0" class="tn-in"></label>
+        <label>KDV % <select id="tnVat"><option>20</option><option>10</option><option>1</option><option>0</option></select></label>
+        <label>Sevkiyat süresi <select id="tnDur"><option value="">Varsayılan</option><option value="0">Bugün kargoda</option><option value="1">En geç yarın kargoda</option></select></label>
+        <label id="tnCargoBox">Kargo firması ID <input id="tnCargo" type="number" class="tn-in"></label>
+        <label>Sevkiyat adresi <select id="tnShip"><option value="">Varsayılan</option></select></label>
+        <label>İade adresi <select id="tnRet"><option value="">Varsayılan</option></select></label>
+      </div>
+      <div id="tnMetaNote" class="muted" style="font-size:11px; margin:6px 0;"></div>
+      <label class="tn-lab">Açıklama <textarea id="tnDesc" class="tn-in" rows="5" style="width:100%;"></textarea></label>
+      <label class="tn-lab">Görsel adresleri (her satıra bir https adresi, en çok 8) <textarea id="tnImgs" class="tn-in" rows="3" style="width:100%;"></textarea></label>
+      <div class="tn-grid" style="margin-top:10px;">
+        <div>
+          <div class="label muted" style="font-size:10px;">KATEGORİ</div>
+          <input id="tnCatQ" class="tn-in" placeholder="Ara (örn. matkap ucu)…" oninput="tnCatSearch(this.value)" style="width:100%;">
+          <div id="tnCatList"></div>
+          <div id="tnCatSel" style="margin-top:4px; font-size:12px;"></div>
+        </div>
+        <div>
+          <div class="label muted" style="font-size:10px;">MARKA</div>
+          <input id="tnBrandQ" class="tn-in" placeholder="Marka ara…" oninput="tnBrandSearch(this.value)" style="width:100%;">
+          <div id="tnBrandList"></div>
+          <div id="tnBrandSel" style="margin-top:4px; font-size:12px;"></div>
+        </div>
+      </div>
+      <div id="tnAttrs" style="margin-top:12px;"></div>
+      <div class="toolbar" style="margin-top:14px; gap:10px; align-items:center;">
+        <button id="tnSend" onclick="tnSubmit()">Trendyol'a gönder</button>
+        <span class="muted" id="tnSendInfo"></span>
+      </div>
+      <div id="tnBatches" style="margin-top:16px;"></div>
+    </div>
+
     <!-- REKABET -->
     <div class="panel" id="panel-compete">
       <p class="muted" style="margin-bottom:10px;">
@@ -441,6 +495,7 @@ function showTab(name) {
   if (name === 'compete') { state.competeDirty = false; renderCompete(); }
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
   if (name === 'invoice') loadInvoices();
+  if (name === 'tynew') tnInit();
   if (name === 'recon') { reconInitSelect(); reconPoll(true); }
 }
 
@@ -3234,6 +3289,160 @@ function reconCsv() {
   a.download = `karsilastirma-${R.platform}-${reconCur.tab}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ---------- Trendyol ürün aç ---------- */
+const tn = { cat: null, brand: null, attrs: [], metaLoaded: false, timers: {} };
+function tnDebounce(k, fn) { clearTimeout(tn.timers[k]); tn.timers[k] = setTimeout(fn, 350); }
+function tnMsg(t) { const m = document.getElementById('tnMsg'); m.style.display = t ? '' : 'none'; m.textContent = t || ''; }
+async function tnGet(url) { const r = await fetch(url); const d = await r.json().catch(() => ({ ok: false, error: 'Geçersiz yanıt' })); return d; }
+
+function tnInit() {
+  if (!tn.metaLoaded) { tn.metaLoaded = true; tnLoadMeta(); }
+  tnLoadBatches();
+}
+
+async function tnLoadMeta() {
+  const d = await tnGet('/api/ty/new/meta');
+  const note = document.getElementById('tnMetaNote');
+  if (!d.ok) { note.textContent = d.error || ''; return; }
+  const notes = [];
+  if (d.providers && d.providers.length) {
+    document.getElementById('tnCargoBox').innerHTML = 'Kargo firması <select id="tnCargo">' + d.providers.map(p => `<option value="${escAttr(p.id)}">${escHtml(p.name)} (${p.id})</option>`).join('') + '</select>';
+  } else {
+    notes.push('Kargo firmaları listesi alınamadı' + (d.providersError ? ' (' + d.providersError.slice(0, 120) + ')' : '') + ' — ID\'yi elle gir.');
+    const saved = (() => { try { return localStorage.getItem('tnCargo') || ''; } catch (e) { return ''; } })();
+    document.getElementById('tnCargo').value = d.defaultCargoCompanyId || saved;
+  }
+  const opt = (type) => '<option value="">Varsayılan</option>' + (d.addresses || []).filter(a => !type || !a.type || new RegExp(type, 'i').test(a.type)).map(a => `<option value="${escAttr(a.id)}">${escHtml((a.type || '') + ' — ' + a.text + ' (' + a.id + ')')}</option>`).join('');
+  document.getElementById('tnShip').innerHTML = opt('ship');
+  document.getElementById('tnRet').innerHTML = opt('return');
+  if (d.addressesError) notes.push('Adres listesi alınamadı — varsayılan adresler kullanılır.');
+  note.textContent = notes.join(' ');
+}
+
+function tnPickSearch(v) {
+  const q = v.trim().toLocaleLowerCase('tr');
+  const box = document.getElementById('tnPickList');
+  if (q.length < 2) { box.innerHTML = ''; return; }
+  const list = state.products.filter(p => !p.mergedInto && ((p.name || '') + ' ' + p.code).toLocaleLowerCase('tr').includes(q)).slice(0, 12);
+  box.innerHTML = list.map(p => `<div><button class="ghost small" style="margin:2px 0; text-align:left;" onclick="tnPickProduct('${escAttr(p.code)}')">${escHtml(p.name || '')} <span class="muted">${escHtml(p.code)}</span></button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+}
+
+function tnPickProduct(code) {
+  const p = state.products.find(x => x.code === code);
+  if (!p) return;
+  document.getElementById('tnBarcode').value = p.code;
+  document.getElementById('tnMain').value = p.code;
+  document.getElementById('tnStockCode').value = p.code;
+  document.getElementById('tnTitle').value = (p.name || '').slice(0, 100);
+  document.getElementById('tnQty').value = Number(p.centralStock) || 0;
+  const price = Number((p.prices || {}).ty) || Number(p.storePrice) || Object.values(p.prices || {}).find(v => Number(v) > 0) || '';
+  document.getElementById('tnSale').value = price;
+  document.getElementById('tnList').value = price;
+  const img = p.image ? (p.image.startsWith('/') ? location.origin + p.image : p.image) : '';
+  document.getElementById('tnImgs').value = /^https:\/\//i.test(img) ? img : '';
+  if (img && !/^https:\/\//i.test(img)) tnMsg('Ürün görseli https değil — görsel adresini elle gir.'); else tnMsg('');
+  document.getElementById('tnPickList').innerHTML = '';
+  document.getElementById('tnPick').value = p.name || p.code;
+}
+
+function tnCatSearch(v) {
+  tnDebounce('cat', async () => {
+    const box = document.getElementById('tnCatList');
+    if (v.trim().length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted">Aranıyor…</span>';
+    const d = await tnGet('/api/ty/new/categories?q=' + encodeURIComponent(v));
+    if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Hata')}</span>`; return; }
+    window._tnCats = d.items;
+    box.innerHTML = d.items.map((c, i) => `<div><button class="ghost small" style="margin:2px 0; text-align:left;" onclick="tnPickCat(${i})">${escHtml(c.path)}</button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+  });
+}
+async function tnPickCat(i) {
+  const c = window._tnCats[i];
+  tn.cat = c; tn.attrs = [];
+  document.getElementById('tnCatList').innerHTML = '';
+  document.getElementById('tnCatSel').innerHTML = `Seçili: <b>${escHtml(c.path)}</b> <span class="muted">(${c.id})</span>`;
+  const box = document.getElementById('tnAttrs');
+  box.innerHTML = '<span class="muted">Özellikler getiriliyor…</span>';
+  const d = await tnGet('/api/ty/new/attributes?categoryId=' + c.id);
+  if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Özellikler alınamadı')}</span>`; return; }
+  tn.attrs = d.attributes;
+  const rows = d.attributes.slice().sort((a, b) => (b.required - a.required));
+  box.innerHTML = `<div class="label muted" style="font-size:10px; margin-bottom:6px;">KATEGORİ ÖZELLİKLERİ (* zorunlu)</div><div class="tn-grid">` + rows.map(a => {
+    const sel = a.values.length ? `<select data-attr="${a.id}" class="tn-attr"><option value="">— seç —</option>${a.values.map(v => `<option value="${v.id}">${escHtml(v.name)}</option>`).join('')}</select>` : '';
+    const cust = (a.allowCustom || !a.values.length) ? `<input data-attrc="${a.id}" class="tn-in" placeholder="${a.values.length ? 'veya elle yaz' : 'değer yaz'}" style="margin-top:3px; width:100%;">` : '';
+    return `<label>${escHtml(a.name)}${a.required ? ' <b style="color:var(--danger)">*</b>' : ''}${a.varianter ? ' <span class="muted">(beden/varyant)</span>' : ''}${a.slicer ? ' <span class="muted">(renk/ayırıcı)</span>' : ''}${sel}${cust}</label>`;
+  }).join('') + '</div>';
+}
+
+function tnBrandSearch(v) {
+  tnDebounce('brand', async () => {
+    const box = document.getElementById('tnBrandList');
+    if (v.trim().length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted">Aranıyor…</span>';
+    const d = await tnGet('/api/ty/new/brands?q=' + encodeURIComponent(v));
+    if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Hata')}</span>`; return; }
+    window._tnBrands = d.items;
+    box.innerHTML = d.items.map((b, i) => `<div><button class="ghost small" style="margin:2px 0;" onclick="tnPickBrand(${i})">${escHtml(b.name)} <span class="muted">${b.id}</span></button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+  });
+}
+function tnPickBrand(i) {
+  tn.brand = window._tnBrands[i];
+  document.getElementById('tnBrandList').innerHTML = '';
+  document.getElementById('tnBrandSel').innerHTML = `Seçili: <b>${escHtml(tn.brand.name)}</b> <span class="muted">(${tn.brand.id})</span>`;
+}
+
+function tnCollect() {
+  const v = id => document.getElementById(id).value;
+  const attributes = [];
+  tn.attrs.forEach(a => {
+    const s = document.querySelector(`[data-attr="${a.id}"]`), c = document.querySelector(`[data-attrc="${a.id}"]`);
+    if (s && s.value) attributes.push({ attributeId: a.id, attributeValueId: s.value });
+    else if (c && c.value.trim()) attributes.push({ attributeId: a.id, customAttributeValue: c.value.trim() });
+  });
+  return {
+    barcode: v('tnBarcode'), productMainId: v('tnMain'), stockCode: v('tnStockCode'), title: v('tnTitle'),
+    quantity: v('tnQty'), salePrice: v('tnSale'), listPrice: v('tnList'), dimensionalWeight: v('tnDesi'), vatRate: v('tnVat'),
+    deliveryDuration: v('tnDur'), cargoCompanyId: v('tnCargo'), shipmentAddressId: v('tnShip'), returningAddressId: v('tnRet'),
+    description: v('tnDesc'), images: v('tnImgs').split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    categoryId: tn.cat && tn.cat.id, brandId: tn.brand && tn.brand.id, attributes,
+  };
+}
+
+async function tnSubmit() {
+  const body = tnCollect();
+  const missing = tn.attrs.filter(a => a.required && !body.attributes.some(x => x.attributeId === a.id)).map(a => a.name);
+  if (missing.length) { tnMsg('Zorunlu özellik eksik: ' + missing.join(', ')); return; }
+  tnMsg('');
+  try { localStorage.setItem('tnCargo', String(body.cargoCompanyId || '')); } catch (e) {}
+  if (!confirm(`"${body.title}" Trendyol'a yeni ürün olarak gönderilecek (barkod ${body.barcode}, ${body.salePrice} TL, stok ${body.quantity}). Devam edilsin mi?`)) return;
+  const btn = document.getElementById('tnSend'); btn.disabled = true;
+  try {
+    const r = await fetch('/api/ty/new/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!d.ok) { tnMsg('Gönderilemedi: ' + (d.error || '')); return; }
+    document.getElementById('tnSendInfo').textContent = 'Gönderildi. İşlem no: ' + d.batchRequestId;
+    toast('Trendyol\'a gönderildi');
+    setTimeout(tnLoadBatches, 1500);
+  } catch (e) { tnMsg('Bağlantı hatası'); } finally { btn.disabled = false; }
+}
+
+async function tnLoadBatches() {
+  const d = await tnGet('/api/ty/new/batches');
+  const box = document.getElementById('tnBatches');
+  if (!d.ok || !d.items.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="label muted" style="font-size:10px; margin-bottom:6px;">SON GÖNDERİMLER</div>' + d.items.map(b => `<div class="stat" style="margin-bottom:6px;">
+    <b>${escHtml(b.title)}</b> <span class="muted">${escHtml(b.barcode)} · ${new Date(b.time).toLocaleString('tr-TR')}</span>
+    <button class="ghost small" style="margin-left:8px;" onclick="tnCheckBatch('${escAttr(b.batchRequestId)}', this)">Durumu kontrol et</button>
+    <div class="tn-res muted" style="margin-top:4px; font-size:12px;"></div></div>`).join('');
+}
+async function tnCheckBatch(id, btn) {
+  const out = btn.parentElement.querySelector('.tn-res');
+  out.textContent = 'Kontrol ediliyor…';
+  const d = await tnGet('/api/ty/new/batch?id=' + encodeURIComponent(id));
+  if (!d.ok) { out.textContent = d.error || 'Hata'; return; }
+  out.innerHTML = `Durum: <b>${escHtml(d.status)}</b>` + (d.items || []).map(i => `<div>${escHtml(i.barcode)}: ${escHtml(i.status)}${i.reasons && i.reasons.length ? ' — <span style="color:var(--danger)">' + escHtml(i.reasons.map(x => typeof x === 'string' ? x : (x.message || JSON.stringify(x))).join('; ')) + '</span>' : ''}</div>`).join('');
 }
 
 checkAuth();

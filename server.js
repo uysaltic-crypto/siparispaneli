@@ -4737,6 +4737,193 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
   })();
 });
 
+/* ------------------------------------------------------------------
+   Trendyol'a YENİ ÜRÜN AÇMA (createProducts V1)
+   Belge: marka/kategori/özellik servislerinden alınan ID'lerle ürün gönderilir; istek başarılıysa
+   batchRequestId döner, ürün Trendyol onayına girer. Sonuç getBatchRequestResult ile izlenir.
+   Not: kargo firması ve adres uçları belgeden doğrulanmadı (best-effort); hata verirse ham mesaj gösterilir.
+------------------------------------------------------------------ */
+function tyApiCfg() {
+  const { TY_SELLER_ID, TY_API_KEY, TY_API_SECRET, TY_ENV } = process.env;
+  return { id: TY_SELLER_ID, auth: { username: TY_API_KEY, password: TY_API_SECRET }, host: TY_ENV === "test" ? "stageapigw.trendyol.com" : "apigw.trendyol.com" };
+}
+async function tyApi(method, path, opts = {}) {
+  const c = tyApiCfg();
+  return axios({
+    method,
+    url: `https://${c.host}${path.replace("{sellerId}", c.id)}`,
+    auth: c.auth,
+    params: opts.params,
+    data: opts.data,
+    headers: { "User-Agent": `${c.id} - SelfIntegration`, Accept: "application/json", "Content-Type": "application/json" },
+    timeout: 30000,
+  });
+}
+function tyErr(err) {
+  if (err.response?.status === 401 || err.response?.status === 403) return "Trendyol kimlik doğrulama hatası.";
+  return err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message;
+}
+function tyNewGuard(req, res, next) {
+  if (!tyConfigured()) return res.status(400).json({ ok: false, error: "Trendyol API bilgileri eksik." });
+  next();
+}
+
+let tyCatCache = { at: 0, leaves: [] };
+function tyFlattenCats(list, trail, out) {
+  (list || []).forEach((c) => {
+    const path = trail ? trail + " > " + c.name : c.name;
+    if (Array.isArray(c.subCategories) && c.subCategories.length) tyFlattenCats(c.subCategories, path, out);
+    else out.push({ id: c.id, name: c.name, path });
+  });
+}
+app.get("/api/ty/new/categories", requireAuth, tyNewGuard, async (req, res) => {
+  try {
+    if (!tyCatCache.leaves.length || Date.now() - tyCatCache.at > 6 * 3600 * 1000) {
+      const r = await tyApi("get", "/integration/product/product-categories");
+      const leaves = [];
+      tyFlattenCats(r.data?.categories || [], "", leaves);
+      if (!leaves.length) return res.status(502).json({ ok: false, error: "Kategori listesi boş döndü." });
+      tyCatCache = { at: Date.now(), leaves };
+    }
+    const q = String(req.query.q || "").trim().toLocaleLowerCase("tr");
+    if (q.length < 2) return res.json({ ok: true, items: [], total: tyCatCache.leaves.length });
+    const words = q.split(/\s+/);
+    const items = tyCatCache.leaves.filter((c) => { const t = c.path.toLocaleLowerCase("tr"); return words.every((w) => t.includes(w)); }).slice(0, 40);
+    res.json({ ok: true, items });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: tyErr(e) });
+  }
+});
+
+app.get("/api/ty/new/brands", requireAuth, tyNewGuard, async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (q.length < 2) return res.json({ ok: true, items: [] });
+  try {
+    const r = await tyApi("get", "/integration/product/brands/by-name", { params: { name: q } });
+    const arr = Array.isArray(r.data) ? r.data : r.data?.brands || [];
+    res.json({ ok: true, items: arr.slice(0, 30).map((b) => ({ id: b.id, name: b.name })) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: tyErr(e) });
+  }
+});
+
+app.get("/api/ty/new/attributes", requireAuth, tyNewGuard, async (req, res) => {
+  const id = parseInt(req.query.categoryId, 10);
+  if (!(id > 0)) return res.status(400).json({ ok: false, error: "categoryId gerekli." });
+  try {
+    const r = await tyApi("get", `/integration/product/product-categories/${id}/attributes`);
+    const attrs = (r.data?.categoryAttributes || []).map((a) => ({
+      id: a.attribute?.id,
+      name: a.attribute?.name,
+      required: !!a.required,
+      allowCustom: !!a.allowCustom,
+      varianter: !!a.varianter,
+      slicer: !!a.slicer,
+      values: (a.attributeValues || []).slice(0, 500).map((v) => ({ id: v.id, name: v.name })),
+    }));
+    res.json({ ok: true, attributes: attrs });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: tyErr(e) });
+  }
+});
+
+// Kargo firmaları ve depo adresleri (best-effort; hata verirse arayüz elle girişe izin verir).
+app.get("/api/ty/new/meta", requireAuth, tyNewGuard, async (req, res) => {
+  const out = { ok: true, providers: [], providersError: null, addresses: [], addressesError: null, defaultCargoCompanyId: Number(process.env.TY_CARGO_COMPANY_ID) || null };
+  await Promise.all([
+    tyApi("get", "/integration/shipment/providers")
+      .then((r) => { out.providers = (Array.isArray(r.data) ? r.data : r.data?.providers || []).map((p) => ({ id: p.id, name: p.name || p.code })); })
+      .catch((e) => { out.providersError = tyErr(e); }),
+    tyApi("get", "/integration/sellers/{sellerId}/addresses")
+      .then((r) => { out.addresses = (r.data?.supplierAddresses || []).map((a) => ({ id: a.id, type: a.addressType, text: String(a.fullAddress || a.address || a.addressName || "").slice(0, 80), isDefault: !!(a.isShipmentAddress || a.isReturningAddress || a.default) })); })
+      .catch((e) => { out.addressesError = tyErr(e); }),
+  ]);
+  res.json(out);
+});
+
+const tyNewBatches = []; // son gönderimler [{ batchRequestId, barcode, title, time }]
+
+app.post("/api/ty/new/create", requireAuth, tyNewGuard, async (req, res) => {
+  const b = req.body || {};
+  const num = (v) => Number(String(v ?? "").replace(",", "."));
+  const errs = [];
+  const barcode = String(b.barcode || "").trim().replace(/\s+/g, "");
+  if (!barcode || barcode.length > 40 || !/^[\p{L}\p{N}._-]+$/u.test(barcode)) errs.push("Barkod: en çok 40 karakter; harf, rakam, . - _ kullanılabilir.");
+  const title = String(b.title || "").trim();
+  if (!title || title.length > 100) errs.push("Başlık 1-100 karakter olmalı.");
+  const productMainId = String(b.productMainId || "").trim().replace(/\s+/g, "");
+  if (!productMainId || productMainId.length > 40) errs.push("Model kodu (productMainId) 1-40 karakter olmalı.");
+  const brandId = parseInt(b.brandId, 10), categoryId = parseInt(b.categoryId, 10), cargoCompanyId = parseInt(b.cargoCompanyId, 10);
+  if (!(brandId > 0)) errs.push("Marka seçilmedi.");
+  if (!(categoryId > 0)) errs.push("Kategori seçilmedi.");
+  if (!(cargoCompanyId > 0)) errs.push("Kargo firması ID'si girilmedi.");
+  const quantity = Math.max(0, Math.floor(num(b.quantity)));
+  const salePrice = Math.round(num(b.salePrice) * 100) / 100;
+  const listPrice = Math.round(num(b.listPrice || b.salePrice) * 100) / 100;
+  if (!(salePrice > 0)) errs.push("Satış fiyatı girilmedi.");
+  if (listPrice < salePrice) errs.push("Liste fiyatı satış fiyatından küçük olamaz.");
+  const dimensionalWeight = num(b.dimensionalWeight);
+  if (!(dimensionalWeight > 0)) errs.push("Desi girilmedi.");
+  const vatRate = parseInt(b.vatRate, 10);
+  if (![0, 1, 10, 20].includes(vatRate)) errs.push("KDV oranı 0, 1, 10 veya 20 olmalı.");
+  const description = String(b.description || "").trim();
+  if (!description || description.length > 30000) errs.push("Açıklama boş olamaz (en çok 30.000 karakter).");
+  const images = (Array.isArray(b.images) ? b.images : []).map((u) => String(u || "").trim()).filter(Boolean).slice(0, 8);
+  if (!images.length) errs.push("En az bir görsel gerekli.");
+  if (images.some((u) => !/^https:\/\//i.test(u))) errs.push("Görsel adresleri https:// ile başlamalı.");
+  const attributes = [];
+  (Array.isArray(b.attributes) ? b.attributes : []).forEach((a) => {
+    const attributeId = parseInt(a.attributeId, 10);
+    if (!(attributeId > 0)) return;
+    if (a.attributeValueId) attributes.push({ attributeId, attributeValueId: parseInt(a.attributeValueId, 10) });
+    else if (String(a.customAttributeValue || "").trim()) attributes.push({ attributeId, customAttributeValue: String(a.customAttributeValue).trim().slice(0, 50) });
+  });
+  if (errs.length) return res.status(400).json({ ok: false, error: errs.join(" ") });
+
+  const item = {
+    barcode, title, productMainId, brandId, categoryId, quantity,
+    stockCode: String(b.stockCode || barcode).trim().slice(0, 100),
+    dimensionalWeight, description, currencyType: "TRY", listPrice, salePrice, vatRate, cargoCompanyId,
+    images: images.map((url) => ({ url })),
+    attributes,
+  };
+  const dd = parseInt(b.deliveryDuration, 10);
+  if (dd === 0 || dd === 1) item.deliveryOption = { deliveryDuration: dd };
+  if (parseInt(b.shipmentAddressId, 10) > 0) item.shipmentAddressId = parseInt(b.shipmentAddressId, 10);
+  if (parseInt(b.returningAddressId, 10) > 0) item.returningAddressId = parseInt(b.returningAddressId, 10);
+
+  try {
+    const r = await tyApi("post", "/integration/product/sellers/{sellerId}/products", { data: { items: [item] } });
+    const batchRequestId = r.data?.batchRequestId || null;
+    tyNewBatches.unshift({ batchRequestId, barcode, title, time: new Date().toISOString() });
+    tyNewBatches.length = Math.min(tyNewBatches.length, 30);
+    pushLog.push({ time: new Date().toISOString(), barcode, name: `Trendyol'a yeni ürün gönderildi: ${title}`, centralStock: quantity, trigger: "yeni ürün", results: { ty: { ok: true, message: "batch " + batchRequestId } } });
+    persistPushLog();
+    res.json({ ok: true, batchRequestId });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: tyErr(e) });
+  }
+});
+
+app.get("/api/ty/new/batches", requireAuth, (req, res) => res.json({ ok: true, items: tyNewBatches }));
+
+app.get("/api/ty/new/batch", requireAuth, tyNewGuard, async (req, res) => {
+  const id = String(req.query.id || "").trim();
+  if (!/^[\w-]{8,64}$/.test(id)) return res.status(400).json({ ok: false, error: "Geçersiz batch ID." });
+  try {
+    const r = await tyApi("get", `/integration/product/sellers/{sellerId}/products/batch-requests/${id}`);
+    const d = r.data || {};
+    res.json({
+      ok: true,
+      status: d.status || "",
+      itemCount: d.itemCount, failedItemCount: d.failedItemCount,
+      items: (d.items || []).map((i) => ({ barcode: i.requestItem?.barcode || i.requestItem?.product?.barcode || "", status: i.status, reasons: i.failureReasons || [] })),
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: tyErr(e) });
+  }
+});
+
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
 // Her platforma, o platform için tanımlı SKU ile gönderilir (skuForPlatform).
 app.post("/api/products/:code/push", requireAuth, async (req, res) => {
