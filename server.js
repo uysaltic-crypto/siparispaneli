@@ -4665,6 +4665,77 @@ app.post("/api/reconcile/zero", requireAuth, (req, res) => {
   })();
 });
 
+// Stok/fiyat farkı düzeltme. type: "stock" (panel stoğunu platforma gönder),
+// "price-push" (panel fiyatını platforma gönder; platformun mevcut stoğu korunur),
+// "price-pull" (platform fiyatını panele yaz; platforma dokunmaz).
+app.post("/api/reconcile/fix", requireAuth, (req, res) => {
+  const { platform, type, skus } = req.body || {};
+  const pl = PLATFORMS.find((p) => p.id === platform);
+  const job = reconJobs[platform];
+  if (!pl || !job || job.status !== "done" || !job.report || !job.rows) return res.status(400).json({ ok: false, error: "Önce karşılaştırmayı çalıştır." });
+  if (!["stock", "price-push", "price-pull"].includes(type)) return res.status(400).json({ ok: false, error: "Geçersiz işlem." });
+  if (reconZeroJobs[platform]?.running) return res.status(409).json({ ok: false, error: "Bu platformda başka bir işlem çalışıyor." });
+  if (!Array.isArray(skus) || !skus.length) return res.status(400).json({ ok: false, error: "Ürün seçilmedi." });
+  const listKey = type === "stock" ? "stockDiff" : "priceDiff";
+  const bySku = new Map(job.report[listKey].items.map((x) => [x.sku, x]));
+  const list = [...new Set(skus.map((s) => String(s).trim()))].filter((s) => bySku.has(s));
+  if (!list.length) return res.status(400).json({ ok: false, error: "Seçilen ürünler listede yok." });
+  if (type !== "price-pull" && list.length > 100) return res.status(400).json({ ok: false, error: "Tek seferde en fazla 100 ürün gönderilebilir." });
+  const label = type === "stock" ? "stok platforma gönderildi" : type === "price-push" ? "fiyat platforma gönderildi" : "fiyat panele alındı";
+
+  if (type === "price-pull") {
+    let n = 0;
+    list.forEach((sku) => {
+      const it = bySku.get(sku);
+      const row = job.rows.find((r) => String(r.barcode || "").trim() === sku);
+      const price = Number(row?.price) || 0;
+      if (products[it.code] && price > 0) { products[it.code].prices[platform] = price; n++; }
+    });
+    persistProducts();
+    job.report = reconBuild(platform, job.rows);
+    return res.json({ ok: true, done: n, report: job.report });
+  }
+
+  const z = (reconZeroJobs[platform] = { running: true, label, total: list.length, done: 0, failed: [], startedAt: new Date().toISOString(), finishedAt: null });
+  res.json({ ok: true, total: list.length, async: true });
+  (async () => {
+    const delay = platform === "koctas" ? 61000 : 400;
+    const okSkus = new Set();
+    for (let i = 0; i < list.length; i++) {
+      if (i > 0) await sleepMs(delay);
+      const it = bySku.get(list[i]);
+      const row = job.rows.find((r) => String(r.barcode || "").trim() === list[i]);
+      try {
+        let r;
+        if (type === "stock") {
+          const root = resolveRoot(it.code);
+          const central = Number(products[root]?.centralStock) || 0;
+          r = await pl.pushStock(list[i], central);
+          if (r && r.ok) { if (row) row.stock = central; if (products[it.code]) products[it.code].stocks[platform] = central; }
+        } else {
+          const price = Number(products[it.code]?.prices?.[platform]) || 0;
+          if (!(price > 0)) r = { ok: false, message: "panelde fiyat yok" };
+          else {
+            r = await pushListingToPlatform(platform, list[i], Number(row?.stock) || 0, price);
+            if (r && r.ok && row) row.price = price;
+          }
+        }
+        if (!r || !r.ok) z.failed.push({ sku: list[i], message: String((r && r.message) || "hata").slice(0, 160) });
+        else okSkus.add(list[i]);
+      } catch (e) {
+        z.failed.push({ sku: list[i], message: String(e.message || e).slice(0, 160) });
+      }
+      z.done++;
+    }
+    persistProducts();
+    try { job.report = reconBuild(platform, job.rows); } catch (_) {}
+    pushLog.push({ time: new Date().toISOString(), barcode: "(karşılaştırma)", name: `${pl.name}: ${okSkus.size}/${list.length} ürün — ${label}`, centralStock: 0, trigger: "karşılaştırma", results: { [platform]: z.failed.length ? { ok: false, message: `${z.failed.length}/${list.length} başarısız` } : { ok: true } } });
+    persistPushLog();
+    z.running = false;
+    z.finishedAt = new Date().toISOString();
+  })();
+});
+
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
 // Her platforma, o platform için tanımlı SKU ile gönderilir (skuForPlatform).
 app.post("/api/products/:code/push", requireAuth, async (req, res) => {

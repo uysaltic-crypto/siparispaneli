@@ -3132,15 +3132,24 @@ function reconRender(zero) {
     head = '<th>Ürün kodu</th><th>Platform SKU</th><th>Ad</th><th>Panelde son bilinen stok</th>';
     rowFn = x => `<tr><td style="font-family:monospace;">${escHtml(x.code)}</td><td style="font-family:monospace;">${escHtml(x.sku)}</td><td>${escHtml(x.name)}</td><td>${x.panelStock}</td></tr>`;
   } else {
-    head = '<th>Ürün kodu</th><th>Ad</th><th>Panel</th><th>Platform</th>';
-    rowFn = x => `<tr><td style="font-family:monospace;">${escHtml(x.code)}</td><td>${escHtml(x.name)}</td><td>${x.panel}</td><td>${x.platform}</td></tr>`;
+    head = '<th></th><th>Ürün kodu</th><th>Ad</th><th>Panel</th><th>Platform</th>';
+    rowFn = x => `<tr><td><input type="checkbox" ${reconCur.sel.has(x.sku) ? 'checked' : ''} onchange="reconToggle('${escAttr(x.sku)}', this.checked)"></td><td style="font-family:monospace;">${escHtml(x.code)}</td><td>${escHtml(x.name)}</td><td>${x.panel}</td><td>${x.platform}</td></tr>`;
   }
   const trunc = L.total > L.items.length ? `<div class="warnbox">Liste ${L.items.length} / ${L.total} gösteriliyor. CSV tüm gösterilen satırları içerir.</div>` : '';
   let actions = '';
-  if (isOP) {
-    const n = reconCur.sel.size;
-    const zline = zero && (zero.running || zero.finishedAt)
-      ? `<span class="muted">Sıfırlama: ${zero.done}/${zero.total}${zero.running ? ' sürüyor…' : ' bitti'}${zero.failed && zero.failed.length ? ' — ' + zero.failed.length + ' hata: ' + escHtml(zero.failed.slice(0, 3).map(f => f.sku + ' (' + f.message + ')').join('; ')) : ''}</span>` : '';
+  const n = reconCur.sel.size;
+  const zline = zero && (zero.running || zero.finishedAt)
+      ? `<span class="muted">${escHtml(zero.label || 'Sıfırlama')}: ${zero.done}/${zero.total}${zero.running ? ' sürüyor…' : ' bitti'}${zero.failed && zero.failed.length ? ' — ' + zero.failed.length + ' hata: ' + escHtml(zero.failed.slice(0, 3).map(f => f.sku + ' (' + f.message + ')').join('; ')) : ''}</span>` : '';
+  const busy = !!(zero && zero.running);
+  const selBar = `<button class="ghost small" onclick="reconSelAll(true)">Görünenlerin hepsini seç</button> <button class="ghost small" onclick="reconSelAll(false)">Seçimi temizle</button>`;
+  if (reconCur.tab === 'stockDiff') {
+    actions = `<div class="toolbar" style="gap:8px; margin:8px 0; align-items:center; flex-wrap:wrap;">${selBar}
+      <button class="small" ${n && !busy ? '' : 'disabled'} onclick="reconFix('stock')" title="Seçili ürünlerin panel stoğunu platforma gönderir">Panel stoğunu platforma gönder (${n})</button>${zline}</div>`;
+  } else if (reconCur.tab === 'priceDiff') {
+    actions = `<div class="toolbar" style="gap:8px; margin:8px 0; align-items:center; flex-wrap:wrap;">${selBar}
+      <button class="small" ${n && !busy ? '' : 'disabled'} onclick="reconFix('price-push')" title="Panel fiyatını platforma gönderir; platformdaki stok değişmez">Panel fiyatını platforma gönder (${n})</button>
+      <button class="ghost small" ${n ? '' : 'disabled'} onclick="reconFix('price-pull')" title="Platformdaki fiyatı panele yazar; platforma bir şey gönderilmez">Platform fiyatını panele al (${n})</button>${zline}</div>`;
+  } else if (isOP) {
     actions = `<div class="toolbar" style="gap:8px; margin:8px 0; align-items:center; flex-wrap:wrap;">
       <button class="ghost small" onclick="reconSelAll(true)">Görünenlerin hepsini seç</button>
       <button class="ghost small" onclick="reconSelAll(false)">Seçimi temizle</button>
@@ -3158,11 +3167,11 @@ function reconRender(zero) {
   reconCur._zero = zero;
 }
 
-function reconTab(k) { reconCur.tab = k; reconCur._focusQ = false; reconRender(reconCur._zero); }
+function reconTab(k) { (reconCur.selBy = reconCur.selBy || {})[reconCur.tab] = reconCur.sel; reconCur.sel = reconCur.selBy[k] || new Set(); reconCur.tab = k; reconCur._focusQ = false; reconRender(reconCur._zero); }
 function reconSearch(v) { reconCur.q = v; reconCur._focusQ = true; reconRender(reconCur._zero); }
 function reconToggle(sku, on) { on ? reconCur.sel.add(sku) : reconCur.sel.delete(sku); reconCur._focusQ = false; reconRender(reconCur._zero); }
 function reconSelAll(on) {
-  const L = reconCur.report.onlyPlatform.items;
+  const L = reconCur.report[reconCur.tab].items;
   const q = reconCur.q.trim().toLocaleLowerCase('tr');
   L.filter(x => !q || (x.name + ' ' + x.sku).toLocaleLowerCase('tr').includes(q)).forEach(x => on ? reconCur.sel.add(x.sku) : reconCur.sel.delete(x.sku));
   if (!on && !q) reconCur.sel.clear();
@@ -3194,6 +3203,22 @@ async function reconZero() {
   if (!d.ok) { toast(d.error || 'Başlatılamadı'); return; }
   toast(d.total + ' ürün sıfırlanıyor…');
   reconPoll(false);
+}
+
+async function reconFix(type) {
+  const skus = [...reconCur.sel];
+  if (!skus.length) return;
+  const pm = platformMeta(reconPid());
+  const msg = type === 'stock' ? `${skus.length} ürünün PANEL stoğu ${pm.name}'a gönderilecek (platformdaki stok değişecek).`
+    : type === 'price-push' ? `${skus.length} ürünün PANEL fiyatı ${pm.name}'a gönderilecek (platformdaki fiyat değişecek).`
+    : `${skus.length} ürünün ${pm.name} fiyatı panele yazılacak (platforma bir şey gönderilmez).`;
+  if (!confirm(msg + (reconPid() === 'koctas' && type !== 'price-pull' ? `\nKoçtaş dakikada 1 istek kabul eder: yaklaşık ${skus.length} dakika sürer.` : '') + '\nDevam edilsin mi?')) return;
+  const r = await fetch('/api/reconcile/fix', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: reconPid(), type, skus }) });
+  const d = await r.json();
+  if (!d.ok) { toast(d.error || 'Başlatılamadı'); return; }
+  reconCur.sel.clear();
+  if (d.async) { toast(d.total + ' ürün işleniyor…'); reconPoll(false); }
+  else { toast(d.done + ' ürünün fiyatı panele alındı'); if (d.report) reconCur.report = d.report; if (typeof loadProducts === 'function') loadProducts(); reconRender(reconCur._zero); }
 }
 
 function reconCsv() {
