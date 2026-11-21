@@ -3023,7 +3023,7 @@ function bfInvoiceModel(order, vatRate, uuid) {
     EInvoiceId: "", IsDocumentNoAuto: true, ETTN: uuid, ReceiverTag: null,
     BillingName: name, BillingAddress: addr, BillingTown: town, BillingCity: city,
     BillingMobilePhone: phone, BillingPhone: phone, BillingPhone2: null,
-    TaxOffice: "", TaxNo: /^\d{11}$/.test(String(order.tckn || "")) ? order.tckn : (process.env.BIRFATURA_DEFAULT_TAXNO || ""),
+    TaxOffice: "", TaxNo: /^\d{11}$/.test(String(order.tckn || "")) ? order.tckn : (process.env.BIRFATURA_DEFAULT_TAXNO || "11111111111"),
     Email: clean(order.email, 100) || null,
     ShipCompany: clean(order.cargo, 50) || platName, CargoCampaignCode: "",
     ShippingName: name, ShippingAddress: addr, ShippingTown: town, ShippingCity: city, ShippingCountry: "Türkiye", ShippingZipCode: "", ShippingPhone: phone,
