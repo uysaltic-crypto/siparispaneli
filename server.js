@@ -4618,10 +4618,11 @@ app.post("/api/reconcile/import", requireAuth, (req, res) => {
   const { platform, skus } = req.body || {};
   const job = reconJobs[platform];
   if (!job || job.status !== "done" || !job.rows) return res.status(400).json({ ok: false, error: "Önce karşılaştırmayı çalıştır." });
-  if (!Array.isArray(skus) || !skus.length) return res.status(400).json({ ok: false, error: "Ürün seçilmedi." });
-  const want = new Set(skus.map((s) => String(s).trim()));
+  const all = req.body?.all === true;
+  if (!all && (!Array.isArray(skus) || !skus.length)) return res.status(400).json({ ok: false, error: "Ürün seçilmedi." });
+  const want = new Set((skus || []).map((s) => String(s).trim()));
   const known = buildSkuIndex()[platform];
-  const rows = job.rows.filter((r) => want.has(String(r.barcode || "").trim()) && !known.has(String(r.barcode || "").trim()));
+  const rows = job.rows.filter((r) => (all || want.has(String(r.barcode || "").trim())) && !known.has(String(r.barcode || "").trim()));
   if (!rows.length) return res.json({ ok: true, created: 0, updated: 0, autoMatched: 0 });
   const merged = mergeStockRows(platform, rows);
   const autoMatched = autoMatchProducts().length;

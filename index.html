@@ -3154,6 +3154,7 @@ function reconRender(zero) {
       <button class="ghost small" onclick="reconSelAll(true)">Görünenlerin hepsini seç</button>
       <button class="ghost small" onclick="reconSelAll(false)">Seçimi temizle</button>
       <button class="small" ${n ? '' : 'disabled'} onclick="reconImport()">Seçilenleri panele ekle (${n})</button>
+      <button class="small" ${R.onlyPlatform.total ? '' : 'disabled'} onclick="reconImport(true)">Hepsini panele ekle (${R.onlyPlatform.total})</button>
       <button class="small" style="background:var(--danger); color:#fff;" ${n && !(zero && zero.running) ? '' : 'disabled'} onclick="reconZero()" title="Seçili ürünlerin platformdaki stoğunu 0 yapar (satış durur). Canlı ilanları etkiler.">Platformda stoğu 0 yap (${n})</button>
       ${zline}
     </div>`;
@@ -3178,11 +3179,12 @@ function reconSelAll(on) {
   reconCur._focusQ = false; reconRender(reconCur._zero);
 }
 
-async function reconImport() {
+async function reconImport(all) {
   const skus = [...reconCur.sel];
-  if (!skus.length) return;
-  if (!confirm(skus.length + ' ürün panele eklenecek (ad/stok/fiyat platformdan alınır). Devam?')) return;
-  const r = await fetch('/api/reconcile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ platform: reconPid(), skus }) });
+  const cnt = all ? reconCur.report.onlyPlatform.total : skus.length;
+  if (!cnt) return;
+  if (!confirm(cnt + ' ürün panele eklenecek (ad/stok/fiyat platformdan alınır; merkezi stok platformdaki stoğa eşitlenir). Devam?')) return;
+  const r = await fetch('/api/reconcile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(all ? { platform: reconPid(), all: true } : { platform: reconPid(), skus }) });
   const d = await r.json();
   if (!d.ok) { toast(d.error || 'Eklenemedi'); return; }
   toast(`${d.created} ürün eklendi` + (d.autoMatched ? `, ${d.autoMatched} otomatik eşleşme` : ''));
