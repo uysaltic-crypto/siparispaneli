@@ -4703,6 +4703,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     const delay = platform === "koctas" ? 61000 : 400;
     const okSkus = new Set();
     const batchIds = [];
+    const n11Tasks = [];
     for (let i = 0; i < list.length; i++) {
       if (i > 0) await sleepMs(delay);
       const it = bySku.get(list[i]);
@@ -4722,7 +4723,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
           }
         }
         if (!r || !r.ok) z.failed.push({ sku: list[i], message: String((r && r.message) || "hata").slice(0, 160) });
-        else { okSkus.add(list[i]); if (r.batchRequestId) batchIds.push(r.batchRequestId); }
+        else { okSkus.add(list[i]); if (r.batchRequestId) batchIds.push(r.batchRequestId); if (r.taskId) n11Tasks.push({ id: r.taskId, sku: list[i] }); }
       } catch (e) {
         z.failed.push({ sku: list[i], message: String(e.message || e).slice(0, 160) });
       }
@@ -4754,6 +4755,26 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
       }
       if (Object.keys(stCount).length) z.notes.push("Trendyol işlem durumları: " + Object.entries(stCount).map(([k, v]) => `${k}×${v}`).join(", "));
     }
+    if (platform === "n11" && n11Tasks.length) {
+      const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+      let rejected = 0;
+      for (const t of n11Tasks.slice(0, 100)) {
+        try {
+          const tr = await axios.post("https://api.n11.com/ms/product/task-details/page-query", { taskId: t.id, pageable: { page: 0, size: 20 } }, { headers: { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, "Content-Type": "application/json" }, timeout: 20000 });
+          (tr.data?.skus?.content || []).forEach((it) => {
+            if (String(it.status || "").toUpperCase() === "FAIL") {
+              rejected++;
+              const why = (it.reasons || it.sku?.reasons || []).join(" ").slice(0, 160);
+              z.failed.push({ sku: it.itemCode || t.sku, message: "N11 reddetti: " + why });
+              okSkus.delete(t.sku);
+            }
+          });
+        } catch (e) { if (z.notes.length < 2) z.notes.push("N11 görev sorgusu başarısız: " + String(e.response?.data ? JSON.stringify(e.response.data) : e.message).slice(0, 160)); }
+        await sleepMs(300);
+      }
+      if (rejected) z.notes.push(`N11'de ${rejected} ürün reddedildi (genelde ürün katalog tarafından reddedilmiş: N11 satıcı panelinden red nedenini düzeltip yeniden onaya gönder).`);
+    }
+    if (platform === "ty") z.notes.push("Trendyol'da işlem SUCCESS ise stok gönderilmiştir; platform listesi birkaç saat gecikmeli güncellenebildiği için 'hâlâ farklı' görünebilir — bir süre sonra Karşılaştır'ı tekrar çalıştır.");
     try {
       const fresh = await pl.fetchStock();
       if (!fresh.error && !fresh.truncated && fresh.rows?.length) {
