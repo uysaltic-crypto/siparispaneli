@@ -3194,7 +3194,7 @@ function reconRender(zero) {
   let actions = '';
   const n = reconCur.sel.size;
   const zline = zero && (zero.running || zero.finishedAt)
-      ? `<span class="muted">${escHtml(zero.label || 'Sıfırlama')}: ${zero.done}/${zero.total}${zero.running ? ' sürüyor…' : ' bitti'}${zero.failed && zero.failed.length ? ' — ' + zero.failed.length + ' hata: ' + escHtml(zero.failed.slice(0, 3).map(f => f.sku + ' (' + f.message + ')').join('; ')) : ''}</span>` : '';
+      ? `<span class="muted">${escHtml(zero.label || 'Sıfırlama')}: ${zero.done}/${zero.total}${zero.running ? (zero.phase === 'verifying' ? ' gönderildi, platformda doğrulanıyor (≈1 dk)…' : ' sürüyor…') : ' bitti'}${zero.still ? (zero.still.length ? ' — <b style="color:var(--danger)">' + zero.still.length + ' ürün platformda HÂLÂ farklı</b> (ör. ' + escHtml(zero.still.slice(0, 3).map(f => f.sku + ': panel ' + f.panel + ' / platform ' + f.platform).join('; ')) + ')' : ' — <b style="color:var(--ok)">hepsi doğrulandı ✓</b>') : ''}${zero.verifyError ? ' — doğrulanamadı: ' + escHtml(zero.verifyError) : ''}${zero.failed && zero.failed.length ? ' — ' + zero.failed.length + ' hata: ' + escHtml(zero.failed.slice(0, 3).map(f => f.sku + ' (' + f.message + ')').join('; ')) : ''}</span>` : '';
   const busy = !!(zero && zero.running);
   const selBar = `<button class="ghost small" onclick="reconSelAll(true)">Görünenlerin hepsini seç</button> <button class="ghost small" onclick="reconSelAll(false)">Seçimi temizle</button>`;
   if (reconCur.tab === 'stockDiff') {

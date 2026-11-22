@@ -4702,6 +4702,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
   (async () => {
     const delay = platform === "koctas" ? 61000 : 400;
     const okSkus = new Set();
+    const batchIds = [];
     for (let i = 0; i < list.length; i++) {
       if (i > 0) await sleepMs(delay);
       const it = bySku.get(list[i]);
@@ -4712,26 +4713,55 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
           const root = resolveRoot(it.code);
           const central = Number(products[root]?.centralStock) || 0;
           r = await pl.pushStock(list[i], central);
-          if (r && r.ok) { if (row) row.stock = central; if (products[it.code]) products[it.code].stocks[platform] = central; }
+          if (r && r.ok && products[it.code]) products[it.code].stocks[platform] = central;
         } else {
           const price = Number(products[it.code]?.prices?.[platform]) || 0;
           if (!(price > 0)) r = { ok: false, message: "panelde fiyat yok" };
           else {
             r = await pushListingToPlatform(platform, list[i], Number(row?.stock) || 0, price);
-            if (r && r.ok && row) row.price = price;
           }
         }
         if (!r || !r.ok) z.failed.push({ sku: list[i], message: String((r && r.message) || "hata").slice(0, 160) });
-        else okSkus.add(list[i]);
+        else { okSkus.add(list[i]); if (r.batchRequestId) batchIds.push(r.batchRequestId); }
       } catch (e) {
         z.failed.push({ sku: list[i], message: String(e.message || e).slice(0, 160) });
       }
       z.done++;
     }
     persistProducts();
-    try { job.report = reconBuild(platform, job.rows); } catch (_) {}
-    pushLog.push({ time: new Date().toISOString(), barcode: "(karşılaştırma)", name: `${pl.name}: ${okSkus.size}/${list.length} ürün — ${label}`, centralStock: 0, trigger: "karşılaştırma", results: { [platform]: z.failed.length ? { ok: false, message: `${z.failed.length}/${list.length} başarısız` } : { ok: true } } });
+    // Trendyol/N11 stok-fiyat isteklerini kabul edip ARKA PLANDA işler; "gönderildi" ≠ "güncellendi".
+    // Bu yüzden biraz bekleyip (1) Trendyol toplu işlem sonuçlarını okuyor, (2) listeyi platformdan
+    // yeniden çekip gerçekten eşitlenip eşitlenmediğini doğruluyoruz.
+    z.phase = "verifying";
+    await sleepMs(["ty", "n11"].includes(platform) ? 45000 : 10000);
+    if (platform === "ty" && batchIds.length) {
+      for (const bid of [...new Set(batchIds)].slice(0, 100)) {
+        try {
+          const br = await tyApi("get", `/integration/product/sellers/{sellerId}/products/batch-requests/${bid}`);
+          (br.data?.items || []).forEach((it) => {
+            if (String(it.status || "").toUpperCase() === "FAILED" || (it.failureReasons || []).length) {
+              const bc = it.requestItem?.barcode || it.requestItem?.product?.barcode || "?";
+              z.failed.push({ sku: bc, message: "Trendyol reddetti: " + (it.failureReasons || []).map((x) => (typeof x === "string" ? x : x.message || JSON.stringify(x))).join("; ").slice(0, 200) });
+              okSkus.delete(bc);
+            }
+          });
+        } catch (_) {}
+        await sleepMs(300);
+      }
+    }
+    try {
+      const fresh = await pl.fetchStock();
+      if (!fresh.error && !fresh.truncated && fresh.rows?.length) {
+        job.rows = fresh.rows;
+        job.report = reconBuild(platform, fresh.rows);
+        const key = type === "stock" ? "stockDiff" : "priceDiff";
+        const still = new Map(job.report[key].items.map((x) => [x.sku, x]));
+        z.still = list.filter((sk) => still.has(sk)).map((sk) => ({ sku: sk, panel: still.get(sk).panel, platform: still.get(sk).platform }));
+      } else z.verifyError = fresh.error || "Platform listesi yeniden çekilemedi.";
+    } catch (e) { z.verifyError = String(e.message || e).slice(0, 160); }
+    pushLog.push({ time: new Date().toISOString(), barcode: "(karşılaştırma)", name: `${pl.name}: ${okSkus.size}/${list.length} ürün — ${label}` + (z.still ? ` (doğrulama: ${z.still.length} ürün hâlâ farklı)` : ""), centralStock: null, trigger: "karşılaştırma", results: { [platform]: z.failed.length || (z.still && z.still.length) ? { ok: false, message: `${z.failed.length} hata, ${(z.still || []).length} hâlâ farklı` } : { ok: true } } });
     persistPushLog();
+    z.phase = "done";
     z.running = false;
     z.finishedAt = new Date().toISOString();
   })();
