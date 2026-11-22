@@ -4734,10 +4734,14 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     // yeniden çekip gerçekten eşitlenip eşitlenmediğini doğruluyoruz.
     z.phase = "verifying";
     await sleepMs(["ty", "n11"].includes(platform) ? 45000 : 10000);
+    z.notes = [];
+    const stCount = {};
     if (platform === "ty" && batchIds.length) {
       for (const bid of [...new Set(batchIds)].slice(0, 100)) {
         try {
           const br = await tyApi("get", `/integration/product/sellers/{sellerId}/products/batch-requests/${bid}`);
+          const bs = String(br.data?.status || "?");
+          stCount[bs] = (stCount[bs] || 0) + 1;
           (br.data?.items || []).forEach((it) => {
             if (String(it.status || "").toUpperCase() === "FAILED" || (it.failureReasons || []).length) {
               const bc = it.requestItem?.barcode || it.requestItem?.product?.barcode || "?";
@@ -4745,9 +4749,10 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
               okSkus.delete(bc);
             }
           });
-        } catch (_) {}
+        } catch (e) { if (z.notes.length < 2) z.notes.push("Trendyol toplu işlem sorgusu başarısız: " + tyErr(e).slice(0, 200)); }
         await sleepMs(300);
       }
+      if (Object.keys(stCount).length) z.notes.push("Trendyol işlem durumları: " + Object.entries(stCount).map(([k, v]) => `${k}×${v}`).join(", "));
     }
     try {
       const fresh = await pl.fetchStock();
@@ -4952,6 +4957,49 @@ app.get("/api/ty/new/batch", requireAuth, tyNewGuard, async (req, res) => {
   } catch (e) {
     res.status(502).json({ ok: false, error: tyErr(e) });
   }
+});
+
+
+// TEŞHİS: tek bir ürüne stok gönderir ve platformun ham yanıtını + işlem sonucunu gösterir.
+// Tarayıcıdan (giriş yapmışken): /api/diag/push-test?platform=ty&sku=BARKOD&qty=3
+app.get("/api/diag/push-test", requireAuth, async (req, res) => {
+  const pid = req.query.platform, sku = String(req.query.sku || "").trim(), qty = Math.max(0, parseInt(req.query.qty, 10) || 0);
+  const pl = PLATFORMS.find((p) => p.id === pid);
+  if (!pl || !sku) return res.status(400).json({ ok: false, error: "?platform=ty|n11&sku=...&qty=..." });
+  const out = { platform: pid, sku, qty, steps: [] };
+  try {
+    if (pid === "ty") {
+      const c = tyApiCfg();
+      const before = await tyApi("get", "/integration/product/sellers/{sellerId}/products", { params: { barcode: sku, size: 5 } }).catch((e) => ({ data: { error: tyErr(e) } }));
+      const q0 = (before.data?.content || []).map((x) => ({ title: x.title, quantity: x.quantity, onSale: x.onSale, archived: x.archived, blacklisted: x.blacklisted, approved: x.approved, locked: x.locked }));
+      out.steps.push({ step: "önce (Trendyol'daki kayıt)", data: q0.length ? q0 : before.data });
+      const r = await axios.post(`https://${c.host}/integration/inventory/sellers/${c.id}/products/price-and-inventory`, { items: [{ barcode: sku, quantity: qty }] }, { auth: c.auth, headers: { "Content-Type": "application/json", "User-Agent": `${c.id} - SelfIntegration` }, timeout: 20000 });
+      out.steps.push({ step: "gönderim yanıtı", data: r.data });
+      const bid = r.data?.batchRequestId;
+      for (let i = 0; i < 4 && bid; i++) {
+        await sleepMs(15000);
+        const br = await tyApi("get", `/integration/product/sellers/{sellerId}/products/batch-requests/${bid}`).catch((e) => ({ data: { error: tyErr(e) } }));
+        out.steps.push({ step: `işlem sonucu (${(i + 1) * 15} sn)`, data: br.data });
+        if (br.data?.status === "COMPLETED") break;
+      }
+      const after = await tyApi("get", "/integration/product/sellers/{sellerId}/products", { params: { barcode: sku, size: 5 } }).catch((e) => ({ data: { error: tyErr(e) } }));
+      out.steps.push({ step: "sonra (Trendyol'daki kayıt)", data: (after.data?.content || []).map((x) => ({ quantity: x.quantity })) });
+    } else if (pid === "n11") {
+      const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+      const H = { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, "Content-Type": "application/json" };
+      const r = await axios.post("https://api.n11.com/ms/product/tasks/price-stock-update", { payload: { integrator: "TicaretPaneli", skus: [{ stockCode: sku, quantity: qty }] } }, { headers: H, timeout: 20000 });
+      out.steps.push({ step: "gönderim yanıtı", data: r.data });
+      const tid = r.data?.id;
+      for (let i = 0; i < 3 && tid; i++) {
+        await sleepMs(15000);
+        const tr = await axios.post("https://api.n11.com/ms/product/task-details/page-query", { taskId: tid, pageable: { page: 0, size: 50 } }, { headers: H, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
+        out.steps.push({ step: `işlem detayı (${(i + 1) * 15} sn)`, data: tr.data });
+      }
+    } else out.steps.push({ step: "bu platform için teşhis yok" });
+  } catch (e) {
+    out.error = e.response?.data ? JSON.stringify(e.response.data).slice(0, 600) : e.message;
+  }
+  res.json(out);
 });
 
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
