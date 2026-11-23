@@ -5023,6 +5023,639 @@ app.get("/api/diag/push-test", requireAuth, async (req, res) => {
   res.json(out);
 });
 
+/* ------------------------------------------------------------------
+   Hepsiburada'ya YENİ ÜRÜN (Katalog Ürün Giriş). Belge metninden uygulandı; uç nokta ADRESLERİ belgede
+   yoktu, bu yüzden bilinen mpop adresleri kullanılıyor ve ham yanıt ekranda gösteriliyor (deneysel).
+   Ürün JSON dosyası form-data olarak yüklenir → trackingId döner → durum sorgulanır.
+------------------------------------------------------------------ */
+function hbMpopHost() {
+  return process.env.HB_ENV === "test" ? "mpop-sit.hepsiburada.com" : "mpop.hepsiburada.com";
+}
+async function hbMpop(method, path, opts = {}) {
+  const a = hbAuthConfig();
+  return axios({
+    method,
+    url: `https://${hbMpopHost()}${path}`,
+    auth: a.auth,
+    params: opts.params,
+    data: opts.data,
+    headers: { "User-Agent": a.userAgent, Accept: "application/json", ...(opts.headers || {}) },
+    timeout: 45000,
+    maxBodyLength: Infinity,
+  });
+}
+function hbErr(err) {
+  if (err.response?.status === 401 || err.response?.status === 403) return "Hepsiburada kimlik doğrulama/yetki hatası (ürün giriş yetkisi anahtarında açık mı?). " + (err.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : "");
+  return err.response?.data ? `HTTP ${err.response.status}: ` + JSON.stringify(err.response.data).slice(0, 500) : err.message;
+}
+function hbNewGuard(req, res, next) {
+  if (!hbConfigured()) return res.status(400).json({ ok: false, error: "Hepsiburada API bilgileri eksik." });
+  next();
+}
+
+let hbCatCache = { at: 0, leaves: [] };
+app.get("/api/hb/new/categories", requireAuth, hbNewGuard, async (req, res) => {
+  try {
+    if (!hbCatCache.leaves.length || Date.now() - hbCatCache.at > 6 * 3600 * 1000) {
+      const leaves = [];
+      for (let page = 0; page < 20; page++) {
+        const r = await hbMpop("get", "/product/api/categories/get-all-categories", { params: { leaf: true, status: "ACTIVE", available: true, page, size: 2000 } });
+        const list = Array.isArray(r.data?.data) ? r.data.data : [];
+        list.forEach((c) => {
+          if (c.leaf === false || c.available === false) return;
+          const path = Array.isArray(c.paths) ? c.paths.join(" > ") : String(c.paths || c.name || "");
+          leaves.push({ id: c.categoryId, name: c.name, path: path || c.name });
+        });
+        if (r.data?.last !== false || !list.length) break;
+      }
+      if (!leaves.length) return res.status(502).json({ ok: false, error: "Hepsiburada kategori listesi boş döndü." });
+      hbCatCache = { at: Date.now(), leaves };
+    }
+    const q = String(req.query.q || "").trim().toLocaleLowerCase("tr");
+    if (q.length < 2) return res.json({ ok: true, items: [], total: hbCatCache.leaves.length });
+    const words = q.split(/\s+/);
+    res.json({ ok: true, items: hbCatCache.leaves.filter((c) => { const t = (c.path + " " + c.name).toLocaleLowerCase("tr"); return words.every((w) => t.includes(w)); }).slice(0, 40) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: hbErr(e) });
+  }
+});
+
+app.get("/api/hb/new/attributes", requireAuth, hbNewGuard, async (req, res) => {
+  const id = parseInt(req.query.categoryId, 10);
+  if (!(id > 0)) return res.status(400).json({ ok: false, error: "categoryId gerekli." });
+  try {
+    const r = await hbMpop("get", `/product/api/categories/${id}/attributes`);
+    const d = r.data?.data;
+    const arrays = Array.isArray(d) ? [d] : Object.values(d || {}).filter(Array.isArray);
+    const seen = new Set();
+    const attrs = [];
+    arrays.flat().forEach((a) => {
+      if (!a || !a.id || seen.has(a.id)) return;
+      seen.add(a.id);
+      attrs.push({ id: a.id, name: a.name, required: !!a.mandatory, type: String(a.type || "").toLowerCase(), multi: !!a.multiValue });
+    });
+    res.json({ ok: true, attributes: attrs });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: hbErr(e) });
+  }
+});
+
+app.get("/api/hb/new/attribute-values", requireAuth, hbNewGuard, async (req, res) => {
+  const cid = parseInt(req.query.categoryId, 10), aid = String(req.query.attributeId || "").trim();
+  if (!(cid > 0) || !/^[\w.-]+$/.test(aid)) return res.status(400).json({ ok: false, error: "categoryId ve attributeId gerekli." });
+  try {
+    const r = await hbMpop("get", `/product/api/categories/${cid}/attribute/${encodeURIComponent(aid)}/values`, { params: { page: 0, size: 1000, version: 4 } });
+    const list = Array.isArray(r.data?.data) ? r.data.data : [];
+    res.json({ ok: true, values: list.slice(0, 1000).map((v) => ({ id: v.id, value: v.value })) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: hbErr(e) });
+  }
+});
+
+const hbNewBatches = [];
+
+app.post("/api/hb/new/create", requireAuth, hbNewGuard, async (req, res) => {
+  const b = req.body || {};
+  const num = (v) => Number(String(v ?? "").replace(",", "."));
+  const errs = [];
+  const merchantSku = String(b.barcode || "").trim().replace(/\s+/g, "").toUpperCase();
+  if (!merchantSku) errs.push("Stok kodu (barkod alanı) boş.");
+  const title = String(b.title || "").trim();
+  if (!title) errs.push("Başlık boş.");
+  const categoryId = parseInt(b.categoryId, 10);
+  if (!(categoryId > 0)) errs.push("Hepsiburada kategorisi seçilmedi.");
+  const brand = String(b.brand || "").trim();
+  if (!brand) errs.push("Marka girilmedi.");
+  const price = Math.round(num(b.salePrice) * 100) / 100;
+  if (!(price > 0)) errs.push("Satış fiyatı girilmedi.");
+  const description = String(b.description || "").trim();
+  if (!description) errs.push("Açıklama boş.");
+  const images = (Array.isArray(b.images) ? b.images : []).map((u) => String(u || "").trim()).filter(Boolean).slice(0, 5);
+  if (!images.length) errs.push("En az bir görsel gerekli.");
+  if (images.some((u) => !/^https?:\/\//i.test(u) || /\.gif(\?|$)/i.test(u))) errs.push("Görseller http(s) adresli png/jpg olmalı.");
+  const desi = num(b.dimensionalWeight);
+  if (!(desi > 0)) errs.push("Desi/ağırlık girilmedi.");
+  if (errs.length) return res.status(400).json({ ok: false, error: errs.join(" ") });
+
+  const fmt = (n) => String(n).replace(".", ",");
+  const attributes = {
+    merchantSku,
+    VaryantGroupID: String(b.productMainId || merchantSku).trim().replace(/\s+/g, "").toUpperCase(),
+    UrunAdi: title,
+    UrunAciklamasi: description,
+    Marka: brand,
+    kg: fmt(desi),
+    price: fmt(price.toFixed(2)),
+    stock: String(Math.max(0, Math.floor(num(b.quantity)))),
+  };
+  const ean = String(b.ean || "").trim();
+  if (ean) attributes.Barcode = ean;
+  if ([0, 1, 10, 20].includes(parseInt(b.vatRate, 10))) attributes.tax_vat_rate = String(parseInt(b.vatRate, 10));
+  const gw = parseInt(b.warrantyMonths, 10);
+  if (gw >= 0) attributes.GarantiSuresi = gw;
+  images.forEach((u, i) => (attributes["Image" + (i + 1)] = u));
+  (Array.isArray(b.attributes) ? b.attributes : []).forEach((a) => {
+    const id = String(a.id || "").trim();
+    const val = String(a.value ?? "").trim();
+    if (id && val && /^[\w.-]+$/.test(id)) attributes[id] = val;
+  });
+  const json = JSON.stringify([{ categoryId, merchant: process.env.HB_MERCHANT_ID, attributes }]);
+  const boundary = "----tp" + Math.random().toString(16).slice(2);
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="products.json"\r\nContent-Type: application/json\r\n\r\n`),
+    Buffer.from(json, "utf8"),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  try {
+    const r = await hbMpop("post", "/product/api/products/import", { params: { version: 1 }, data: body, headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` } });
+    const trackingId = r.data?.data?.trackingId || null;
+    if (r.data?.success === false || !trackingId) return res.status(502).json({ ok: false, error: "Hepsiburada: " + JSON.stringify(r.data).slice(0, 400) });
+    hbNewBatches.unshift({ trackingId, barcode: merchantSku, title, time: new Date().toISOString() });
+    hbNewBatches.length = Math.min(hbNewBatches.length, 30);
+    pushLog.push({ time: new Date().toISOString(), barcode: merchantSku, name: `Hepsiburada'ya yeni ürün gönderildi: ${title}`, centralStock: Number(attributes.stock), trigger: "yeni ürün", results: { hb: { ok: true, message: "tracking " + trackingId } } });
+    persistPushLog();
+    res.json({ ok: true, trackingId });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: hbErr(e) });
+  }
+});
+
+app.get("/api/hb/new/batches", requireAuth, (req, res) => res.json({ ok: true, items: hbNewBatches }));
+
+app.get("/api/hb/new/status", requireAuth, hbNewGuard, async (req, res) => {
+  const id = String(req.query.id || "").trim();
+  if (!/^[\w-]{8,80}$/.test(id)) return res.status(400).json({ ok: false, error: "Geçersiz takip no." });
+  try {
+    const r = await hbMpop("get", `/product/api/products/status/${id}`, { params: { page: 0, size: 100 } });
+    const list = Array.isArray(r.data?.data) ? r.data.data : [];
+    res.json({
+      ok: true,
+      items: list.map((i) => ({
+        barcode: i.merchantSku || "",
+        status: i.importStatus === "FAILED" ? "FAILED" : i.productStatus || i.importStatus || "",
+        reasons: [
+          ...(i.importMessages || []).filter((m) => m.severity !== "INFORMATION").map((m) => m.message),
+          ...(i.validationResults || []).map((v) => `${v.attributeName}: ${v.message}`),
+          ...(i.taskDetails ? [i.taskDetails.reason].filter(Boolean) : []),
+        ].filter(Boolean),
+        hbSku: i.hbSku || "",
+      })),
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: hbErr(e) });
+  }
+});
+
+/* ------------------------------------------------------------------
+   Çiçeksepeti'ne YENİ ÜRÜN (POST /api/v1/Products — belgeden uygulandı).
+   Kategori/özellik/batch sorgu adresleri belge metninde yoktu: bilinen /Categories ve
+   /Products/batch-status adresleri kullanılıyor, ham yanıt ekranda gösterilir (deneysel).
+   İstek 5 sn'de 1 kez; başarılı istek batchId döner, ürün en geç 24 saatte açılır.
+------------------------------------------------------------------ */
+async function csNewApi(method, path, data, params) {
+  return axios({ method, url: `https://${csHost()}${path}`, headers: csHeaders(), data, params, timeout: 45000 });
+}
+function csNewErr(err) {
+  if (err.response?.status === 401 || err.response?.status === 403) return "Çiçeksepeti kimlik doğrulama hatası.";
+  return err.response?.data ? `HTTP ${err.response.status}: ` + JSON.stringify(err.response.data).slice(0, 500) : err.message;
+}
+function csNewGuard(req, res, next) {
+  if (!csConfigured()) return res.status(400).json({ ok: false, error: "Çiçeksepeti API bilgisi eksik." });
+  next();
+}
+
+let csCatCache = { at: 0, leaves: [] };
+function csFlattenCats(list, trail, out) {
+  (list || []).forEach((c) => {
+    const path = trail ? trail + " > " + c.name : c.name;
+    const subs = c.subCategories || c.children || [];
+    if (subs.length) csFlattenCats(subs, path, out);
+    else out.push({ id: c.id ?? c.categoryId, name: c.name, path });
+  });
+}
+app.get("/api/cs/new/categories", requireAuth, csNewGuard, async (req, res) => {
+  try {
+    if (!csCatCache.leaves.length || Date.now() - csCatCache.at > 6 * 3600 * 1000) {
+      const r = await csNewApi("get", "/api/v1/Categories");
+      const leaves = [];
+      csFlattenCats(r.data?.categories || r.data?.Categories || (Array.isArray(r.data) ? r.data : []), "", leaves);
+      if (!leaves.length) return res.status(502).json({ ok: false, error: "Çiçeksepeti kategori listesi boş/okunamadı: " + JSON.stringify(r.data).slice(0, 200) });
+      csCatCache = { at: Date.now(), leaves };
+    }
+    const q = String(req.query.q || "").trim().toLocaleLowerCase("tr");
+    if (q.length < 2) return res.json({ ok: true, items: [], total: csCatCache.leaves.length });
+    const words = q.split(/\s+/);
+    res.json({ ok: true, items: csCatCache.leaves.filter((c) => { const t = c.path.toLocaleLowerCase("tr"); return words.every((w) => t.includes(w)); }).slice(0, 40) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: csNewErr(e) });
+  }
+});
+
+app.get("/api/cs/new/attributes", requireAuth, csNewGuard, async (req, res) => {
+  const id = parseInt(req.query.categoryId, 10);
+  if (!(id > 0)) return res.status(400).json({ ok: false, error: "categoryId gerekli." });
+  try {
+    const r = await csNewApi("get", `/api/v1/Categories/${id}/attributes`);
+    const list = r.data?.categoryAttributes || r.data?.CategoryAttributes || (Array.isArray(r.data) ? r.data : []);
+    const attrs = list.map((a) => ({
+      id: a.attributeId ?? a.id,
+      name: a.attributeName ?? a.name,
+      required: !!(a.required ?? a.isRequired ?? a.mandatory),
+      varianter: !!(a.varianter ?? a.isVariant),
+      type: String(a.attributeType ?? a.type ?? ""),
+      values: (a.attributeValues || a.values || []).slice(0, 500).map((v) => ({ id: v.id ?? v.valueId, name: v.name ?? v.value })),
+    })).filter((a) => a.id);
+    res.json({ ok: true, attributes: attrs });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: csNewErr(e) });
+  }
+});
+
+const csNewBatches = [];
+
+app.post("/api/cs/new/create", requireAuth, csNewGuard, async (req, res) => {
+  const b = req.body || {};
+  const num = (v) => Number(String(v ?? "").replace(",", "."));
+  const errs = [];
+  const productName = String(b.title || "").trim();
+  if (!productName) errs.push("Başlık boş.");
+  const stockCode = String(b.barcode || "").trim();
+  const mainProductCode = String(b.productMainId || stockCode).trim();
+  if (!stockCode) errs.push("Stok kodu boş.");
+  const categoryId = parseInt(b.categoryId, 10);
+  if (!(categoryId > 0)) errs.push("Çiçeksepeti kategorisi seçilmedi.");
+  const price = Math.round(num(b.salePrice) * 100) / 100;
+  if (!(price > 0)) errs.push("Satış fiyatı girilmedi.");
+  const description = String(b.description || "").trim();
+  if (description.replace(/<[^>]*>/g, "").length < 30) errs.push("Açıklama düz metin olarak en az 30 karakter olmalı.");
+  const images = (Array.isArray(b.images) ? b.images : []).map((u) => String(u || "").trim()).filter(Boolean);
+  if (!images.length) errs.push("En az bir görsel gerekli (500x500 – 2000x2000, en çok 5 MB).");
+  if (images.some((u) => !/^https?:\/\//i.test(u))) errs.push("Görseller http(s) adresli olmalı.");
+  const deliveryType = parseInt(b.deliveryType, 10) || 2;
+  const deliveryMessageType = parseInt(b.deliveryMessageType, 10);
+  if (![1, 4, 5, 6, 7, 13, 18, 19].includes(deliveryMessageType)) errs.push("Teslimat aralığı seçilmedi.");
+  if (errs.length) return res.status(400).json({ ok: false, error: errs.join(" ") });
+
+  const qty = Math.max(0, Math.floor(num(b.quantity)));
+  const p = {
+    productName, mainProductCode, stockCode, categoryId, description,
+    deliveryType, deliveryMessageType,
+    stockQuantity: qty, StockQuantity: qty,
+    salesPrice: price, TotalPrice: price,
+    images,
+  };
+  if (String(b.ean || "").trim()) p.barcode = String(b.ean).trim();
+  else p.barcode = stockCode.length >= 3 ? stockCode : undefined;
+  const lp = Math.round(num(b.listPrice) * 100) / 100;
+  if (lp > price && (lp - price) / lp >= 0.01 && (lp - price) / lp <= 0.8) { p.listPrice = lp; p.FirstPrice = lp; }
+  p.Attributes = (Array.isArray(b.attributes) ? b.attributes : [])
+    .map((a) => ({ Id: parseInt(a.id, 10), ValueId: parseInt(a.valueId, 10), TextLength: 0 }))
+    .filter((a) => a.Id > 0 && a.ValueId > 0);
+  try {
+    const r = await csNewApi("post", "/api/v1/Products", { products: [p] });
+    const batchId = r.data?.batchId || r.data?.BatchId || null;
+    if (!batchId) return res.status(502).json({ ok: false, error: "Çiçeksepeti: batchId dönmedi: " + JSON.stringify(r.data).slice(0, 300) });
+    csNewBatches.unshift({ batchId, barcode: stockCode, title: productName, time: new Date().toISOString() });
+    csNewBatches.length = Math.min(csNewBatches.length, 30);
+    pushLog.push({ time: new Date().toISOString(), barcode: stockCode, name: `Çiçeksepeti'ne yeni ürün gönderildi: ${productName}`, centralStock: qty, trigger: "yeni ürün", results: { cs: { ok: true, message: "batch " + batchId } } });
+    persistPushLog();
+    res.json({ ok: true, batchId });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: csNewErr(e) });
+  }
+});
+
+app.get("/api/cs/new/batches", requireAuth, (req, res) => res.json({ ok: true, items: csNewBatches }));
+
+app.get("/api/cs/new/batch", requireAuth, csNewGuard, async (req, res) => {
+  const id = String(req.query.id || "").trim();
+  if (!/^[\w-]{8,80}$/.test(id)) return res.status(400).json({ ok: false, error: "Geçersiz batch ID." });
+  try {
+    const r = await csNewApi("get", `/api/v1/Products/batch-status/${id}`);
+    const d = r.data || {};
+    const items = d.items || d.Items || [];
+    res.json({
+      ok: true,
+      status: d.status || d.Status || "",
+      items: items.map((i) => ({
+        barcode: i.stockCode || i.StockCode || i.productName || "",
+        status: i.status || i.Status || "",
+        reasons: (i.failureReasons || i.FailureReasons || i.errors || []).map((x) => (typeof x === "string" ? x : x.message || JSON.stringify(x))),
+      })),
+      raw: items.length ? undefined : JSON.stringify(d).slice(0, 400),
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: csNewErr(e) });
+  }
+});
+
+/* ------------------------------------------------------------------
+   N11'e YENİ ÜRÜN (REST: POST /ms/product/tasks/product-create) — N11 REST belgesinden uygulandı.
+   Kategori: GET /cdn/categories, özellik: GET /cdn/category/{id}/attribute, sonuç: task-details/page-query.
+------------------------------------------------------------------ */
+async function n11NewApi(method, path, data) {
+  const { N11_APP_KEY, N11_APP_SECRET } = process.env;
+  return axios({ method, url: `https://api.n11.com${path}`, data, headers: { appKey: N11_APP_KEY, appSecret: N11_APP_SECRET, "Content-Type": "application/json", Accept: "application/json" }, timeout: 45000 });
+}
+function n11NewErr(err) {
+  if (err.response?.status === 401 || err.response?.status === 403) return "N11 kimlik doğrulama hatası (appKey/appSecret).";
+  return err.response?.data ? `HTTP ${err.response.status}: ` + JSON.stringify(err.response.data).slice(0, 500) : err.message;
+}
+function n11NewGuard(req, res, next) {
+  if (!n11Configured()) return res.status(400).json({ ok: false, error: "N11 API bilgisi eksik." });
+  next();
+}
+
+let n11CatCache = { at: 0, leaves: [] };
+function n11FlattenCats(list, trail, out) {
+  (list || []).forEach((c) => {
+    const path = trail ? trail + " > " + c.name : c.name;
+    const subs = c.subCategories;
+    if (Array.isArray(subs) && subs.length) n11FlattenCats(subs, path, out);
+    else out.push({ id: c.id, name: c.name, path });
+  });
+}
+app.get("/api/n11/new/categories", requireAuth, n11NewGuard, async (req, res) => {
+  try {
+    if (!n11CatCache.leaves.length || Date.now() - n11CatCache.at > 6 * 3600 * 1000) {
+      const r = await n11NewApi("get", "/cdn/categories");
+      const root = Array.isArray(r.data) ? r.data : r.data?.categories || r.data?.content || [];
+      const leaves = [];
+      n11FlattenCats(root, "", leaves);
+      if (!leaves.length) return res.status(502).json({ ok: false, error: "N11 kategori listesi boş/okunamadı: " + JSON.stringify(r.data).slice(0, 200) });
+      n11CatCache = { at: Date.now(), leaves };
+    }
+    const q = String(req.query.q || "").trim().toLocaleLowerCase("tr");
+    if (q.length < 2) return res.json({ ok: true, items: [], total: n11CatCache.leaves.length });
+    const words = q.split(/\s+/);
+    res.json({ ok: true, items: n11CatCache.leaves.filter((c) => { const t = c.path.toLocaleLowerCase("tr"); return words.every((w) => t.includes(w)); }).slice(0, 40) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: n11NewErr(e) });
+  }
+});
+
+app.get("/api/n11/new/attributes", requireAuth, n11NewGuard, async (req, res) => {
+  const id = parseInt(req.query.categoryId, 10);
+  if (!(id > 0)) return res.status(400).json({ ok: false, error: "categoryId gerekli." });
+  try {
+    const r = await n11NewApi("get", `/cdn/category/${id}/attribute`);
+    const attrs = (r.data?.categoryAttributes || []).map((a) => ({
+      id: a.attributeId,
+      name: a.attributeName,
+      required: !!a.isMandatory,
+      varianter: !!a.isVariant,
+      slicer: !!a.isSlicer,
+      custom: !!a.isCustomValue,
+      values: (a.attributeValues || []).slice(0, 500).map((v) => ({ id: v.id, name: v.value })),
+    }));
+    res.json({ ok: true, attributes: attrs });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: n11NewErr(e) });
+  }
+});
+
+const n11NewBatches = [];
+
+app.post("/api/n11/new/create", requireAuth, n11NewGuard, async (req, res) => {
+  const b = req.body || {};
+  const num = (v) => Number(String(v ?? "").replace(",", "."));
+  const errs = [];
+  const title = String(b.title || "").trim();
+  if (!title) errs.push("Başlık boş.");
+  const stockCode = String(b.barcode || "").trim();
+  if (!stockCode || stockCode.length > 255) errs.push("Stok kodu boş veya 255 karakterden uzun.");
+  const productMainId = String(b.productMainId || stockCode).trim();
+  const categoryId = parseInt(b.categoryId, 10);
+  if (!(categoryId > 0)) errs.push("N11 kategorisi seçilmedi.");
+  const salePrice = Math.round(num(b.salePrice) * 100) / 100;
+  if (!(salePrice > 0)) errs.push("Satış fiyatı girilmedi.");
+  const listPrice = Math.max(salePrice, Math.round(num(b.listPrice || b.salePrice) * 100) / 100);
+  const vatRate = parseInt(b.vatRate, 10);
+  if (![0, 1, 10, 20].includes(vatRate)) errs.push("KDV oranı 0, 1, 10 veya 20 olmalı.");
+  const description = String(b.description || "").trim();
+  if (!description) errs.push("Açıklama boş.");
+  const shipmentTemplate = String(b.shipmentTemplate || "").trim();
+  if (!shipmentTemplate) errs.push("Kargo şablonu adı girilmedi (N11 Hesabım > Teslimat Bilgilerim'deki şablon adı).");
+  const preparingDay = parseInt(b.preparingDay, 10);
+  if (!(preparingDay >= 1 && preparingDay <= 30)) errs.push("Hazırlık süresi (gün) 1-30 olmalı.");
+  const images = (Array.isArray(b.images) ? b.images : []).map((u) => String(u || "").trim()).filter(Boolean);
+  if (!images.length) errs.push("En az bir görsel gerekli.");
+  if (images.some((u) => !/^https:\/\//i.test(u))) errs.push("N11 görselleri https:// ile başlamalı.");
+  if (errs.length) return res.status(400).json({ ok: false, error: errs.join(" ") });
+
+  const sku = {
+    title, description, categoryId, currencyType: "TL", productMainId, preparingDay, shipmentTemplate,
+    stockCode, quantity: Math.min(999999, Math.max(0, Math.floor(num(b.quantity)))),
+    images: images.map((url, i) => ({ url, order: i })),
+    attributes: (Array.isArray(b.attributes) ? b.attributes : [])
+      .map((a) => ({ id: parseInt(a.id, 10), valueId: a.valueId ? parseInt(a.valueId, 10) : null, customValue: a.customValue ? String(a.customValue).trim() : null }))
+      .filter((a) => a.id > 0 && (a.valueId || a.customValue)),
+    salePrice, listPrice, vatRate,
+  };
+  const ean = String(b.ean || "").trim();
+  if (/^\d{8,14}$/.test(ean)) sku.barcode = ean;
+  try {
+    const r = await n11NewApi("post", "/ms/product/tasks/product-create", { payload: { integrator: "TicaretPaneli", skus: [sku] } });
+    if (r.data?.status === "REJECT") return res.status(502).json({ ok: false, error: "N11 reddetti: " + (r.data.reasons || []).join(" ") });
+    const taskId = r.data?.id;
+    if (!taskId) return res.status(502).json({ ok: false, error: "N11 görev no dönmedi: " + JSON.stringify(r.data).slice(0, 300) });
+    n11NewBatches.unshift({ taskId, barcode: stockCode, title, time: new Date().toISOString() });
+    n11NewBatches.length = Math.min(n11NewBatches.length, 30);
+    pushLog.push({ time: new Date().toISOString(), barcode: stockCode, name: `N11'e yeni ürün gönderildi: ${title}`, centralStock: sku.quantity, trigger: "yeni ürün", results: { n11: { ok: true, message: "görev " + taskId } } });
+    persistPushLog();
+    res.json({ ok: true, taskId });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: n11NewErr(e) });
+  }
+});
+
+app.get("/api/n11/new/batches", requireAuth, (req, res) => res.json({ ok: true, items: n11NewBatches }));
+
+app.get("/api/n11/new/task", requireAuth, n11NewGuard, async (req, res) => {
+  const id = parseInt(req.query.id, 10);
+  if (!(id > 0)) return res.status(400).json({ ok: false, error: "Geçersiz görev no." });
+  try {
+    const r = await n11NewApi("post", "/ms/product/task-details/page-query", { taskId: id, pageable: { page: 0, size: 50 } });
+    const content = r.data?.skus?.content || [];
+    res.json({
+      ok: true,
+      status: r.data?.skus?.status || r.data?.status || "",
+      items: content.map((i) => ({ barcode: i.itemCode || "", status: i.status || "", reasons: i.reasons || i.sku?.reasons || [] })),
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: n11NewErr(e) });
+  }
+});
+
+// TEŞHİS (salt okunur): Koçtaş/Mirakl ürün veri modelini mevcut API anahtarıyla okur.
+//  /api/diag/koctas-model?q=matkap            → kategori (hierarchy) arama (Mirakl H11)
+//  /api/diag/koctas-model?hierarchy=KOD       → o kategorinin ürün özellikleri (Mirakl PM11) + zorunlular
+//  /api/diag/koctas-model?values=LISTE_KODU   → değer listesi (Mirakl VL11)
+app.get("/api/diag/koctas-model", requireAuth, async (req, res) => {
+  if (!koctasConfigured()) return res.status(400).json({ ok: false, error: "Koçtaş API bilgisi eksik." });
+  const out = { ok: true };
+  const get = (path, params) => axios.get(`https://${koctasHost()}${path}`, { headers: koctasHeaders(), params, timeout: 30000 });
+  try {
+    if (req.query.values) {
+      const r = await get("/api/values_lists", { code: String(req.query.values) });
+      out.values = JSON.stringify(r.data).slice(0, 6000);
+    } else if (req.query.hierarchy) {
+      const r = await get("/api/products/attributes", { hierarchy: String(req.query.hierarchy), max_level: 0 });
+      const list = r.data?.attributes || [];
+      out.count = list.length;
+      out.attributes = list.map((a) => ({ code: a.code, label: a.label, required: a.required, type: a.type, values_list: a.type_parameter || a.values_list || null, variant: a.variant, description: (a.description || "").slice(0, 120) }));
+      out.requiredOnly = out.attributes.filter((a) => a.required).map((a) => a.code + " (" + a.label + ")");
+    } else {
+      const r = await get("/api/hierarchies");
+      const all = r.data?.hierarchies || [];
+      const q = String(req.query.q || "").trim().toLocaleLowerCase("tr");
+      out.total = all.length;
+      out.items = all.filter((h) => !q || (h.label + " " + h.code).toLocaleLowerCase("tr").includes(q)).slice(0, 60).map((h) => ({ code: h.code, label: h.label, level: h.level, parent: h.parent_code }));
+    }
+  } catch (e) {
+    out.ok = false;
+    out.error = e.response?.data ? `HTTP ${e.response.status}: ` + JSON.stringify(e.response.data).slice(0, 500) : e.message;
+  }
+  res.json(out);
+});
+
+/* ------------------------------------------------------------------
+   Koçtaş (Mirakl) YENİ ÜRÜN: P41 ürün aktarımı (CSV dosyası, operator_format=true), P42 durum,
+   P44/P47 hata raporları, PM11 özellikler, VL11 değer listeleri, H11 kategoriler.
+   Sütunlar Koçtaş'ın PM11'de döndürdüğü özellik KODLARI olur. Ürün kataloğa girince fiyat/stok ayrı
+   "teklif" (offer) aktarımıyla gider — bu adım henüz yok.
+------------------------------------------------------------------ */
+async function ktApi(method, path, opts = {}) {
+  return axios({
+    method,
+    url: `https://${koctasHost()}${path}`,
+    headers: { ...koctasHeaders(), ...(opts.headers || {}) },
+    params: { ...koctasShopParams(), ...(opts.params || {}) },
+    data: opts.data,
+    responseType: opts.responseType,
+    timeout: 45000,
+    maxBodyLength: Infinity,
+  });
+}
+function ktErr(err) {
+  if (err.response?.status === 401 || err.response?.status === 403) return "Koçtaş yetki hatası (anahtarda ürün yazma/okuma rolü olmayabilir): " + (err.response?.data ? JSON.stringify(err.response.data).slice(0, 200) : "");
+  return err.response?.data ? `HTTP ${err.response.status}: ` + (typeof err.response.data === "string" ? err.response.data : JSON.stringify(err.response.data)).slice(0, 500) : err.message;
+}
+function ktGuard(req, res, next) {
+  if (!koctasConfigured()) return res.status(400).json({ ok: false, error: "Koçtaş API bilgisi eksik." });
+  next();
+}
+
+let ktCatCache = { at: 0, leaves: [] };
+app.get("/api/kt/new/categories", requireAuth, ktGuard, async (req, res) => {
+  try {
+    if (!ktCatCache.leaves.length || Date.now() - ktCatCache.at > 6 * 3600 * 1000) {
+      const r = await ktApi("get", "/api/hierarchies");
+      const all = r.data?.hierarchies || [];
+      if (!all.length) return res.status(502).json({ ok: false, error: "Koçtaş kategori listesi boş: " + JSON.stringify(r.data).slice(0, 200) });
+      const byCode = new Map(all.map((h) => [h.code, h]));
+      const parents = new Set(all.map((h) => h.parent_code).filter(Boolean));
+      const pathOf = (h) => { const parts = []; let c = h, n = 0; while (c && n++ < 12) { parts.unshift(c.label); c = c.parent_code ? byCode.get(c.parent_code) : null; } return parts.join(" > "); };
+      ktCatCache = { at: Date.now(), leaves: all.filter((h) => !parents.has(h.code)).map((h) => ({ id: h.code, name: h.label, path: pathOf(h) })) };
+    }
+    const q = String(req.query.q || "").trim().toLocaleLowerCase("tr");
+    if (q.length < 2) return res.json({ ok: true, items: [], total: ktCatCache.leaves.length });
+    const words = q.split(/\s+/);
+    res.json({ ok: true, items: ktCatCache.leaves.filter((c) => { const t = (c.path + " " + c.id).toLocaleLowerCase("tr"); return words.every((w) => t.includes(w)); }).slice(0, 40) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: ktErr(e) });
+  }
+});
+
+app.get("/api/kt/new/attributes", requireAuth, ktGuard, async (req, res) => {
+  const h = String(req.query.hierarchy || "").trim();
+  if (!h) return res.status(400).json({ ok: false, error: "hierarchy gerekli." });
+  try {
+    const r = await ktApi("get", "/api/products/attributes", { params: { hierarchy: h, max_level: 0 } });
+    const seen = new Set();
+    const attrs = [];
+    (r.data?.attributes || []).forEach((a) => {
+      if (!a.code || seen.has(a.code)) return;
+      seen.add(a.code);
+      const tp = Array.isArray(a.type_parameters) ? a.type_parameters : [];
+      attrs.push({
+        code: a.code, label: a.label || a.code, required: !!a.required, type: String(a.type || ""), variant: !!a.variant,
+        description: String(a.description || "").slice(0, 200), example: a.example || "",
+        valuesList: (tp.find((p) => /^(code|list|values_list)/i.test(p.name || "")) || {}).value || (/LIST/i.test(a.type || "") ? a.code : ""),
+      });
+    });
+    res.json({ ok: true, attributes: attrs });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: ktErr(e) });
+  }
+});
+
+app.get("/api/kt/new/values", requireAuth, ktGuard, async (req, res) => {
+  const code = String(req.query.code || "").trim();
+  if (!code) return res.status(400).json({ ok: false, error: "code gerekli." });
+  try {
+    const r = await ktApi("get", "/api/values_lists", { params: { code } });
+    const vl = (r.data?.values_lists || [])[0];
+    const vals = (vl?.values || []).slice(0, 1000).map((v) => ({ code: v.code, label: v.label || v.code }));
+    res.json({ ok: true, values: vals });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: ktErr(e) });
+  }
+});
+
+const ktNewBatches = [];
+const csvCell = (v) => { const s = String(v ?? ""); return /[;"\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+
+app.post("/api/kt/new/create", requireAuth, ktGuard, async (req, res) => {
+  const b = req.body || {};
+  const values = b.values && typeof b.values === "object" ? b.values : {};
+  const entries = Object.entries(values).map(([k, v]) => [String(k).trim(), String(v ?? "").trim()]).filter(([k, v]) => k && v && /^[\w.\-:]+$/.test(k));
+  if (!entries.length) return res.status(400).json({ ok: false, error: "Hiç alan doldurulmadı." });
+  const label = String(b.title || entries[0][1]).slice(0, 100);
+  const csv = entries.map(([k]) => csvCell(k)).join(";") + "\r\n" + entries.map(([, v]) => csvCell(v)).join(";") + "\r\n";
+  const boundary = "----tp" + Math.random().toString(16).slice(2);
+  const part = (name, body, extra) => Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"${extra || ""}\r\n\r\n`), Buffer.from(body, "utf8"), Buffer.from("\r\n")]);
+  const body = Buffer.concat([
+    part("file", csv, '; filename="products.csv"\r\nContent-Type: text/csv'),
+    part("operator_format", "true"),
+    Buffer.from(`--${boundary}--\r\n`),
+  ]);
+  try {
+    const r = await ktApi("post", "/api/products/imports", { data: body, headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` } });
+    const importId = r.data?.import_id;
+    if (!importId) return res.status(502).json({ ok: false, error: "Koçtaş import no dönmedi: " + JSON.stringify(r.data).slice(0, 300) });
+    ktNewBatches.unshift({ importId, barcode: String(b.sku || ""), title: label, time: new Date().toISOString() });
+    ktNewBatches.length = Math.min(ktNewBatches.length, 30);
+    pushLog.push({ time: new Date().toISOString(), barcode: String(b.sku || ""), name: `Koçtaş'a yeni ürün gönderildi: ${label}`, centralStock: null, trigger: "yeni ürün", results: { koctas: { ok: true, message: "import " + importId } } });
+    persistPushLog();
+    res.json({ ok: true, importId, csvPreview: csv.slice(0, 600) });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: ktErr(e) });
+  }
+});
+
+app.get("/api/kt/new/batches", requireAuth, (req, res) => res.json({ ok: true, items: ktNewBatches }));
+
+app.get("/api/kt/new/status", requireAuth, ktGuard, async (req, res) => {
+  const id = parseInt(req.query.id, 10);
+  if (!(id > 0)) return res.status(400).json({ ok: false, error: "Geçersiz import no." });
+  try {
+    const r = await ktApi("get", `/api/products/imports/${id}`);
+    const d = r.data || {};
+    const out = { ok: true, status: d.import_status || "", items: [], reasons: [] };
+    if (d.reason_status) out.reasons.push(d.reason_status);
+    out.items.push({ barcode: "Satır", status: `okunan ${d.transform_lines_read ?? "?"}, başarılı ${d.transform_lines_in_success ?? "?"}, hatalı ${d.transform_lines_in_error ?? "?"}`, reasons: [] });
+    const fetchTxt = async (suffix) => { try { const x = await ktApi("get", `/api/products/imports/${id}/${suffix}`, { responseType: "text" }); return String(x.data || "").slice(0, 1500); } catch (_) { return ""; } };
+    if (d.has_transformation_error_report) { const t = await fetchTxt("transformation_error_report"); if (t) out.reasons.push("Kaynak dosya hataları: " + t); }
+    if (d.has_error_report) { const t = await fetchTxt("error_report"); if (t) out.reasons.push("Aktarım hataları: " + t); }
+    if (d.has_new_product_report) { const t = await fetchTxt("new_product_report"); if (t) out.items.push({ barcode: "Eklenen ürünler", status: t.slice(0, 400), reasons: [] }); }
+    out.items[0].reasons = out.reasons;
+    res.json(out);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: ktErr(e) });
+  }
+});
+
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
 // Her platforma, o platform için tanımlı SKU ile gönderilir (skuForPlatform).
 app.post("/api/products/:code/push", requireAuth, async (req, res) => {

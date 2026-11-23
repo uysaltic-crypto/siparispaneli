@@ -191,7 +191,7 @@
         <div class="tab" data-tab="messages" onclick="showTab('messages')">Mesajlar <span class="badge fail" id="msgBadge" style="display:none;"></span></div>
         <div class="tab" data-tab="match" onclick="showTab('match')">Eşleştirme</div>
         <div class="tab" data-tab="recon" onclick="showTab('recon')">Karşılaştır</div>
-        <div class="tab" data-tab="tynew" onclick="showTab('tynew')">Trendyol'a Ürün Aç</div>
+        <div class="tab" data-tab="tynew" onclick="showTab('tynew')">Ürün Aç</div>
         <div class="tab" data-tab="compete" onclick="showTab('compete')">Rekabet</div>
         <div class="tab" data-tab="backup" onclick="showTab('backup')">Yedekleme</div>
         <div class="tab" data-tab="log" onclick="showTab('log')">Senkron Günlüğü</div>
@@ -383,7 +383,15 @@
 
     <!-- TRENDYOL ÜRÜN AÇ -->
     <div class="panel" id="panel-tynew">
-      <p class="muted" style="margin:0 0 10px; max-width:860px;">Panelde kayıtlı bir ürünü seçip Trendyol'da <b>yeni ürün</b> olarak açar. Kategori ve markayı Trendyol'dan arayıp seçersin; kategoriye göre istenen özellikler aşağıda çıkar. Gönderince ürün Trendyol onayına girer — sonucu aşağıdan izleyebilirsin. Görseller https adresli olmalı (Trendyol 1200x1800 ister).</p>
+      <p class="muted" style="margin:0 0 10px; max-width:860px;">Panelde kayıtlı bir ürünü seçip pazaryerlerinde <b>yeni ürün</b> olarak açar. Ortak bilgileri bir kez doldur, gönderilecek platformları işaretle; her platformun kendi kategori/marka/özellik alanı ayrı çıkar. Gönderince ürün platformun onayına girer — sonucu en alttan izleyebilirsin. Görseller https adresli olmalı.</p>
+      <div id="tnPlats" class="toolbar" style="gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap;">
+        <span class="muted">Gönderilecek platformlar:</span>
+        <label style="display:flex; gap:5px; align-items:center;"><input type="checkbox" id="tnP_ty" checked onchange="tnPlat()"> Trendyol</label>
+        <label style="display:flex; gap:5px; align-items:center;"><input type="checkbox" id="tnP_hb" onchange="tnPlat()"> Hepsiburada <span class="muted">(deneysel)</span></label>
+        <label style="display:flex; gap:5px; align-items:center;"><input type="checkbox" id="tnP_n11" onchange="tnPlat()"> N11</label>
+        <label style="display:flex; gap:5px; align-items:center;"><input type="checkbox" id="tnP_cs" onchange="tnPlat()"> Çiçeksepeti <span class="muted">(deneysel)</span></label>
+        <label style="display:flex; gap:5px; align-items:center;"><input type="checkbox" id="tnP_kt" onchange="tnPlat()"> Koçtaş <span class="muted">(deneysel)</span></label>
+      </div>
       <div id="tnMsg" class="warnbox" style="display:none;"></div>
       <div class="stat" style="margin-bottom:12px;">
         <div class="label">PANELDEKİ ÜRÜNDEN DOLDUR</div>
@@ -393,21 +401,23 @@
       <div class="tn-grid">
         <label>Barkod <input id="tnBarcode" class="tn-in"></label>
         <label>Model kodu (productMainId) <input id="tnMain" class="tn-in"></label>
-        <label>Stok kodu <input id="tnStockCode" class="tn-in"></label>
+        <label class="tn-ty">Stok kodu <input id="tnStockCode" class="tn-in"></label>
         <label style="grid-column:1/-1;">Başlık (en çok 100 karakter) <input id="tnTitle" class="tn-in" maxlength="100"></label>
         <label>Stok <input id="tnQty" type="number" min="0" class="tn-in"></label>
         <label>Satış fiyatı (TL) <input id="tnSale" type="number" step="0.01" min="0" class="tn-in"></label>
-        <label>Liste fiyatı (TL, boşsa satışla aynı) <input id="tnList" type="number" step="0.01" min="0" class="tn-in"></label>
+        <label class="tn-ty">Liste fiyatı (TL, boşsa satışla aynı) <input id="tnList" type="number" step="0.01" min="0" class="tn-in"></label>
         <label>Desi <input id="tnDesi" type="number" step="0.01" min="0" class="tn-in"></label>
         <label>KDV % <select id="tnVat"><option>20</option><option>10</option><option>1</option><option>0</option></select></label>
-        <label>Sevkiyat süresi <select id="tnDur"><option value="">Varsayılan</option><option value="0">Bugün kargoda</option><option value="1">En geç yarın kargoda</option></select></label>
-        <label id="tnCargoBox">Kargo firması ID <input id="tnCargo" type="number" class="tn-in"></label>
-        <label>Sevkiyat adresi <select id="tnShip"><option value="">Varsayılan</option></select></label>
-        <label>İade adresi <select id="tnRet"><option value="">Varsayılan</option></select></label>
+        <label class="tn-ty">Sevkiyat süresi <select id="tnDur"><option value="">Varsayılan</option><option value="0">Bugün kargoda</option><option value="1">En geç yarın kargoda</option></select></label>
+        <label class="tn-ty" id="tnCargoBox">Kargo firması ID <input id="tnCargo" type="number" class="tn-in"></label>
+        <label class="tn-ty">Sevkiyat adresi <select id="tnShip"><option value="">Varsayılan</option></select></label>
+        <label class="tn-ty">İade adresi <select id="tnRet"><option value="">Varsayılan</option></select></label>
       </div>
       <div id="tnMetaNote" class="muted" style="font-size:11px; margin:6px 0;"></div>
       <label class="tn-lab">Açıklama <textarea id="tnDesc" class="tn-in" rows="5" style="width:100%;"></textarea></label>
       <label class="tn-lab">Görsel adresleri (her satıra bir https adresi, en çok 8) <textarea id="tnImgs" class="tn-in" rows="3" style="width:100%;"></textarea></label>
+      <div class="tn-ty">
+      <div class="label muted" style="font-size:11px; margin-top:14px;"><b>TRENDYOL</b></div>
       <div class="tn-grid" style="margin-top:10px;">
         <div>
           <div class="label muted" style="font-size:10px;">KATEGORİ</div>
@@ -423,6 +433,63 @@
         </div>
       </div>
       <div id="tnAttrs" style="margin-top:12px;"></div>
+      </div>
+      <div class="tn-kt" style="display:none;">
+        <div class="label muted" style="font-size:11px; margin-top:14px;"><b>KOÇTAŞ</b> <span class="muted">— alanlar Koçtaş'ın kendi ürün şablonundan gelir; kategori seçince listelenir</span></div>
+        <div style="margin-top:10px; max-width:520px;">
+          <div class="label muted" style="font-size:10px;">KATEGORİ</div>
+          <input id="tnKtCatQ" class="tn-in" placeholder="Ara (örn. matkap ucu)…" oninput="tnKtCatSearch(this.value)" style="width:100%;">
+          <div id="tnKtCatList"></div>
+          <div id="tnKtCatSel" style="margin-top:4px; font-size:12px;"></div>
+        </div>
+        <div class="toolbar" style="margin:8px 0;"><button class="ghost small" onclick="tnKtFill(true)">Ortak bilgilerden doldur</button><span class="muted" style="font-size:11px;">Başlık, açıklama, barkod, görsel gibi alanları tahminle doldurur — gönderme öncesi kontrol et.</span></div>
+        <div id="tnKtAttrs"></div>
+      </div>
+      <div class="tn-n11" style="display:none;">
+        <div class="label muted" style="font-size:11px; margin-top:14px;"><b>N11</b></div>
+        <div class="tn-grid" style="margin-top:10px;">
+          <div>
+            <div class="label muted" style="font-size:10px;">KATEGORİ</div>
+            <input id="tnN11CatQ" class="tn-in" placeholder="Ara (örn. matkap ucu)…" oninput="tnN11CatSearch(this.value)" style="width:100%;">
+            <div id="tnN11CatList"></div>
+            <div id="tnN11CatSel" style="margin-top:4px; font-size:12px;"></div>
+          </div>
+          <label>Kargo şablonu adı <span class="muted">(N11 Hesabım &gt; Teslimat Bilgilerim)</span> <input id="tnN11Ship" class="tn-in"></label>
+          <label>Hazırlık süresi (gün) <input id="tnN11Prep" type="number" min="1" max="30" value="3" class="tn-in"></label>
+          <label>Barkod (opsiyonel, sadece ulusal barkod) <input id="tnN11Ean" class="tn-in"></label>
+        </div>
+        <div id="tnN11Attrs" style="margin-top:12px;"></div>
+      </div>
+      <div class="tn-cs" style="display:none;">
+        <div class="label muted" style="font-size:11px; margin-top:14px;"><b>ÇİÇEKSEPETİ</b></div>
+        <div class="tn-grid" style="margin-top:10px;">
+          <div>
+            <div class="label muted" style="font-size:10px;">KATEGORİ</div>
+            <input id="tnCsCatQ" class="tn-in" placeholder="Ara (örn. matkap ucu)…" oninput="tnCsCatSearch(this.value)" style="width:100%;">
+            <div id="tnCsCatList"></div>
+            <div id="tnCsCatSel" style="margin-top:4px; font-size:12px;"></div>
+          </div>
+          <label>Teslimat tipi <select id="tnCsDT"><option value="2">Kargo ile gönderim</option><option value="1">Servis aracı ile</option><option value="3">Kargo + servis aracı</option></select></label>
+          <label>Teslimat aralığı <select id="tnCsDM"><option value="5">Hediye Kargo 1-3 iş günü</option><option value="18">Hediye Kargo 1-2 iş günü</option><option value="4">Hediye Kargo aynı gün</option><option value="13">Hediye Kargo 3-5 iş günü</option><option value="6">Hediye Kargo 1-5 iş günü</option><option value="7">Hediye Kargo 1-7 iş günü</option><option value="19">Hediye Kargo 1-10 iş günü</option><option value="1">Çiçek servis</option></select></label>
+          <label>Barkod (opsiyonel; boşsa stok kodu) <input id="tnCsEan" class="tn-in"></label>
+        </div>
+        <div id="tnCsAttrs" style="margin-top:12px;"></div>
+      </div>
+      <div class="tn-hb" style="display:none;">
+        <div class="label muted" style="font-size:11px; margin-top:14px;"><b>HEPSİBURADA</b></div>
+        <div class="tn-grid" style="margin-top:10px;">
+          <div>
+            <div class="label muted" style="font-size:10px;">KATEGORİ</div>
+            <input id="tnHbCatQ" class="tn-in" placeholder="Ara (örn. matkap ucu)…" oninput="tnHbCatSearch(this.value)" style="width:100%;">
+            <div id="tnHbCatList"></div>
+            <div id="tnHbCatSel" style="margin-top:4px; font-size:12px;"></div>
+          </div>
+          <label>Marka (Hepsiburada'daki yazımıyla) <input id="tnHbBrand" class="tn-in"></label>
+          <label>EAN13 barkod (varsa; boşsa gönderilmez) <input id="tnHbEan" class="tn-in"></label>
+          <label>Garanti süresi (ay) <input id="tnHbWar" type="number" min="0" value="0" class="tn-in"></label>
+        </div>
+        <div id="tnHbAttrs" style="margin-top:12px;"></div>
+      </div>
       <div class="toolbar" style="margin-top:14px; gap:10px; align-items:center;">
         <button id="tnSend" onclick="tnSubmit()">Trendyol'a gönder</button>
         <span class="muted" id="tnSendInfo"></span>
@@ -3292,12 +3359,14 @@ function reconCsv() {
 }
 
 /* ---------- Trendyol ürün aç ---------- */
-const tn = { cat: null, brand: null, attrs: [], metaLoaded: false, timers: {} };
+const tn = { cat: null, brand: null, attrs: [], metaLoaded: false, timers: {}, hbCat: null, hbAttrs: [], csCat: null, csAttrs: [], n11Cat: null, n11Attrs: [], ktCat: null, ktAttrs: [] };
 function tnDebounce(k, fn) { clearTimeout(tn.timers[k]); tn.timers[k] = setTimeout(fn, 350); }
 function tnMsg(t) { const m = document.getElementById('tnMsg'); m.style.display = t ? '' : 'none'; m.textContent = t || ''; }
 async function tnGet(url) { const r = await fetch(url); const d = await r.json().catch(() => ({ ok: false, error: 'Geçersiz yanıt' })); return d; }
 
 function tnInit() {
+  try { const v = localStorage.getItem('tnN11Ship'); if (v && !document.getElementById('tnN11Ship').value) document.getElementById('tnN11Ship').value = v; } catch (e) {}
+  tnPlat();
   if (!tn.metaLoaded) { tn.metaLoaded = true; tnLoadMeta(); }
   tnLoadBatches();
 }
@@ -3410,39 +3479,283 @@ function tnCollect() {
   };
 }
 
+function tnPlat() {
+  const ty = document.getElementById('tnP_ty').checked, hb = document.getElementById('tnP_hb').checked;
+  document.querySelectorAll('.tn-ty').forEach(e => e.style.display = ty ? '' : 'none');
+  document.querySelectorAll('.tn-hb').forEach(e => e.style.display = hb ? '' : 'none');
+  document.querySelectorAll('.tn-kt').forEach(e => e.style.display = document.getElementById('tnP_kt').checked ? '' : 'none');
+  document.querySelectorAll('.tn-n11').forEach(e => e.style.display = document.getElementById('tnP_n11').checked ? '' : 'none');
+  const cs = document.getElementById('tnP_cs').checked;
+  document.querySelectorAll('.tn-cs').forEach(e => e.style.display = cs ? '' : 'none');
+}
+
+function tnHbCatSearch(v) {
+  tnDebounce('hbcat', async () => {
+    const box = document.getElementById('tnHbCatList');
+    if (v.trim().length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted">Aranıyor (ilk seferde kategori listesi indirilir, biraz sürebilir)…</span>';
+    const d = await tnGet('/api/hb/new/categories?q=' + encodeURIComponent(v));
+    if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Hata')}</span>`; return; }
+    window._tnHbCats = d.items;
+    box.innerHTML = d.items.map((c, i) => `<div><button class="ghost small" style="margin:2px 0; text-align:left;" onclick="tnHbPickCat(${i})">${escHtml(c.path)}</button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+  });
+}
+async function tnHbPickCat(i) {
+  const c = window._tnHbCats[i];
+  tn.hbCat = c; tn.hbAttrs = [];
+  document.getElementById('tnHbCatList').innerHTML = '';
+  document.getElementById('tnHbCatSel').innerHTML = `Seçili: <b>${escHtml(c.path)}</b> <span class="muted">(${c.id})</span>`;
+  const box = document.getElementById('tnHbAttrs');
+  box.innerHTML = '<span class="muted">Özellikler getiriliyor…</span>';
+  const d = await tnGet('/api/hb/new/attributes?categoryId=' + c.id);
+  if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Özellikler alınamadı')}</span>`; return; }
+  tn.hbAttrs = d.attributes;
+  const rows = d.attributes.slice().sort((a, b) => (b.required - a.required));
+  box.innerHTML = `<div class="label muted" style="font-size:10px; margin-bottom:6px;">KATEGORİ ÖZELLİKLERİ (* zorunlu)</div><div class="tn-grid">` + rows.map(a => {
+    const isEnum = a.type === 'enum';
+    const f = isEnum
+      ? `<select data-hattr="${escAttr(a.id)}" data-enum="1" class="tn-attr" onfocus="tnHbLoadVals(this)"><option value="">— seç (liste açılınca yüklenir) —</option></select>`
+      : `<input data-hattr="${escAttr(a.id)}" class="tn-in" placeholder="değer yaz">`;
+    return `<label>${escHtml(a.name || a.id)}${a.required ? ' <b style="color:var(--danger)">*</b>' : ''}${isEnum ? ' <span class="muted">(liste)</span>' : ''}${f}</label>`;
+  }).join('') + '</div>';
+}
+async function tnHbLoadVals(sel) {
+  if (sel.dataset.loaded || !tn.hbCat) return;
+  sel.dataset.loaded = '1';
+  const d = await tnGet(`/api/hb/new/attribute-values?categoryId=${tn.hbCat.id}&attributeId=${encodeURIComponent(sel.dataset.hattr)}`);
+  if (!d.ok) { sel.dataset.loaded = ''; toast(d.error || 'Değerler alınamadı'); return; }
+  sel.innerHTML = '<option value="">— seç —</option>' + d.values.map(v => `<option value="${escAttr(v.value)}">${escHtml(v.value)}</option>`).join('');
+}
+
+function tnCsCatSearch(v) {
+  tnDebounce('cscat', async () => {
+    const box = document.getElementById('tnCsCatList');
+    if (v.trim().length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted">Aranıyor…</span>';
+    const d = await tnGet('/api/cs/new/categories?q=' + encodeURIComponent(v));
+    if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Hata')}</span>`; return; }
+    window._tnCsCats = d.items;
+    box.innerHTML = d.items.map((c, i) => `<div><button class="ghost small" style="margin:2px 0; text-align:left;" onclick="tnCsPickCat(${i})">${escHtml(c.path)}</button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+  });
+}
+async function tnCsPickCat(i) {
+  const c = window._tnCsCats[i];
+  tn.csCat = c; tn.csAttrs = [];
+  document.getElementById('tnCsCatList').innerHTML = '';
+  document.getElementById('tnCsCatSel').innerHTML = `Seçili: <b>${escHtml(c.path)}</b> <span class="muted">(${c.id})</span>`;
+  const box = document.getElementById('tnCsAttrs');
+  box.innerHTML = '<span class="muted">Özellikler getiriliyor…</span>';
+  const d = await tnGet('/api/cs/new/attributes?categoryId=' + c.id);
+  if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Özellikler alınamadı')}</span>`; return; }
+  tn.csAttrs = d.attributes;
+  const rows = d.attributes.slice().sort((a, b) => (b.required - a.required));
+  box.innerHTML = `<div class="label muted" style="font-size:10px; margin-bottom:6px;">KATEGORİ ÖZELLİKLERİ (* zorunlu)</div><div class="tn-grid">` + rows.map(a => {
+    const f = a.values.length
+      ? `<select data-cattr="${escAttr(a.id)}" class="tn-attr"><option value="">— seç —</option>${a.values.map(v => `<option value="${escAttr(v.id)}">${escHtml(v.name)}</option>`).join('')}</select>`
+      : '<span class="muted">(değer listesi yok)</span>';
+    return `<label>${escHtml(a.name || a.id)}${a.required ? ' <b style="color:var(--danger)">*</b>' : ''}${a.varianter ? ' <span class="muted">(varyant)</span>' : ''}${f}</label>`;
+  }).join('') + '</div>';
+}
+
+function tnN11CatSearch(v) {
+  tnDebounce('n11cat', async () => {
+    const box = document.getElementById('tnN11CatList');
+    if (v.trim().length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted">Aranıyor (ilk seferde kategori ağacı indirilir)…</span>';
+    const d = await tnGet('/api/n11/new/categories?q=' + encodeURIComponent(v));
+    if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Hata')}</span>`; return; }
+    window._tnN11Cats = d.items;
+    box.innerHTML = d.items.map((c, i) => `<div><button class="ghost small" style="margin:2px 0; text-align:left;" onclick="tnN11PickCat(${i})">${escHtml(c.path)}</button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+  });
+}
+async function tnN11PickCat(i) {
+  const c = window._tnN11Cats[i];
+  tn.n11Cat = c; tn.n11Attrs = [];
+  document.getElementById('tnN11CatList').innerHTML = '';
+  document.getElementById('tnN11CatSel').innerHTML = `Seçili: <b>${escHtml(c.path)}</b> <span class="muted">(${c.id})</span>`;
+  const box = document.getElementById('tnN11Attrs');
+  box.innerHTML = '<span class="muted">Özellikler getiriliyor…</span>';
+  const d = await tnGet('/api/n11/new/attributes?categoryId=' + c.id);
+  if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Özellikler alınamadı')}</span>`; return; }
+  tn.n11Attrs = d.attributes;
+  const rows = d.attributes.slice().sort((a, b) => (b.required - a.required));
+  box.innerHTML = `<div class="label muted" style="font-size:10px; margin-bottom:6px;">KATEGORİ ÖZELLİKLERİ (* zorunlu; Marka dahil)</div><div class="tn-grid">` + rows.map(a => {
+    const sel = a.values.length ? `<select data-nattr="${escAttr(a.id)}" class="tn-attr"><option value="">— seç —</option>${a.values.map(v => `<option value="${escAttr(v.id)}">${escHtml(v.name)}</option>`).join('')}</select>` : '';
+    const cust = (a.custom || !a.values.length) ? `<input data-nattrc="${escAttr(a.id)}" class="tn-in" placeholder="${a.values.length ? 'veya elle yaz' : 'değer yaz'}" style="margin-top:3px; width:100%;">` : '';
+    return `<label>${escHtml(a.name || a.id)}${a.required ? ' <b style="color:var(--danger)">*</b>' : ''}${a.varianter ? ' <span class="muted">(varyant)</span>' : ''}${sel}${cust}</label>`;
+  }).join('') + '</div>';
+}
+
+function tnKtCatSearch(v) {
+  tnDebounce('ktcat', async () => {
+    const box = document.getElementById('tnKtCatList');
+    if (v.trim().length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted">Aranıyor…</span>';
+    const d = await tnGet('/api/kt/new/categories?q=' + encodeURIComponent(v));
+    if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Hata')}</span>`; return; }
+    window._tnKtCats = d.items;
+    box.innerHTML = d.items.map((c, i) => `<div><button class="ghost small" style="margin:2px 0; text-align:left;" onclick="tnKtPickCat(${i})">${escHtml(c.path)}</button></div>`).join('') || '<span class="muted">Bulunamadı.</span>';
+  });
+}
+async function tnKtPickCat(i) {
+  const c = window._tnKtCats[i];
+  tn.ktCat = c; tn.ktAttrs = [];
+  document.getElementById('tnKtCatList').innerHTML = '';
+  document.getElementById('tnKtCatSel').innerHTML = `Seçili: <b>${escHtml(c.path)}</b> <span class="muted">(${escHtml(c.id)})</span>`;
+  const box = document.getElementById('tnKtAttrs');
+  box.innerHTML = '<span class="muted">Şablon alanları getiriliyor…</span>';
+  const d = await tnGet('/api/kt/new/attributes?hierarchy=' + encodeURIComponent(c.id));
+  if (!d.ok) { box.innerHTML = `<span style="color:var(--danger)">${escHtml(d.error || 'Alanlar alınamadı')}</span>`; return; }
+  tn.ktAttrs = d.attributes;
+  const rows = d.attributes.slice().sort((a, b) => (b.required - a.required));
+  box.innerHTML = `<div class="label muted" style="font-size:10px; margin-bottom:6px;">ŞABLON ALANLARI (* zorunlu) — ${rows.length} alan</div><div class="tn-grid">` + rows.map(a => {
+    const f = a.valuesList
+      ? `<select data-kattr="${escAttr(a.code)}" data-vl="${escAttr(a.valuesList)}" class="tn-attr" onfocus="tnKtLoadVals(this)"><option value="">— seç (liste açılınca yüklenir) —</option></select>`
+      : `<input data-kattr="${escAttr(a.code)}" class="tn-in" placeholder="${escAttr(a.example || a.type)}">`;
+    return `<label title="${escAttr(a.description)}">${escHtml(a.label)} <span class="muted">[${escHtml(a.code)}]</span>${a.required ? ' <b style="color:var(--danger)">*</b>' : ''}${f}</label>`;
+  }).join('') + '</div>';
+  tnKtFill(false);
+}
+async function tnKtLoadVals(sel) {
+  if (sel.dataset.loaded) return;
+  sel.dataset.loaded = '1';
+  const d = await tnGet('/api/kt/new/values?code=' + encodeURIComponent(sel.dataset.vl));
+  if (!d.ok) { sel.dataset.loaded = ''; toast(d.error || 'Değerler alınamadı'); return; }
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— seç —</option>' + d.values.map(v => `<option value="${escAttr(v.code)}"${v.code === cur ? ' selected' : ''}>${escHtml(v.label)}</option>`).join('');
+}
+function tnKtFill(force) {
+  const g = id => document.getElementById(id).value.trim();
+  const imgs = g('tnImgs').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  let imgIdx = 0;
+  tn.ktAttrs.forEach(a => {
+    const el = document.querySelector(`[data-kattr="${a.code}"]`);
+    if (!el || el.tagName === 'SELECT' || (el.value && !force)) return;
+    const k = (a.code + ' ' + a.label).toLocaleLowerCase('tr');
+    let v = '';
+    if (/categor|kategori|hierarchy/.test(k) && tn.ktCat) v = tn.ktCat.id;
+    else if (/title|başlık|ürün adı|product.?name|\bname\b/.test(k)) v = g('tnTitle');
+    else if (/descr|açıklama/.test(k)) v = g('tnDesc');
+    else if (/ean|barkod|barcode/.test(k)) v = g('tnBarcode');
+    else if (/shop.?sku|\bsku\b|stok kodu|seller.?sku/.test(k)) v = g('tnBarcode');
+    else if (/image|görsel|resim|picture/.test(k)) v = imgs[imgIdx++] || '';
+    else if (/desi|weight|ağırlık/.test(k)) v = g('tnDesi');
+    if (v) el.value = v;
+  });
+}
+
+async function tnSend(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return r.json().catch(() => ({ ok: false, error: 'Geçersiz yanıt' }));
+}
+
 async function tnSubmit() {
-  const body = tnCollect();
-  const missing = tn.attrs.filter(a => a.required && !body.attributes.some(x => x.attributeId === a.id)).map(a => a.name);
-  if (missing.length) { tnMsg('Zorunlu özellik eksik: ' + missing.join(', ')); return; }
+  const wantTy = document.getElementById('tnP_ty').checked, wantHb = document.getElementById('tnP_hb').checked, wantCs = document.getElementById('tnP_cs').checked, wantN11 = document.getElementById('tnP_n11').checked, wantKt = document.getElementById('tnP_kt').checked;
+  if (!wantTy && !wantHb && !wantCs && !wantN11 && !wantKt) { tnMsg('En az bir platform işaretle.'); return; }
+  const common = tnCollect();
+  const hbCollected = [];
+  document.querySelectorAll('[data-hattr]').forEach(el => { if (el.value.trim()) hbCollected.push({ id: el.dataset.hattr, value: el.value.trim() }); });
+  if (wantTy) {
+    const missing = tn.attrs.filter(a => a.required && !common.attributes.some(x => x.attributeId === a.id)).map(a => a.name);
+    if (missing.length) { tnMsg('Trendyol — zorunlu özellik eksik: ' + missing.join(', ')); return; }
+  }
+  if (wantHb) {
+    const missing = tn.hbAttrs.filter(a => a.required && !hbCollected.some(x => x.id === a.id)).map(a => a.name || a.id);
+    if (missing.length) { tnMsg('Hepsiburada — zorunlu özellik eksik: ' + missing.join(', ')); return; }
+  }
+  const ktValues = {};
+  document.querySelectorAll('[data-kattr]').forEach(el => { if (el.value.trim()) ktValues[el.dataset.kattr] = el.value.trim(); });
+  if (wantKt) {
+    if (!tn.ktCat) { tnMsg('Koçtaş — kategori seçilmedi.'); return; }
+    const missing = tn.ktAttrs.filter(a => a.required && !ktValues[a.code]).map(a => a.label);
+    if (missing.length) { tnMsg('Koçtaş — zorunlu alan eksik: ' + missing.join(', ')); return; }
+  }
+  const n11Collected = [];
+  document.querySelectorAll('[data-nattr]').forEach(el => { const id = el.dataset.nattr; const c = document.querySelector(`[data-nattrc="${id}"]`); if (el.value) n11Collected.push({ id, valueId: el.value }); else if (c && c.value.trim()) n11Collected.push({ id, customValue: c.value.trim() }); });
+  document.querySelectorAll('[data-nattrc]').forEach(c => { const id = c.dataset.nattrc; if (!document.querySelector(`[data-nattr="${id}"]`) && c.value.trim()) n11Collected.push({ id, customValue: c.value.trim() }); });
+  if (wantN11) {
+    const missing = tn.n11Attrs.filter(a => a.required && !n11Collected.some(x => String(x.id) === String(a.id))).map(a => a.name || a.id);
+    if (missing.length) { tnMsg('N11 — zorunlu özellik eksik: ' + missing.join(', ')); return; }
+  }
+  const csCollected = [];
+  document.querySelectorAll('[data-cattr]').forEach(el => { if (el.value) csCollected.push({ id: el.dataset.cattr, valueId: el.value }); });
+  if (wantCs) {
+    const missing = tn.csAttrs.filter(a => a.required && a.values.length && !csCollected.some(x => String(x.id) === String(a.id))).map(a => a.name || a.id);
+    if (missing.length) { tnMsg('Çiçeksepeti — zorunlu özellik eksik: ' + missing.join(', ')); return; }
+  }
   tnMsg('');
-  try { localStorage.setItem('tnCargo', String(body.cargoCompanyId || '')); } catch (e) {}
-  if (!confirm(`"${body.title}" Trendyol'a yeni ürün olarak gönderilecek (barkod ${body.barcode}, ${body.salePrice} TL, stok ${body.quantity}). Devam edilsin mi?`)) return;
+  try { localStorage.setItem('tnCargo', String(common.cargoCompanyId || '')); } catch (e) {}
+  const names = [wantTy && 'Trendyol', wantHb && 'Hepsiburada', wantCs && 'Çiçeksepeti', wantN11 && 'N11', wantKt && 'Koçtaş'].filter(Boolean).join(' + ');
+  if (!confirm(`"${common.title}" ${names} için yeni ürün olarak gönderilecek (barkod ${common.barcode}, ${common.salePrice} TL, stok ${common.quantity}). Devam edilsin mi?`)) return;
   const btn = document.getElementById('tnSend'); btn.disabled = true;
+  const out = [];
   try {
-    const r = await fetch('/api/ty/new/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const d = await r.json();
-    if (!d.ok) { tnMsg('Gönderilemedi: ' + (d.error || '')); return; }
-    document.getElementById('tnSendInfo').textContent = 'Gönderildi. İşlem no: ' + d.batchRequestId;
-    toast('Trendyol\'a gönderildi');
+    if (wantTy) {
+      const d = await tnSend('/api/ty/new/create', common);
+      out.push(d.ok ? `Trendyol: gönderildi (işlem no ${d.batchRequestId})` : 'Trendyol: HATA — ' + (d.error || ''));
+    }
+    if (wantHb) {
+      const d = await tnSend('/api/hb/new/create', {
+        barcode: common.barcode, productMainId: common.productMainId, title: common.title, quantity: common.quantity,
+        salePrice: common.salePrice, dimensionalWeight: common.dimensionalWeight, vatRate: common.vatRate,
+        description: common.description, images: common.images,
+        categoryId: tn.hbCat && tn.hbCat.id, brand: document.getElementById('tnHbBrand').value,
+        ean: document.getElementById('tnHbEan').value, warrantyMonths: document.getElementById('tnHbWar').value,
+        attributes: hbCollected,
+      });
+      out.push(d.ok ? `Hepsiburada: gönderildi (takip no ${d.trackingId})` : 'Hepsiburada: HATA — ' + (d.error || ''));
+    }
+    if (wantKt) {
+      const d = await tnSend('/api/kt/new/create', { values: ktValues, title: common.title, sku: common.barcode });
+      out.push(d.ok ? `Koçtaş: gönderildi (import ${d.importId}) — durumu aşağıdan kontrol et` : 'Koçtaş: HATA — ' + (d.error || ''));
+    }
+    if (wantN11) {
+      const d = await tnSend('/api/n11/new/create', {
+        barcode: common.barcode, productMainId: common.productMainId, title: common.title, quantity: common.quantity,
+        salePrice: common.salePrice, listPrice: common.listPrice, vatRate: common.vatRate, description: common.description, images: common.images,
+        categoryId: tn.n11Cat && tn.n11Cat.id, shipmentTemplate: document.getElementById('tnN11Ship').value, preparingDay: document.getElementById('tnN11Prep').value,
+        ean: document.getElementById('tnN11Ean').value, attributes: n11Collected,
+      });
+      try { localStorage.setItem('tnN11Ship', document.getElementById('tnN11Ship').value); } catch (e) {}
+      out.push(d.ok ? `N11: gönderildi (görev ${d.taskId})` : 'N11: HATA — ' + (d.error || ''));
+    }
+    if (wantCs) {
+      const d = await tnSend('/api/cs/new/create', {
+        barcode: common.barcode, productMainId: common.productMainId, title: common.title, quantity: common.quantity,
+        salePrice: common.salePrice, listPrice: common.listPrice, description: common.description, images: common.images,
+        categoryId: tn.csCat && tn.csCat.id, deliveryType: document.getElementById('tnCsDT').value, deliveryMessageType: document.getElementById('tnCsDM').value,
+        ean: document.getElementById('tnCsEan').value, attributes: csCollected,
+      });
+      out.push(d.ok ? `Çiçeksepeti: gönderildi (batch ${d.batchId}; en geç 24 saatte açılır)` : 'Çiçeksepeti: HATA — ' + (d.error || ''));
+    }
+    document.getElementById('tnSendInfo').innerHTML = out.map(escHtml).join('<br>');
+    toast('Gönderim tamamlandı');
     setTimeout(tnLoadBatches, 1500);
   } catch (e) { tnMsg('Bağlantı hatası'); } finally { btn.disabled = false; }
 }
 
 async function tnLoadBatches() {
-  const d = await tnGet('/api/ty/new/batches');
+  const [a, b, c, n, k] = await Promise.all([tnGet('/api/ty/new/batches'), tnGet('/api/hb/new/batches'), tnGet('/api/cs/new/batches'), tnGet('/api/n11/new/batches'), tnGet('/api/kt/new/batches')]);
+  const all = [
+    ...((a.ok && a.items) || []).map(x => ({ ...x, pf: 'ty', id: x.batchRequestId })),
+    ...((b.ok && b.items) || []).map(x => ({ ...x, pf: 'hb', id: x.trackingId })),
+    ...((c.ok && c.items) || []).map(x => ({ ...x, pf: 'cs', id: x.batchId })),
+    ...((n.ok && n.items) || []).map(x => ({ ...x, pf: 'n11', id: x.taskId })),
+    ...((k.ok && k.items) || []).map(x => ({ ...x, pf: 'kt', id: x.importId })),
+  ].sort((x, y) => (y.time || '').localeCompare(x.time || ''));
   const box = document.getElementById('tnBatches');
-  if (!d.ok || !d.items.length) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="label muted" style="font-size:10px; margin-bottom:6px;">SON GÖNDERİMLER</div>' + d.items.map(b => `<div class="stat" style="margin-bottom:6px;">
-    <b>${escHtml(b.title)}</b> <span class="muted">${escHtml(b.barcode)} · ${new Date(b.time).toLocaleString('tr-TR')}</span>
-    <button class="ghost small" style="margin-left:8px;" onclick="tnCheckBatch('${escAttr(b.batchRequestId)}', this)">Durumu kontrol et</button>
+  if (!all.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="label muted" style="font-size:10px; margin-bottom:6px;">SON GÖNDERİMLER</div>' + all.map(x => `<div class="stat" style="margin-bottom:6px;">
+    <span class="badge ${x.pf === 'ty' ? 'ok' : 'unverified'}">${{ ty: 'Trendyol', hb: 'Hepsiburada', cs: 'Çiçeksepeti', n11: 'N11', kt: 'Koçtaş' }[x.pf]}</span> <b>${escHtml(x.title)}</b> <span class="muted">${escHtml(x.barcode)} · ${new Date(x.time).toLocaleString('tr-TR')}</span>
+    <button class="ghost small" style="margin-left:8px;" onclick="tnCheckBatch('${x.pf}','${escAttr(x.id)}', this)">Durumu kontrol et</button>
     <div class="tn-res muted" style="margin-top:4px; font-size:12px;"></div></div>`).join('');
 }
-async function tnCheckBatch(id, btn) {
+async function tnCheckBatch(pf, id, btn) {
   const out = btn.parentElement.querySelector('.tn-res');
   out.textContent = 'Kontrol ediliyor…';
-  const d = await tnGet('/api/ty/new/batch?id=' + encodeURIComponent(id));
+  const d = await tnGet(({ ty: '/api/ty/new/batch?id=', hb: '/api/hb/new/status?id=', cs: '/api/cs/new/batch?id=', n11: '/api/n11/new/task?id=', kt: '/api/kt/new/status?id=' }[pf]) + encodeURIComponent(id));
   if (!d.ok) { out.textContent = d.error || 'Hata'; return; }
-  out.innerHTML = `Durum: <b>${escHtml(d.status)}</b>` + (d.items || []).map(i => `<div>${escHtml(i.barcode)}: ${escHtml(i.status)}${i.reasons && i.reasons.length ? ' — <span style="color:var(--danger)">' + escHtml(i.reasons.map(x => typeof x === 'string' ? x : (x.message || JSON.stringify(x))).join('; ')) + '</span>' : ''}</div>`).join('');
+  out.innerHTML = (d.status ? `Durum: <b>${escHtml(d.status)}</b>` : '') + (d.items || []).map(i => `<div>${escHtml(i.barcode)}: ${escHtml(i.status)}${i.reasons && i.reasons.length ? ' — <span style="color:var(--danger)">' + escHtml(i.reasons.map(x => typeof x === 'string' ? x : (x.message || JSON.stringify(x))).join('; ')) + '</span>' : ''}</div>`).join('') || ('<div>Henüz sonuç yok.' + (d.raw ? ' <span class="muted">' + escHtml(d.raw) + '</span>' : '') + '</div>');
 }
 
 checkAuth();
