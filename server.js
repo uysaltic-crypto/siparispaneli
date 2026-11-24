@@ -1393,6 +1393,7 @@ async function fetchStockCiceksepeti() {
   let fetchedCount = 0; // filtreden ÖNCE çekilen ürün sayısı (döngünün bitişini bununla takip ediyoruz)
   let firstSkippedItem = null; // filtreye takılan ilk ürün (teşhis için tüm alanları gösterilir)
   let firstBodyKeys = null;
+  const allCsCodes = new Set();
   while (fetchedCount < totalCount && page < 200) {
     try {
       if (page > 1) await sleep(5200); // "5 saniyede 1 farklı istek" sınırına takılmamak için
@@ -1409,6 +1410,7 @@ async function fetchStockCiceksepeti() {
         const siteCode = csFindSiteCode(it);
         const productCode = siteCode || mainCode;
         if (!barcode) return;
+        allCsCodes.add(barcode);
         // Önek stok kodunda ya da ürün kodunda değilse, ürünün diğer düz metin alanlarına
         // (barkod, model kodu, satıcı kodu vb.) da bakılır — hangi alanın "kcm" ile başladığını bilmiyoruz.
         const otherValues = Object.values(it).filter((v) => typeof v === "string" || typeof v === "number");
@@ -1441,6 +1443,7 @@ async function fetchStockCiceksepeti() {
       return { platform: "cs", error: msg, rows };
     }
   }
+  if (allCsCodes.size) csKnownCodes = allCsCodes;
   // 0 ürünle bitti: sebebini kullanıcıya açıkça söyle (sessizce "0 ürün" dönme).
   if (!rows.length) {
     if (fetchedCount > 0) {
@@ -1477,12 +1480,15 @@ async function fetchStockCiceksepeti() {
 // açılmaz otomatik olarak toplu gönderilir.
 const CS_STOCK_RATE_LIMIT_MS = 10 * 60 * 1000 + 5000; // 10 dk + küçük güvenlik payı
 let csFlushTimer = null;
+// Son başarılı Çiçeksepeti ürün listesindeki TÜM stok kodları (önek filtresinden önce). Toplu gönderimde listede
+// olmayan kodlar (ör. başka platformun kodu) tüm isteği 404'e düşürdüğü için gönderimden önce ayıklanır.
+let csKnownCodes = new Set();
 
 async function csFlushStockQueue() {
   csFlushTimer = null;
   if (!csStockQueue.size) return { ok: true, message: "Kuyruk boş" };
   // Kuyruk değeri eski sürümde sadece sayıydı; yeni sürümde { qty, price }.
-  const items = Array.from(csStockQueue.entries()).map(([stockCode, v]) => {
+  let items = Array.from(csStockQueue.entries()).map(([stockCode, v]) => {
     const qty = typeof v === "object" && v !== null ? v.qty : v;
     const price = typeof v === "object" && v !== null ? v.price : undefined;
     const item = { stockCode, stockQuantity: qty };
@@ -1496,8 +1502,20 @@ async function csFlushStockQueue() {
   csLastPushAt = Date.now();
   persistCsQueue();
   persistCsLastPush();
+  // Çiçeksepeti'nde kayıtlı olmayan kodlar (bilinen liste varsa) toplu isteği 404'e düşürür — ayıkla.
+  const skipped = [];
+  if (csKnownCodes.size) {
+    const keep = [];
+    items.forEach((i) => (csKnownCodes.has(i.stockCode) ? keep : skipped).push(i));
+    items = keep;
+  }
   let ok = true;
-  let message = "Gönderildi";
+  let message = skipped.length ? `Gönderildi (${skipped.length} kod Çiçeksepeti'nde kayıtlı olmadığı için atlandı: ${skipped.slice(0, 5).map((i) => i.stockCode).join(", ")})` : "Gönderildi";
+  if (!items.length) {
+    pushLog.push({ time: new Date().toISOString(), barcode: skipped.map((i) => i.stockCode).join(", "), name: `Çiçeksepeti toplu gönderim: ${skipped.length} kodun hiçbiri Çiçeksepeti'nde kayıtlı değil`, centralStock: null, trigger: "cs-toplu", results: { cs: { ok: false, message: "Kayıtlı olmayan kodlar atlandı" } } });
+    persistPushLog();
+    return { ok: false, message: "Gönderilen kodların hiçbiri Çiçeksepeti'nde kayıtlı değil.", skipped: skipped.map((i) => i.stockCode) };
+  }
   try {
     await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
   } catch (err) {
@@ -1510,10 +1528,31 @@ async function csFlushStockQueue() {
     name: `${items.length} ürün (Çiçeksepeti toplu gönderim)`,
     centralStock: null,
     trigger: "cs-toplu",
-    results: { cs: ok ? { ok: true } : { ok: false, message } },
+    results: { cs: ok ? { ok: true, message: skipped.length ? message : undefined } : { ok: false, message } },
   });
   persistPushLog();
-  return { ok, message };
+  return { ok, message, skipped: skipped.map((i) => i.stockCode) };
+}
+
+// Birden çok ürünü tek seferde kuyruğa atar; pencere açıksa HEMEN tek istekle gönderir, değilse
+// kalan süre sonunda toplu gönderilir (tek tek göndermek ilk ürünü gönderip kalanı 10 dk bekletir).
+async function pushManyToCiceksepeti(items) {
+  if (!csConfigured()) return { ok: false, flushed: false, message: "Çiçeksepeti API bilgisi eksik." };
+  items.forEach(({ sku, qty, price }) => {
+    const prev = csStockQueue.get(String(sku));
+    const prevPrice = typeof prev === "object" && prev !== null ? prev.price : undefined;
+    const pr = Number(price) > 0 ? Math.round(Number(price) * 100) / 100 : prevPrice;
+    csStockQueue.set(String(sku), { qty: Math.max(0, Math.floor(Number(qty) || 0)), price: pr });
+  });
+  persistCsQueue();
+  const elapsed = Date.now() - csLastPushAt;
+  if (elapsed >= CS_STOCK_RATE_LIMIT_MS) {
+    const r = await csFlushStockQueue();
+    return { ...r, flushed: true };
+  }
+  const remainingMin = Math.max(1, Math.ceil((CS_STOCK_RATE_LIMIT_MS - elapsed) / 60000));
+  csScheduleFlush(CS_STOCK_RATE_LIMIT_MS - elapsed);
+  return { ok: true, flushed: false, waitMin: remainingMin, message: `Çiçeksepeti hız sınırı nedeniyle kuyruğa alındı — en geç ${remainingMin} dk içinde toplu gönderilecek` };
 }
 
 function csScheduleFlush(delayMs) {
@@ -4704,7 +4743,27 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     const okSkus = new Set();
     const batchIds = [];
     const n11Tasks = [];
-    for (let i = 0; i < list.length; i++) {
+    let csFlushed = true;
+    let csNote = "";
+    if (platform === "cs") {
+      const items = list.map((sk) => {
+        const it = bySku.get(sk);
+        if (type === "stock") return { sku: sk, qty: Number(products[resolveRoot(it.code)]?.centralStock) || 0 };
+        const row = job.rows.find((r) => String(r.barcode || "").trim() === sk);
+        return { sku: sk, qty: Number(row?.stock) || 0, price: Number(products[it.code]?.prices?.cs) || 0 };
+      });
+      const r = await pushManyToCiceksepeti(items);
+      csFlushed = !!r.flushed;
+      const skip = new Set(r.skipped || []);
+      list.forEach((sk) => {
+        if (skip.has(sk)) z.failed.push({ sku: sk, message: "Çiçeksepeti'nde kayıtlı değil (atlandı)" });
+        else if (!r.ok) z.failed.push({ sku: sk, message: String(r.message || "hata").slice(0, 160) });
+        else okSkus.add(sk);
+      });
+      z.done = list.length;
+      if (!r.flushed && r.ok) csNote = `Çiçeksepeti stoğu 10 dakikada bir toplu kabul ediyor: ${list.length} ürün kuyruğa alındı, en geç ${r.waitMin} dk içinde gönderilecek. Gönderildikten sonra Karşılaştır'ı tekrar çalıştır.`;
+    }
+    for (let i = 0; platform !== "cs" && i < list.length; i++) {
       if (i > 0) await sleepMs(delay);
       const it = bySku.get(list[i]);
       const row = job.rows.find((r) => String(r.barcode || "").trim() === list[i]);
@@ -4733,9 +4792,10 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     // Trendyol/N11 stok-fiyat isteklerini kabul edip ARKA PLANDA işler; "gönderildi" ≠ "güncellendi".
     // Bu yüzden biraz bekleyip (1) Trendyol toplu işlem sonuçlarını okuyor, (2) listeyi platformdan
     // yeniden çekip gerçekten eşitlenip eşitlenmediğini doğruluyoruz.
-    z.phase = "verifying";
-    await sleepMs(["ty", "n11"].includes(platform) ? 45000 : 10000);
     z.notes = [];
+    if (csNote) z.notes.push(csNote);
+    z.phase = "verifying";
+    if (!(platform === "cs" && !csFlushed)) await sleepMs(["ty", "n11"].includes(platform) ? 45000 : 10000);
     const stCount = {};
     if (platform === "ty" && batchIds.length) {
       for (const bid of [...new Set(batchIds)].slice(0, 100)) {
@@ -4776,7 +4836,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     }
     if (platform === "ty") z.notes.push("Trendyol'da işlem SUCCESS ise stok gönderilmiştir; platform listesi birkaç saat gecikmeli güncellenebildiği için 'hâlâ farklı' görünebilir — bir süre sonra Karşılaştır'ı tekrar çalıştır.");
     try {
-      const fresh = await pl.fetchStock();
+      const fresh = platform === "cs" && !csFlushed ? { error: "Çiçeksepeti toplu gönderimi henüz yapılmadı (kuyrukta); doğrulama sonra." } : await pl.fetchStock();
       if (!fresh.error && !fresh.truncated && fresh.rows?.length) {
         job.rows = fresh.rows;
         job.report = reconBuild(platform, fresh.rows);
