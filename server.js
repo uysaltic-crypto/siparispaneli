@@ -4843,7 +4843,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
         const key = type === "stock" ? "stockDiff" : "priceDiff";
         const still = new Map(job.report[key].items.map((x) => [x.sku, x]));
         z.still = list.filter((sk) => still.has(sk)).map((sk) => ({ sku: sk, panel: still.get(sk).panel, platform: still.get(sk).platform }));
-      } else z.verifyError = fresh.error || "Platform listesi yeniden çekilemedi.";
+      } else z.verifyError = /Limit a/i.test(String(fresh.error || "")) ? "Çiçeksepeti ürün listesini 10 dakikada 1 kez veriyor — doğrulama için 10 dk sonra Karşılaştır'ı çalıştır." : fresh.error || "Platform listesi yeniden çekilemedi.";
     } catch (e) { z.verifyError = String(e.message || e).slice(0, 160); }
     pushLog.push({ time: new Date().toISOString(), barcode: "(karşılaştırma)", name: `${pl.name}: ${okSkus.size}/${list.length} ürün — ${label}` + (z.still ? ` (doğrulama: ${z.still.length} ürün hâlâ farklı)` : ""), centralStock: null, trigger: "karşılaştırma", results: { [platform]: z.failed.length || (z.still && z.still.length) ? { ok: false, message: `${z.failed.length} hata, ${(z.still || []).length} hâlâ farklı` } : { ok: true } } });
     persistPushLog();
@@ -5042,7 +5042,7 @@ app.get("/api/ty/new/batch", requireAuth, tyNewGuard, async (req, res) => {
 
 
 // TEŞHİS: tek bir ürüne stok gönderir ve platformun ham yanıtını + işlem sonucunu gösterir.
-// Tarayıcıdan (giriş yapmışken): /api/diag/push-test?platform=ty|n11|hb&sku=BARKOD&qty=3
+// Tarayıcıdan (giriş yapmışken): /api/diag/push-test?platform=ty|n11|hb|cs&sku=BARKOD&qty=3
 app.get("/api/diag/push-test", requireAuth, async (req, res) => {
   const pid = req.query.platform, sku = String(req.query.sku || "").trim(), qty = Math.max(0, parseInt(req.query.qty, 10) || 0);
   const pl = PLATFORMS.find((p) => p.id === pid);
@@ -5075,6 +5075,23 @@ app.get("/api/diag/push-test", requireAuth, async (req, res) => {
         await sleepMs(15000);
         const tr = await axios.post("https://api.n11.com/ms/product/task-details/page-query", { taskId: tid, pageable: { page: 0, size: 50 } }, { headers: H, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
         out.steps.push({ step: `işlem detayı (${(i + 1) * 15} sn)`, data: tr.data });
+      }
+    } else if (pid === "cs") {
+      // DİKKAT: kuyruğu ve 10 dk sınırını atlayıp doğrudan tek ürün gönderir (sınır penceresini tüketir).
+      const raw = (e) => ({ status: e.response?.status, statusText: e.response?.statusText, data: e.response?.data ?? null, message: e.message });
+      const g = await axios.get(`https://${csHost()}/api/v1/Products`, { headers: csHeaders(), params: { StockCode: sku, Page: 1, PageSize: 5 }, timeout: 20000 }).catch((e) => ({ data: { hata: raw(e) } }));
+      const found = (g.data?.products || g.data?.Products || []).filter((x) => String(x.stockCode || x.StockCode) === sku).map((x) => ({ stockCode: x.stockCode || x.StockCode, productName: x.productName || x.ProductName, stockQuantity: x.stockQuantity ?? x.StockQuantity, salesPrice: x.salesPrice ?? x.SalesPrice, productStatus: x.productStatusType || x.productStatus || x.ProductStatusType, isActive: x.isActive, keys: Object.keys(x).slice(0, 40).join(",") }));
+      out.steps.push({ step: "Çiçeksepeti'deki kayıt (StockCode filtresiyle)", data: found.length ? found : (g.data?.hata || { not_found_in_filtered_result: true, totalCount: g.data?.totalCount ?? g.data?.TotalCount }) });
+      const body = { items: [{ stockCode: sku, stockQuantity: qty }] };
+      const tryReq = async (label, method, url) => {
+        try {
+          const r = await axios({ method, url: `https://${csHost()}${url}`, data: body, headers: csHeaders(), timeout: 20000 });
+          out.steps.push({ step: label, status: r.status, data: r.data });
+          return true;
+        } catch (e) { out.steps.push({ step: label, ...raw(e) }); return false; }
+      };
+      if (!(await tryReq("POST /api/v1/products/stock-price (mevcut kullanılan)", "post", "/api/v1/products/stock-price"))) {
+        await tryReq("PUT /api/v1/Products/price-and-stock (alternatif)", "put", "/api/v1/Products/price-and-stock");
       }
     } else if (pid === "hb") {
       const a = hbAuthConfig();
