@@ -4982,7 +4982,7 @@ app.get("/api/ty/new/batch", requireAuth, tyNewGuard, async (req, res) => {
 
 
 // TEŞHİS: tek bir ürüne stok gönderir ve platformun ham yanıtını + işlem sonucunu gösterir.
-// Tarayıcıdan (giriş yapmışken): /api/diag/push-test?platform=ty&sku=BARKOD&qty=3
+// Tarayıcıdan (giriş yapmışken): /api/diag/push-test?platform=ty|n11|hb&sku=BARKOD&qty=3
 app.get("/api/diag/push-test", requireAuth, async (req, res) => {
   const pid = req.query.platform, sku = String(req.query.sku || "").trim(), qty = Math.max(0, parseInt(req.query.qty, 10) || 0);
   const pl = PLATFORMS.find((p) => p.id === pid);
@@ -5016,6 +5016,21 @@ app.get("/api/diag/push-test", requireAuth, async (req, res) => {
         const tr = await axios.post("https://api.n11.com/ms/product/task-details/page-query", { taskId: tid, pageable: { page: 0, size: 50 } }, { headers: H, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
         out.steps.push({ step: `işlem detayı (${(i + 1) * 15} sn)`, data: tr.data });
       }
+    } else if (pid === "hb") {
+      const a = hbAuthConfig();
+      const host = process.env.HB_ENV === "test" ? "listing-external-sit.hepsiburada.com" : "listing-external.hepsiburada.com";
+      const mid = process.env.HB_MERCHANT_ID;
+      const hdr = { Accept: "application/json", "User-Agent": a.userAgent };
+      const r = await axios.post(`https://${host}/listings/merchantid/${mid}/stock-uploads`, [{ merchantSku: sku, availableStock: qty }], { auth: a.auth, headers: { ...hdr, "Content-Type": "application/json" }, timeout: 20000 });
+      out.steps.push({ step: "gönderim yanıtı", data: r.data });
+      const uid = r.data?.id || r.data?.Id;
+      for (let i = 0; i < 4 && uid; i++) {
+        await sleepMs(15000);
+        const sr = await axios.get(`https://${host}/listings/merchantid/${mid}/stock-uploads/id/${uid}`, { auth: a.auth, headers: hdr, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
+        out.steps.push({ step: `yükleme durumu (${(i + 1) * 15} sn)`, data: sr.data });
+      }
+      const lr = await axios.get(`https://${host}/listings/merchantid/${mid}`, { auth: a.auth, headers: hdr, params: { offset: 0, limit: 10, merchantSku: sku }, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
+      out.steps.push({ step: "ilan kaydı (merchantSku filtresiyle; filtre desteklenmeyebilir)", data: JSON.stringify(lr.data).slice(0, 700) });
     } else out.steps.push({ step: "bu platform için teşhis yok" });
   } catch (e) {
     out.error = e.response?.data ? JSON.stringify(e.response.data).slice(0, 600) : e.message;
