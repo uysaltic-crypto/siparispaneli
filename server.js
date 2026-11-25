@@ -5115,8 +5115,32 @@ app.get("/api/diag/push-test", requireAuth, async (req, res) => {
         const sr = await axios.get(`https://${host}/listings/merchantid/${mid}/stock-uploads/id/${uid}`, { auth: a.auth, headers: hdr, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
         out.steps.push({ step: `yükleme durumu (${(i + 1) * 15} sn)`, data: sr.data });
       }
-      const lr = await axios.get(`https://${host}/listings/merchantid/${mid}`, { auth: a.auth, headers: hdr, params: { offset: 0, limit: 10, merchantSku: sku }, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
-      out.steps.push({ step: "ilan kaydı (merchantSku filtresiyle; filtre desteklenmeyebilir)", data: JSON.stringify(lr.data).slice(0, 700) });
+      // Filtre desteklenmediği için tüm listeyi tarayıp bu koda ait ilanı bul.
+      let hit = null; let scanned = 0; const similar = [];
+      for (let off = 0; off < 5000 && !hit; off += 200) {
+        const lr = await axios.get(`https://${host}/listings/merchantid/${mid}`, { auth: a.auth, headers: hdr, params: { offset: off, limit: 200 }, timeout: 25000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
+        const items = lr.data?.listings || lr.data?.Listings || [];
+        if (!items.length) break;
+        scanned += items.length;
+        for (const it of items) {
+          const m = String(it.merchantSku || it.MerchantSku || "");
+          if (m === sku) { hit = it; break; }
+          if (m.trim().toUpperCase() === sku.toUpperCase() && similar.length < 3) similar.push({ merchantSku: JSON.stringify(m), hepsiburadaSku: it.hepsiburadaSku });
+        }
+        if (items.length < 200) break;
+      }
+      out.steps.push({ step: `ilan taraması (${scanned} ilan tarandı)`, data: hit ? { bulundu: true, merchantSku: JSON.stringify(hit.merchantSku), hepsiburadaSku: hit.hepsiburadaSku, listingId: hit.listingId, availableStock: hit.availableStock, price: hit.price, isSalable: hit.isSalable, isSuspended: hit.isSuspended, isLocked: hit.isLocked, isFrozen: hit.isFrozen, freezeReasons: hit.freezeReasons, deactivationReasons: hit.deactivationReasons, lockReasons: hit.lockReasons } : { bulundu: false, benzerKodlar: similar } });
+      const hsku = hit?.hepsiburadaSku;
+      if (hsku) {
+        const r2 = await axios.post(`https://${host}/listings/merchantid/${mid}/stock-uploads`, [{ hepsiburadaSku: hsku, availableStock: qty }], { auth: a.auth, headers: { ...hdr, "Content-Type": "application/json" }, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
+        out.steps.push({ step: "hepsiburadaSku ile gönderim yanıtı (" + hsku + ")", data: r2.data });
+        const uid2 = r2.data?.id || r2.data?.Id;
+        for (let i = 0; i < 2 && uid2; i++) {
+          await sleepMs(15000);
+          const sr2 = await axios.get(`https://${host}/listings/merchantid/${mid}/stock-uploads/id/${uid2}`, { auth: a.auth, headers: hdr, timeout: 20000 }).catch((e) => ({ data: { error: e.response?.data || e.message } }));
+          out.steps.push({ step: `hepsiburadaSku yükleme durumu (${(i + 1) * 15} sn)`, data: sr2.data });
+        }
+      }
     } else out.steps.push({ step: "bu platform için teşhis yok" });
   } catch (e) {
     out.error = e.response?.data ? JSON.stringify(e.response.data).slice(0, 600) : e.message;
