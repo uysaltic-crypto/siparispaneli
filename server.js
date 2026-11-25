@@ -1518,7 +1518,10 @@ async function csFlushStockQueue() {
     return { ok: false, message: "Gönderilen kodların hiçbiri Çiçeksepeti'nde kayıtlı değil.", skipped: skipped.map((i) => i.stockCode) };
   }
   try {
-    await axios.post(`https://${csHost()}/api/v1/products/stock-price`, { items }, { headers: csHeaders(), timeout: 15000 });
+    // Doğrulandı (teşhis 25.11): POST /products/stock-price 404 verir; PUT /Products/price-and-stock 200 + batchId döner.
+    const r = await axios.put(`https://${csHost()}/api/v1/Products/price-and-stock`, { items }, { headers: csHeaders(), timeout: 20000 });
+    const bid = r.data?.batchId || r.data?.BatchId;
+    if (bid) message = `Gönderildi (işlem no: ${bid})`;
   } catch (err) {
     ok = false;
     message = err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message;
