@@ -420,6 +420,11 @@ function pickHbCargo(pkg) {
 
 // Mevcut stok/ürün listesini Hepsiburada'dan çekme (best-effort — resmi dokümandan
 // tam doğrulanamadı, uç nokta yapısı push tarafıyla aynı host/desen üzerinden tahmin edildi).
+// Hepsiburada'da bazı ilanların satıcı kodunun başında/sonunda görünmez karakter (TAB, boşluk) var.
+// Panel kodu temizleyip tutuyor; gönderirken Hepsiburada ham kodu istiyor → temiz kod → ham kod eşlemesi.
+const hbRawSku = new Map();
+const hbSendSku = (code) => hbRawSku.get(String(code).trim()) ?? String(code);
+
 async function fetchStockHepsiburada() {
   if (!hbConfigured()) return { platform: "hb", error: "Hepsiburada API bilgileri .env dosyasında eksik.", rows: [] };
   const { HB_MERCHANT_ID, HB_ENV } = process.env;
@@ -441,8 +446,10 @@ async function fetchStockHepsiburada() {
       const items = resp.data?.listings || resp.data?.Listings || resp.data?.items || (Array.isArray(resp.data) ? resp.data : []);
       if (!items.length) { hbDone = true; break; }
       items.forEach((it) => {
-        const barcode = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "").trim();
+        const rawSku = String(it.MerchantSku || it.merchantSku || it.Sku || it.sku || "");
+        const barcode = rawSku.trim();
         if (!barcode) return;
+        if (rawSku !== barcode) hbRawSku.set(barcode, rawSku); else hbRawSku.delete(barcode);
         const price = Number(it.Price ?? it.price ?? it.SalePrice ?? it.salePrice ?? 0) || undefined;
         rows.push({
           barcode,
@@ -546,9 +553,9 @@ async function pushStockToHepsiburada(barcode, quantity) {
   const qty = Math.max(0, Math.floor(Number(quantity) || 0));
   const xml =
     `<?xml version="1.0" encoding="utf-8"?>` +
-    `<listings><listing><MerchantSku>${escapeXml(barcode)}</MerchantSku>` +
+    `<listings><listing><MerchantSku>${escapeXml(hbSendSku(barcode))}</MerchantSku>` +
     `<AvailableStock>${qty}</AvailableStock></listing></listings>`;
-  const json = [{ merchantSku: String(barcode), availableStock: qty }];
+  const json = [{ merchantSku: hbSendSku(barcode), availableStock: qty }];
   return hbUpload(url, hbAuth, json, xml, "Gönderildi");
 }
 
@@ -1845,8 +1852,8 @@ async function pushPriceToHepsiburada(barcode, price) {
   const pr = (Math.round(Number(price) * 100) / 100).toFixed(2).replace(".", ",");
   const xml =
     `<?xml version="1.0" encoding="utf-8"?>` +
-    `<listings><listing><MerchantSku>${escapeXml(barcode)}</MerchantSku><Price>${pr}</Price></listing></listings>`;
-  const json = [{ merchantSku: String(barcode), price: Math.round(Number(price) * 100) / 100 }];
+    `<listings><listing><MerchantSku>${escapeXml(hbSendSku(barcode))}</MerchantSku><Price>${pr}</Price></listing></listings>`;
+  const json = [{ merchantSku: hbSendSku(barcode), price: Math.round(Number(price) * 100) / 100 }];
   return hbUpload(url, hbAuth, json, xml, "Fiyat gönderildi");
 }
 
