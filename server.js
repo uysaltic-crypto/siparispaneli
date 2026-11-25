@@ -1499,6 +1499,7 @@ async function csFlushStockQueue() {
     return item;
   });
   csStockQueue = new Map();
+  const csPrevPushAt = csLastPushAt;
   csLastPushAt = Date.now();
   persistCsQueue();
   persistCsLastPush();
@@ -1521,6 +1522,11 @@ async function csFlushStockQueue() {
   } catch (err) {
     ok = false;
     message = err.response?.data ? JSON.stringify(err.response.data).slice(0, 250) : err.message;
+    if (err.response?.status === 404) {
+      message += " [404: uç bulunamadı ya da stok kodu tanınmadı — /api/diag/push-test?platform=cs&sku=KOD&qty=N ile teşhis et]";
+      csLastPushAt = csPrevPushAt;
+      persistCsLastPush();
+    }
   }
   pushLog.push({
     time: new Date().toISOString(),
@@ -4795,7 +4801,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     z.notes = [];
     if (csNote) z.notes.push(csNote);
     z.phase = "verifying";
-    if (!(platform === "cs" && !csFlushed)) await sleepMs(["ty", "n11"].includes(platform) ? 45000 : 10000);
+    if (platform !== "cs") await sleepMs(["ty", "n11"].includes(platform) ? 45000 : 10000);
     const stCount = {};
     if (platform === "ty" && batchIds.length) {
       for (const bid of [...new Set(batchIds)].slice(0, 100)) {
@@ -4836,7 +4842,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
     }
     if (platform === "ty") z.notes.push("Trendyol'da işlem SUCCESS ise stok gönderilmiştir; platform listesi birkaç saat gecikmeli güncellenebildiği için 'hâlâ farklı' görünebilir — bir süre sonra Karşılaştır'ı tekrar çalıştır.");
     try {
-      const fresh = platform === "cs" && !csFlushed ? { error: "Çiçeksepeti toplu gönderimi henüz yapılmadı (kuyrukta); doğrulama sonra." } : await pl.fetchStock();
+      const fresh = platform === "cs" ? { error: csFlushed ? "Çiçeksepeti ürün listesi 10 dakikada 1 kez çekilebildiği için otomatik doğrulama yapılmadı — 10 dk sonra Karşılaştır'ı çalıştırıp farkı kontrol et." : "Çiçeksepeti toplu gönderimi henüz yapılmadı (kuyrukta); gönderildikten ve 10 dk sonra Karşılaştır'ı çalıştır." } : await pl.fetchStock();
       if (!fresh.error && !fresh.truncated && fresh.rows?.length) {
         job.rows = fresh.rows;
         job.report = reconBuild(platform, fresh.rows);
