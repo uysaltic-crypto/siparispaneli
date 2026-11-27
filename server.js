@@ -1544,7 +1544,7 @@ async function csFlushStockQueue() {
     name: `${items.length} ürün (Çiçeksepeti toplu gönderim)`,
     centralStock: null,
     trigger: "cs-toplu",
-    results: { cs: ok ? { ok: true, message: skipped.length ? message : undefined } : { ok: false, message } },
+    results: { cs: ok ? { ok: true, message: skipped.length ? message : undefined } : { ok: false, message, failedSkus: items.map((i) => i.stockCode), kind: "stock" } },
   });
   persistPushLog();
   return { ok, message, skipped: skipped.map((i) => i.stockCode) };
@@ -4861,7 +4861,7 @@ app.post("/api/reconcile/fix", requireAuth, (req, res) => {
         z.still = list.filter((sk) => still.has(sk)).map((sk) => ({ sku: sk, panel: still.get(sk).panel, platform: still.get(sk).platform }));
       } else z.verifyError = /Limit a/i.test(String(fresh.error || "")) ? "Çiçeksepeti ürün listesini 10 dakikada 1 kez veriyor — doğrulama için 10 dk sonra Karşılaştır'ı çalıştır." : fresh.error || "Platform listesi yeniden çekilemedi.";
     } catch (e) { z.verifyError = String(e.message || e).slice(0, 160); }
-    pushLog.push({ time: new Date().toISOString(), barcode: "(karşılaştırma)", name: `${pl.name}: ${okSkus.size}/${list.length} ürün — ${label}` + (z.still ? ` (doğrulama: ${z.still.length} ürün hâlâ farklı)` : ""), centralStock: null, trigger: "karşılaştırma", results: { [platform]: z.failed.length || (z.still && z.still.length) ? { ok: false, message: `${z.failed.length} hata, ${(z.still || []).length} hâlâ farklı` } : { ok: true } } });
+    pushLog.push({ time: new Date().toISOString(), barcode: "(karşılaştırma)", name: `${pl.name}: ${okSkus.size}/${list.length} ürün — ${label}` + (z.still ? ` (doğrulama: ${z.still.length} ürün hâlâ farklı)` : ""), centralStock: null, trigger: "karşılaştırma", results: { [platform]: z.failed.length || (z.still && z.still.length) ? { ok: false, message: `${z.failed.length} hata, ${(z.still || []).length} hâlâ farklı`, failedSkus: [...new Set([...z.failed.map((f) => f.sku), ...(z.still || []).map((x) => x.sku)])].filter(Boolean), kind: type } : { ok: true } } });
     persistPushLog();
     z.phase = "done";
     z.running = false;
@@ -5788,6 +5788,77 @@ app.get("/api/kt/new/status", requireAuth, ktGuard, async (req, res) => {
   }
 });
 
+// ---- Otomatik gece karşılaştırması: platformları çekip STOK farklarını panel stoğuna göre yeniden gönderir ----
+// Fiyat farkları otomatik GÖNDERİLMEZ (yanlış fiyat riski) — onlar Karşılaştır sekmesinden elle yönetilir.
+const AUTO_RECON = String(process.env.AUTO_RECON || "true").toLowerCase() !== "false";
+const AUTO_RECON_HOUR = Number(process.env.AUTO_RECON_HOUR ?? 3); // İstanbul saati
+const AUTO_RECON_MAX = 300; // platform başına bir gecede gönderilecek en çok ürün
+const AUTO_RECON_PLATFORMS = ["hb", "ty", "n11", "cs"]; // Koçtaş: ürün başı 61 sn bekleme gerektiğinden dışarıda
+const autoRecon = { running: false, lastRun: null, lastDay: "", results: [] };
+
+async function autoReconcileRun(trigger = "otomatik") {
+  if (autoRecon.running) return { ok: false, error: "Zaten çalışıyor." };
+  autoRecon.running = true;
+  autoRecon.results = [];
+  try {
+    for (const pid of AUTO_RECON_PLATFORMS) {
+      const pl = PLATFORMS.find((p) => p.id === pid);
+      const res = { platform: pid, name: pl?.name || pid, status: "", diff: 0, sent: 0, failed: 0 };
+      autoRecon.results.push(res);
+      try {
+        if (!pl || !pl.fetchStock || !pl.configured()) { res.status = "atlandı (yapılandırılmamış)"; continue; }
+        if (reconJobs[pid]?.status === "running" || reconZeroJobs[pid]?.running) { res.status = "atlandı (elle işlem sürüyor)"; continue; }
+        const fr = await pl.fetchStock();
+        if (fr.error || fr.truncated || !Array.isArray(fr.rows) || !fr.rows.length) { res.status = "atlandı (liste çekilemedi: " + String(fr.error || fr.warning || "boş").slice(0, 120) + ")"; continue; }
+        const rep = reconBuild(pid, fr.rows);
+        const diffs = rep.stockDiff.items;
+        res.diff = rep.stockDiff.total;
+        if (!diffs.length) { res.status = "fark yok"; continue; }
+        // Güvenlik: eşleşenlerin çoğu farklıysa (ör. panel verisi boş/bozuk) toplu gönderme.
+        if (rep.matched > 20 && res.diff > rep.matched * 0.6) { res.status = `durduruldu: eşleşen ${rep.matched} üründen ${res.diff}'i farklı — şüpheli, elle kontrol et`; continue; }
+        const list = diffs.slice(0, AUTO_RECON_MAX);
+        const failed = [];
+        const failedSkus = [];
+        if (pid === "cs") {
+          const r = await pushManyToCiceksepeti(list.map((d) => ({ sku: d.sku, qty: Number(products[resolveRoot(d.code)]?.centralStock) || 0 })));
+          if (r.ok) res.sent = list.length - (r.skipped || []).length; else { res.failed = list.length; failed.push(String(r.message || "hata").slice(0, 120)); list.forEach((d) => failedSkus.push(d.sku)); }
+          res.status = r.ok ? (r.flushed ? "gönderildi" : `kuyruğa alındı (en geç ${r.waitMin} dk)`) : "hata";
+        } else {
+          for (let i = 0; i < list.length; i++) {
+            if (i > 0) await sleepMs(400);
+            const d = list[i];
+            try {
+              const central = Number(products[resolveRoot(d.code)]?.centralStock) || 0;
+              const r = await pl.pushStock(d.sku, central);
+              if (r && r.ok) { res.sent++; if (products[d.code]) products[d.code].stocks[pid] = central; }
+              else { res.failed++; failedSkus.push(d.sku); if (failed.length < 3) failed.push(`${d.sku}: ${String((r && r.message) || "hata").slice(0, 80)}`); }
+            } catch (e) { res.failed++; failedSkus.push(d.sku); if (failed.length < 3) failed.push(`${d.sku}: ${String(e.message || e).slice(0, 80)}`); }
+          }
+          persistProducts();
+          res.status = "gönderildi";
+        }
+        if (res.diff > list.length) res.status += ` (ilk ${list.length}/${res.diff})`;
+        pushLog.push({ time: new Date().toISOString(), barcode: "(otomatik karşılaştırma)", name: `${pl.name}: otomatik stok düzeltme — ${res.sent}/${list.length} ürün gönderildi${res.failed ? `, ${res.failed} hata` : ""}`, centralStock: null, trigger: "otomatik-karşılaştırma", results: { [pid]: res.failed ? { ok: false, message: failed.join(" | "), failedSkus, kind: "stock" } : { ok: true } } });
+        persistPushLog();
+      } catch (e) {
+        res.status = "hata: " + String(e.message || e).slice(0, 150);
+      }
+    }
+  } finally {
+    autoRecon.running = false;
+    autoRecon.lastRun = new Date().toISOString();
+    console.log("Otomatik karşılaştırma bitti:", JSON.stringify(autoRecon.results));
+  }
+  return { ok: true, results: autoRecon.results };
+}
+
+app.get("/api/auto-reconcile/status", requireAuth, (req, res) => res.json({ ok: true, enabled: AUTO_RECON, hour: AUTO_RECON_HOUR, ...autoRecon }));
+app.post("/api/auto-reconcile/run", requireAuth, (req, res) => {
+  if (autoRecon.running) return res.status(409).json({ ok: false, error: "Zaten çalışıyor." });
+  res.json({ ok: true, started: true });
+  autoReconcileRun("elle").catch((e) => console.error("Otomatik karşılaştırma hatası:", e.message));
+});
+
 // Bir ürünün merkezi stoğunu elle tüm yapılandırılmış platformlara anında gönder.
 // Her platforma, o platform için tanımlı SKU ile gönderilir (skuForPlatform).
 app.post("/api/products/:code/push", requireAuth, async (req, res) => {
@@ -6186,6 +6257,69 @@ app.post("/api/prices/bulk/undo", requireAuth, (req, res) => {
   let pushStarted = false;
   if (req.body?.push) pushStarted = startBulkPush(restored.filter((r) => r.new > 0), "geri alma");
   res.json({ ok: true, restored: restored.length, skipped: total - restored.length, pushStarted });
+});
+
+// Senkron günlüğündeki hatalı bir kaydı, o platform için yeniden gönderir.
+// Kayıtta failedSkus varsa yalnız onlar; yoksa kayıt tek bir ürüne aitse (barcode = ürün kodu) o ürünün stok+fiyatı.
+app.post("/api/push-log/retry", requireAuth, async (req, res) => {
+  const { time, platform } = req.body || {};
+  const entry = pushLog.find((e) => e.time === time);
+  const pl = PLATFORMS.find((p) => p.id === platform);
+  const r0 = entry?.results?.[platform];
+  if (!entry || !pl || !r0) return res.status(404).json({ ok: false, error: "Kayıt bulunamadı." });
+  if (r0.ok) return res.json({ ok: true, message: "Bu kayıt zaten başarılı." });
+  if (!pl.configured()) return res.status(400).json({ ok: false, error: `${pl.name} API bilgileri eksik.` });
+  const failed = [];
+  let sent = 0, queuedNote = "";
+  try {
+    let skus = Array.isArray(r0.failedSkus) && r0.failedSkus.length ? r0.failedSkus : null;
+    if (skus) {
+      if (r0.kind && r0.kind !== "stock") return res.status(400).json({ ok: false, error: "Bu kayıt fiyat gönderimine ait — Karşılaştır sekmesinden fiyat farkını yeniden gönder." });
+      skus = skus.slice(0, 200);
+      const idx = buildSkuIndex()[platform];
+      const items = [];
+      skus.forEach((sku) => {
+        const code = idx?.get(String(sku).trim());
+        if (!code || !products[code]) failed.push({ sku, message: "panelde bu koda bağlı ürün yok" });
+        else items.push({ sku, code, qty: Number(products[resolveRoot(code)]?.centralStock) || 0 });
+      });
+      if (platform === "cs" && items.length) {
+        const r = await pushManyToCiceksepeti(items.map((i) => ({ sku: i.sku, qty: i.qty })));
+        if (!r.ok) items.forEach((i) => failed.push({ sku: i.sku, message: String(r.message || "hata").slice(0, 120) }));
+        else { sent = items.length - (r.skipped || []).length; (r.skipped || []).forEach((sk) => failed.push({ sku: sk, message: "Çiçeksepeti'nde kayıtlı değil" })); if (!r.flushed) queuedNote = ` (Çiçeksepeti 10 dk kuralı: en geç ${r.waitMin} dk içinde gönderilecek)`; }
+      } else {
+        for (let i = 0; i < items.length; i++) {
+          if (i > 0) await sleepMs(400);
+          try {
+            const r = await pl.pushStock(items[i].sku, items[i].qty);
+            if (r && r.ok) { sent++; if (products[items[i].code]) products[items[i].code].stocks[platform] = items[i].qty; }
+            else failed.push({ sku: items[i].sku, message: String((r && r.message) || "hata").slice(0, 120) });
+          } catch (e) { failed.push({ sku: items[i].sku, message: String(e.message || e).slice(0, 120) }); }
+        }
+        persistProducts();
+      }
+    } else if (products[entry.barcode]) {
+      const code = entry.barcode;
+      if (!isListedOn(code, platform)) failed.push({ sku: code, message: `Ürün ${pl.name}'da kayıtlı değil` });
+      else {
+        const qty = Number(products[resolveRoot(code)]?.centralStock) || 0;
+        const price = products[code].prices?.[platform];
+        const r = await pushListingToPlatform(platform, skuForPlatform(code, platform), qty, price);
+        if (r && r.ok) sent = 1; else failed.push({ sku: code, message: String((r && r.message) || "hata").slice(0, 120) });
+      }
+    } else if (platform === "cs" && /,/.test(String(entry.barcode))) {
+      return res.status(400).json({ ok: false, error: "Bu eski kayıttan hangi ürünlerin hatalı olduğu bilinmiyor — Karşılaştır sekmesinden yeniden gönder." });
+    } else {
+      return res.status(400).json({ ok: false, error: "Bu eski kayıttan hangi ürünlerin hatalı olduğu bilinmiyor — Karşılaştır sekmesinden farkları yeniden gönder." });
+    }
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e).slice(0, 200) });
+  }
+  if (!failed.length) entry.results[platform] = { ok: true, message: `Tekrar gönderildi (${sent} ürün)${queuedNote}` };
+  else entry.results[platform] = { ...r0, message: `Tekrar denendi: ${sent} başarılı, ${failed.length} hatalı — ` + failed.slice(0, 3).map((f) => `${f.sku}: ${f.message}`).join(" | "), failedSkus: failed.map((f) => f.sku), kind: r0.kind || "stock" };
+  entry.retriedAt = new Date().toISOString();
+  persistPushLog();
+  res.json({ ok: true, sent, failed: failed.length, message: entry.results[platform].message });
 });
 
 app.get("/api/push-log", requireAuth, (req, res) => {
@@ -7115,6 +7249,18 @@ app.listen(PORT, () => {
   setInterval(() => {
     repriceAll().catch((e) => console.error("Rekabet kontrolü hatası:", e.message));
   }, Math.max(REPRICE_HOURS, 1) * 60 * 60 * 1000);
+
+  // Gece otomatik karşılaştırma: her gün İstanbul saatiyle AUTO_RECON_HOUR'da bir kez (AUTO_RECON=false ile kapanır).
+  if (AUTO_RECON) {
+    setInterval(() => {
+      const ist = new Date().toLocaleString("sv-SE", { timeZone: "Europe/Istanbul" }); // "YYYY-MM-DD HH:MM:SS"
+      const day = ist.slice(0, 10), hour = Number(ist.slice(11, 13));
+      if (hour === AUTO_RECON_HOUR && autoRecon.lastDay !== day && !autoRecon.running) {
+        autoRecon.lastDay = day;
+        autoReconcileRun("otomatik").catch((e) => console.error("Otomatik karşılaştırma hatası:", e.message));
+      }
+    }, 5 * 60 * 1000);
+  }
 
   // Google Drive yedeklemesi (varsayılan: günde bir). Yapılandırma eksikse sessizce atlanır.
   // Kurulumun doğru çalıştığını hemen görebilmek için 2 dakika sonra bir deneme yedeklemesi de yapılır.

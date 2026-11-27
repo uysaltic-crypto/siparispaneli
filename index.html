@@ -128,6 +128,8 @@
   #loginBox p.err { color:var(--danger); font-size:12px; }
   .empty { text-align:center; color:#4B5563; padding:40px 0; }
   .fetchedAt { font-size:10px; color:var(--muted); font-family:monospace; }
+  .btn-mini { font-size:11px; padding:3px 8px; border-radius:6px; cursor:pointer; background:var(--surface2); border:1px solid var(--border); color:var(--text); }
+  .btn-mini:disabled { opacity:.6; cursor:default; }
   .tn-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; }
   .tn-grid label, .tn-lab { display:block; font-size:11px; color:var(--muted); }
   .tn-lab { margin-top:10px; }
@@ -376,7 +378,10 @@
         <select id="reconPlat" onchange="reconLoad()"></select>
         <button id="reconRun" onclick="reconStart()">Karşılaştır</button>
         <span class="muted" id="reconInfo"></span>
+        <span style="flex:1"></span>
+        <button id="autoReconBtn" onclick="autoReconRun()" title="Dört platformda (Hepsiburada, Trendyol, N11, Çiçeksepeti) stok farklarını bulup panel stoğuna göre gönderir. Fiyatlara dokunmaz. Her gece 03:00'te de otomatik çalışır.">Otomatik düzeltmeyi şimdi çalıştır</button>
       </div>
+      <div class="muted" id="autoReconInfo" style="margin-top:6px; font-size:12px;"></div>
       <div id="reconWarn" class="warnbox" style="display:none; margin-top:10px;"></div>
       <div id="reconBody" style="margin-top:12px;"></div>
     </div>
@@ -563,7 +568,7 @@ function showTab(name) {
   if (name === 'backup') { loadBackupStatus(); loadBackupList(); }
   if (name === 'invoice') loadInvoices();
   if (name === 'tynew') tnInit();
-  if (name === 'recon') { reconInitSelect(); reconPoll(true); }
+  if (name === 'recon') { reconInitSelect(); reconPoll(true); autoReconStatus(); }
 }
 
 let matchActivePlatform = null;
@@ -2476,9 +2481,20 @@ function renderLog() {
       <div style="text-align:right;">
         <div>${badges}</div>
         <div class="muted">${fmtDate(new Date(entry.time).getTime())}</div>
+        ${Object.entries(entry.results || {}).filter(([,res]) => !res.ok).map(([id]) => `<button class="btn-mini" style="margin-top:4px;" onclick="retryLog('${entry.time}','${id}',this)">↻ ${platformMeta(id).name} tekrar gönder</button>`).join(' ')}
       </div>`;
     box.appendChild(div);
   });
+}
+
+async function retryLog(time, pid, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Gönderiliyor…'; }
+  try {
+    const r = await fetch('/api/push-log/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ time, platform: pid }) });
+    const j = await r.json().catch(() => ({}));
+    toast(j.ok ? (j.message || 'Tekrar gönderildi.') : (j.error || 'Tekrar gönderilemedi.'));
+  } catch (e) { toast('Bağlantı hatası: ' + e.message); }
+  await loadLog();
 }
 
 /* --- Google Drive yedekleme --- */
@@ -3158,6 +3174,31 @@ let reconTimer = null;
 let reconCur = { report: null, tab: 'onlyPlatform', q: '', sel: new Set() };
 
 function reconPid() { return document.getElementById('reconPlat').value; }
+
+async function autoReconStatus() {
+  try {
+    const r = await fetch('/api/auto-reconcile/status');
+    if (!r.ok) return null;
+    const j = await r.json();
+    const box = document.getElementById('autoReconInfo');
+    const btn = document.getElementById('autoReconBtn');
+    if (btn) btn.disabled = !!j.running;
+    if (box) {
+      const last = j.lastRun ? 'Son çalışma: ' + fmtDate(new Date(j.lastRun).getTime()) + ' — ' + (j.results || []).map(x => `${x.name}: ${x.status}${x.diff ? ` (${x.sent}/${x.diff} gönderildi${x.failed ? ', ' + x.failed + ' hata' : ''})` : ''}`).join(' · ') : 'Henüz çalışmadı.';
+      box.textContent = (j.running ? 'Şu an çalışıyor… ' : '') + (j.enabled ? `Her gece ${String(j.hour).padStart(2, '0')}:00'te otomatik çalışır. ` : 'Gece otomatik çalışma kapalı. ') + last;
+    }
+    return j;
+  } catch (e) { return null; }
+}
+async function autoReconRun() {
+  if (!confirm('Dört platformda (Hepsiburada, Trendyol, N11, Çiçeksepeti) stok farkları panel stoğuna göre gönderilecek. Fiyatlara dokunulmaz. Birkaç dakika sürebilir. Devam edilsin mi?')) return;
+  const r = await fetch('/api/auto-reconcile/run', { method: 'POST' });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) { toast(j.error || 'Başlatılamadı.'); return; }
+  toast('Otomatik düzeltme başladı — sonuç bu satırda ve Senkron Günlüğü\'nde görünür.');
+  const t = setInterval(async () => { const s = await autoReconStatus(); if (!s || !s.running) { clearInterval(t); if (typeof loadLog === 'function') loadLog(); } }, 5000);
+  autoReconStatus();
+}
 
 function reconInitSelect() {
   const sel = document.getElementById('reconPlat');
